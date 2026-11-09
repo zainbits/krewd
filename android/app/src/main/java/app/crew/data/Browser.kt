@@ -9,7 +9,18 @@ import java.net.HttpURLConnection
 import org.json.JSONObject
 
 /** A tab of the agents' browser. [sessionId] is the task whose agent last used it, if any. */
-data class BrowserTab(val id: String, val title: String, val url: String, val sessionId: String? = null) {
+/**
+ * A tab of the agents' browser. [sessionId]: the chat whose agent last drove it. [agentActive]: that agent
+ * is working now, so the phone only watches (view only). [vertical]: the owner's phone-sized layout for it.
+ */
+data class BrowserTab(
+    val id: String,
+    val title: String,
+    val url: String,
+    val sessionId: String? = null,
+    val agentActive: Boolean = false,
+    val vertical: Boolean = false,
+) {
     val host: String get() = url.substringAfter("://").substringBefore('/').removePrefix("www.")
 }
 
@@ -35,7 +46,10 @@ fun CrewApi.browserTabs(): BrowserTabs {
         available = o.optBoolean("available"),
         reason = o.optStringOrNull("reason"),
         tabs = o.optJSONArray("tabs").objects().map {
-            BrowserTab(it.optString("id"), it.optString("title"), it.optString("url"), it.optStringOrNull("session_id"))
+            BrowserTab(
+                it.optString("id"), it.optString("title"), it.optString("url"), it.optStringOrNull("session_id"),
+                agentActive = it.optBoolean("agent_active"), vertical = it.optString("view") == "vertical",
+            )
         },
     )
 }

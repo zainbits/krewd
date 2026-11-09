@@ -100,7 +100,6 @@ data class UiState(
     val pipTabs: Map<String, String> = emptyMap(),
     /** "session:tab" pairs whose picture-in-picture the owner closed. */
     val pipHidden: Set<String> = emptySet(),
-    val vertical: Boolean = false,
     val highQuality: Boolean = false,
     val restarting: Boolean = false,
     val confirmStop: String? = null,
@@ -136,7 +135,7 @@ class CrewViewModel(private val app: Application) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val prefs = Prefs(app)
     private val notifier = Notifier(app)
-    private val _state = MutableStateFlow(UiState(settings = prefs.load(), vertical = prefs.vertical(), highQuality = prefs.highQuality()))
+    private val _state = MutableStateFlow(UiState(settings = prefs.load(), highQuality = prefs.highQuality()))
     val state: StateFlow<UiState> = _state.asStateFlow()
 
     @Volatile private var api: CrewApi? = null
@@ -242,6 +241,7 @@ class CrewViewModel(private val app: Application) {
                 pushLive()
             }
             "turn_start" -> {
+                if (_state.value.navTab == NavTab.BROWSER) refreshTabs()
                 live[sid]?.let { it.activity = "Starting"; it.since = System.currentTimeMillis() }
                 lastError.remove(sid)
                 pushLive()
@@ -257,7 +257,7 @@ class CrewViewModel(private val app: Application) {
                 val next = if (event.payload.optString("role") == "thought") "Thinking" else "Writing the reply"
                 if (it.activity != next && !it.waiting) { it.activity = next; pushLive() }
             }
-            "browser" -> live[sid]?.let {
+            "browser" -> live[sid].also { if (_state.value.navTab == NavTab.BROWSER) refreshTabs() }?.let {
                 val host = event.payload.optString("url").substringAfter("://").substringBefore('/').removePrefix("www.")
                 it.activity = "Browsing $host"
                 pushLive()
@@ -276,8 +276,9 @@ class CrewViewModel(private val app: Application) {
                 }
                 if (approval.pending && !viewing(sid)) notifier.approval(sid, titleOf(sid), engineName(sid), approval.title)
             }
-            "turn_end" -> if (!viewing(sid)) {
-                when (event.payload.optString("stop_reason")) {
+            "turn_end" -> {
+                if (_state.value.navTab == NavTab.BROWSER) refreshTabs()
+                if (!viewing(sid)) when (event.payload.optString("stop_reason")) {
                     "cancelled" -> {}
                     "error" -> notifier.error(sid, titleOf(sid), lastError[sid] ?: "The task stopped unexpectedly")
                     else -> notifier.finished(sid, titleOf(sid), event.payload.optString("preview").ifBlank { "Finished" })
@@ -724,9 +725,36 @@ class CrewViewModel(private val app: Application) {
         setTabs(client.browserTabs())
     }
 
-    fun setVertical(on: Boolean) {
-        prefs.setVertical(on)
-        _state.update { it.copy(vertical = on) }
+    /** The size of the live view on the phone (CSS pixels and scale), for laying a tab out vertically. */
+    @Volatile var viewBox: Triple<Int, Int, Float>? = null
+
+    /**
+     * Vertical (laid out for the phone) or horizontal (the normal 1080p window), per tab. The server keeps
+     * it, and drops vertical when an agent uses the tab, so coming back never undoes the agent's layout.
+     */
+    fun setTabVertical(tabId: String, on: Boolean) {
+        val box = viewBox
+        if (on && box == null) return
+        markTab(tabId) { it.copy(vertical = on) }
+        act { client ->
+            try {
+                if (on) client.setTabView(tabId, true, box!!.first, box.second, box.third) else client.setTabView(tabId, false, 0, 0, 0f)
+            } catch (e: ApiException) {
+                markTab(tabId) { it.copy(vertical = false) }
+                throw e
+            }
+        }
+    }
+
+    private fun markTab(tabId: String, change: (BrowserTab) -> BrowserTab) = _state.update { s ->
+        val b = s.browser ?: return@update s
+        s.copy(browser = b.copy(tabs = b.tabs.map { if (it.id == tabId) change(it) else it }))
+    }
+
+    /** Opens the chat of the agent using a tab (from the view-only bar). */
+    fun openChatOf(sessionId: String) {
+        navigate(NavTab.TASKS)
+        openSession(sessionId)
     }
 
     /** Standard (30 fps) or high quality live view; the stream restarts with the new setting. */

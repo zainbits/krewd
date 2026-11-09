@@ -52,10 +52,6 @@ class Prefs(context: Context) {
 
     fun setLastEngine(id: String) = prefs.edit().putString("last_engine", id).apply()
 
-    fun vertical(): Boolean = prefs.getBoolean("browser_vertical", false)
-
-    fun setVertical(on: Boolean) = prefs.edit().putBoolean("browser_vertical", on).apply()
-
     /** High quality live view: 60 fps and sharper frames, at about three times the data. Off: 30 fps. */
     fun highQuality(): Boolean = prefs.getBoolean("browser_high_quality", false)
 

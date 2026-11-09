@@ -314,8 +314,16 @@ async def test_tabs_reach_the_agent_and_browser_activity_links_the_session(hub):
     seen = await wait_for(hub, sid, "browser")
     assert seen["url"] == "https://example.com/g"
     assert (await hub.get_session(sid))["browser_tab"]["id"] == "T1"
+    assert hub.tab_busy("T1") == sid  # view only on the phone while this turn runs
+    app = create_app(hub, TOKEN, lifespan_hub=False)
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        for path, body in (("input", {"type": "key", "key": "Enter"}), ("view", {"mode": "vertical", "width": 400, "height": 800, "scale": 2})):
+            assert (await client.post(f"/api/browser/tabs/T1/{path}", json=body, headers=headers)).status_code == 409
+        assert (await client.delete("/api/browser/tabs/T1", headers=headers)).status_code == 409
     await hub.cancel(sid)
     await wait_for(hub, sid, "turn_end")
+    assert hub.tab_busy("T1") is None
     assert await hub.browser_activity({"id": "T2", "url": "https://x", "title": "x"}) is None
 
 

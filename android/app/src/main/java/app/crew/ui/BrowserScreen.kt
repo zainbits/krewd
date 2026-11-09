@@ -106,6 +106,7 @@ import app.crew.constants.LiquidNavDimensions
 import app.crew.constants.ShellDimensions
 import app.crew.data.BrowserFrame
 import app.crew.data.BrowserTab
+import app.crew.data.SessionInfo
 import kotlin.math.abs
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -186,7 +187,8 @@ fun BrowserScreen(state: UiState, viewModel: CrewViewModel, landscape: Boolean) 
             landscape = landscape,
             editing = editingUrl,
             onEditing = { editingUrl = it },
-            vertical = state.vertical,
+            vertical = tab?.vertical == true,
+            viewOnly = tab?.agentActive == true,
             highQuality = state.highQuality,
             cursor = cursor,
             onNav = { action -> send("type" to "navigate", "action" to action) },
@@ -195,7 +197,7 @@ fun BrowserScreen(state: UiState, viewModel: CrewViewModel, landscape: Boolean) 
                 tab?.let { clipboard.setText(AnnotatedString(it.url)) }
                 viewModel.toast("URL copied")
             },
-            onVertical = viewModel::setVertical,
+            onVertical = { on -> tab?.let { viewModel.setTabVertical(it.id, on) } },
             onHighQuality = viewModel::setHighQuality,
             onCursor = {
                 cursor = it
@@ -218,14 +220,18 @@ fun BrowserScreen(state: UiState, viewModel: CrewViewModel, landscape: Boolean) 
                 else -> LiveView(
                     tab = tab,
                     viewModel = viewModel,
-                    vertical = state.vertical,
+                    vertical = tab.vertical,
                     cursor = cursor,
+                    agentChat = tab.sessionId?.takeIf { tab.agentActive }?.let { id -> state.sessions.firstOrNull { it.id == id } },
+                    onOpenChat = viewModel::openChatOf,
                     streamError = state.streamError,
                     onEditable = { editable, _ -> if (editable) keyboard = true },
                 )
             }
         }
-        if (keyboard && tab != null) {
+        // An agent starting on the tab ends typing: the tab is view only while it works.
+        LaunchedEffect(tab?.agentActive) { if (tab?.agentActive == true) keyboard = false }
+        if (keyboard && tab != null && !tab.agentActive) {
             DirectKeyboard(
                 onKey = { key, mods -> send("type" to "key", "key" to key, "modifiers" to JSONArray(mods)) },
                 onText = { send("type" to "text", "text" to it) },
@@ -511,6 +517,7 @@ private fun ControlsRow(
     editing: Boolean,
     onEditing: (Boolean) -> Unit,
     vertical: Boolean,
+    viewOnly: Boolean,
     highQuality: Boolean,
     cursor: Boolean,
     onNav: (String) -> Unit,
@@ -531,35 +538,36 @@ private fun ControlsRow(
         if (landscape) TabCount(tabCount, onAll)
         SmallPill {
             Row {
-                IconButton(onClick = { onNav("back") }, modifier = Modifier.size(SMALL_PILL)) { Icon(painterResource(R.drawable.ic_chevron_left_24), contentDescription = "Back") }
-                IconButton(onClick = { onNav("forward") }, modifier = Modifier.size(SMALL_PILL)) { Icon(painterResource(R.drawable.ic_chevron_right_24), contentDescription = "Forward") }
-                IconButton(onClick = { onNav("reload") }, modifier = Modifier.size(SMALL_PILL)) { Icon(painterResource(R.drawable.ic_refresh_24), contentDescription = "Reload", modifier = Modifier.size(20.dp)) }
+                IconButton(onClick = { onNav("back") }, enabled = !viewOnly, modifier = Modifier.size(SMALL_PILL)) { Icon(painterResource(R.drawable.ic_chevron_left_24), contentDescription = "Back") }
+                IconButton(onClick = { onNav("forward") }, enabled = !viewOnly, modifier = Modifier.size(SMALL_PILL)) { Icon(painterResource(R.drawable.ic_chevron_right_24), contentDescription = "Forward") }
+                IconButton(onClick = { onNav("reload") }, enabled = !viewOnly, modifier = Modifier.size(SMALL_PILL)) { Icon(painterResource(R.drawable.ic_refresh_24), contentDescription = "Reload", modifier = Modifier.size(20.dp)) }
             }
         }
         SmallPill(Modifier.weight(1f)) {
-            UrlField(tab, editing, onEditing, onGo, onCopy)
+            UrlField(tab, editing && !viewOnly, { if (!viewOnly) onEditing(it) }, onGo, onCopy)
         }
         Box {
             SmallPill { IconButton(onClick = { menu = true }, modifier = Modifier.size(SMALL_PILL)) { Icon(painterResource(R.drawable.ic_more_24), contentDescription = "Browser options") } }
             DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                 Text("Display", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp))
-                CheckRow("Horizontal (1080p)", !vertical) { menu = false; onVertical(false) }
-                CheckRow("Vertical (fits the phone)", vertical) { menu = false; onVertical(true) }
+                CheckRow("Horizontal (1080p)", !vertical, enabled = !viewOnly) { menu = false; onVertical(false) }
+                CheckRow("Vertical (fits the phone)", vertical, enabled = !viewOnly) { menu = false; onVertical(true) }
                 CheckRow("High quality (60 fps)", highQuality) { menu = false; onHighQuality(!highQuality) }
                 HorizontalDivider()
                 Text("Input", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp))
                 CheckRow("Cursor", cursor) { menu = false; onCursor(true) }
                 CheckRow("Touch", !cursor) { menu = false; onCursor(false) }
                 HorizontalDivider()
-                DropdownMenuItem(text = { Text("Keyboard") }, onClick = { menu = false; onKeyboard() })
+                DropdownMenuItem(text = { Text("Keyboard") }, enabled = !viewOnly, onClick = { menu = false; onKeyboard() })
             }
         }
     }
 }
 
 @Composable
-private fun CheckRow(label: String, checked: Boolean, onClick: () -> Unit) {
+private fun CheckRow(label: String, checked: Boolean, enabled: Boolean = true, onClick: () -> Unit) {
     DropdownMenuItem(
+        enabled = enabled,
         text = { Text(label, fontWeight = if (checked) FontWeight.SemiBold else FontWeight.Normal) },
         leadingIcon = { Text(if (checked) "✓" else " ", color = MaterialTheme.colorScheme.primary) },
         onClick = onClick,
@@ -628,9 +636,15 @@ private fun LiveView(
     viewModel: CrewViewModel,
     vertical: Boolean,
     cursor: Boolean,
+    agentChat: SessionInfo?,
+    onOpenChat: (String) -> Unit,
     streamError: String?,
     onEditable: (Boolean, Boolean) -> Unit,
 ) {
+    // View only while an agent works in the tab: nothing reaches the page (no clicks, hover, scrolls or
+    // keys), but the cursor still moves on the phone, so pinch zoom and pushing it to an edge pan the view.
+    val viewOnly = agentChat != null
+    val cursor = cursor || viewOnly
     val frame by viewModel.frame.collectAsStateWithLifecycle()
     DisposableEffect(tab.id) {
         viewModel.watchTab(tab.id)
@@ -643,23 +657,12 @@ private fun LiveView(
         val boxW = maxWidth
         val boxH = maxHeight
         // Vertical: the page is laid out for exactly this box. Horizontal: the normal window.
+        // The tab's own layout comes from the server (an agent using it resets it to horizontal); this
+        // only keeps a vertical tab sized to this box, for example after the phone rotates.
         LaunchedEffect(tab.id, vertical, boxW, boxH) {
-            if (vertical) {
-                val scale = min(density.density, 1920f / boxH.value)
-                viewModel.applyView(tab.id, true, boxW.value.roundToInt(), boxH.value.roundToInt(), scale)
-            } else {
-                viewModel.applyView(tab.id, false, 0, 0, 0f)
-            }
-        }
-        // An agent taking over the tab switches it back to horizontal on the server; follow that here.
-        var sawVertical by remember(tab.id, vertical) { mutableStateOf(false) }
-        LaunchedEffect(current?.vertical) {
-            val f = current ?: return@LaunchedEffect
-            if (vertical && f.vertical) sawVertical = true
-            if (vertical && sawVertical && !f.vertical) {
-                viewModel.setVertical(false)
-                viewModel.toast("An agent is using this tab: back to Horizontal")
-            }
+            val box = Triple(boxW.value.roundToInt(), boxH.value.roundToInt(), min(density.density, 1920f / boxH.value))
+            viewModel.viewBox = box
+            if (vertical) viewModel.applyView(tab.id, true, box.first, box.second, box.third)
         }
 
         if (current == null) {
@@ -693,6 +696,7 @@ private fun LiveView(
         fun fx(x: Float) = ((x + panX) / zoom / wPx).coerceIn(0f, 1f)
         fun fy(y: Float) = ((y + panY) / zoom / hPx).coerceIn(0f, 1f)
         fun mouse(action: String, x: Float, y: Float, button: String = "left", clicks: Int = 1, held: Boolean = false, result: ((JSONObject) -> Unit)? = null) {
+            if (viewOnly) return
             val e = JSONObject().put("type", "mouse").put("action", action).put("x", fx(x).toDouble()).put("y", fy(y).toDouble())
                 .put("button", button).put("clicks", clicks)
             if (held) e.put("held", true)
@@ -700,6 +704,7 @@ private fun LiveView(
         }
         fun clickResult(r: JSONObject) = onEditable(r.optBoolean("editable"), r.optBoolean("password"))
         fun wheel(x: Float, y: Float, dyFraction: Float) {
+            if (viewOnly) return
             viewModel.tabInput(tab.id, JSONObject().put("type", "scroll").put("x", fx(x).toDouble()).put("y", fy(y).toDouble()).put("dx", 0).put("dy", dyFraction.toDouble()))
         }
 
@@ -712,7 +717,7 @@ private fun LiveView(
         Box(
             Modifier
                 .fillMaxSize()
-                .pointerInput(tab.id, cursor, vertical, wPx, hPx) {
+                .pointerInput(tab.id, cursor, vertical, viewOnly, wPx, hPx) {
                     awaitEachGesture {
                         val first = awaitFirstDown(requireUnconsumed = false)
                         val down = object {
@@ -854,7 +859,28 @@ private fun LiveView(
                     },
             )
             if (cursor || pressed) Cursor(cx, cy, pressed)
-            if (cursor) ScrollBar(current, hPx) { dyFraction -> wheel(cx, cy, dyFraction) }
+            if (cursor && !viewOnly) ScrollBar(current, hPx) { dyFraction -> wheel(cx, cy, dyFraction) }
+            if (agentChat != null) {
+                Surface(
+                    onClick = { onOpenChat(agentChat.id) },
+                    shape = RoundedCornerShape(50),
+                    color = Color(0xE61D1B20),
+                    modifier = Modifier.align(Alignment.BottomCenter).padding(10.dp),
+                ) {
+                    Row(Modifier.padding(horizontal = 14.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Box(Modifier.size(8.dp).background(Color(0xFFFF5A5A), CircleShape))
+                        Text(
+                            "View only · ${agentChat.title.ifBlank { "An agent" }} is using this tab",
+                            color = Color.White,
+                            style = MaterialTheme.typography.labelMedium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.widthIn(max = 240.dp),
+                        )
+                        Text("Open chat", color = Color(0xFFB8C7FF), style = MaterialTheme.typography.labelMedium)
+                    }
+                }
+            }
             if (zoom > 1.01f) {
                 Surface(
                     onClick = { zoom = 1f; panX = 0f; panY = 0f },

@@ -609,6 +609,12 @@ class Hub:
 
         asyncio.create_task(go())
 
+    def tab_busy(self, tab_id: str) -> uuid.UUID | None:
+        """The session whose agent is using this tab right now: it last drove the tab and a turn is running."""
+        owner = self.tab_owner.get(tab_id)
+        rt = self.runtimes.get(owner) if owner else None
+        return owner if rt and rt.running else None
+
     async def browser_activity(self, tab: dict[str, Any]) -> uuid.UUID | None:
         """A tab opened or navigated without the owner touching it: link it to the session doing that.
 

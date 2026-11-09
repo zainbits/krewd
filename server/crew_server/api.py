@@ -248,7 +248,13 @@ def create_app(hub: Hub, token: str, lifespan_hub: bool = True) -> FastAPI:
         for tab in tabs:
             owner = hub.tab_owner.get(tab["id"])
             tab["session_id"] = str(owner) if owner else None
+            tab["agent_active"] = hub.tab_busy(tab["id"]) is not None
         return {"available": True, "tabs": tabs}
+
+    def not_while_agent(tab_id: str) -> None:
+        """The owner watches, and does not steer, a tab an agent is using (view only); Stop ends the turn."""
+        if hub.tab_busy(tab_id):
+            raise HTTPException(409, "An agent is using this tab: view only until its turn ends")
 
     @app.post("/api/browser/tabs", dependencies=auth, status_code=201)
     async def browser_new_tab(body: NewTab) -> dict[str, Any]:
@@ -256,11 +262,14 @@ def create_app(hub: Hub, token: str, lifespan_hub: bool = True) -> FastAPI:
 
     @app.delete("/api/browser/tabs/{tab_id}", dependencies=auth)
     async def browser_close_tab(tab_id: str) -> dict[str, Any]:
+        not_while_agent(tab_id)
         await browser.close_tab(tab_id)
         return {"ok": True}
 
     @app.post("/api/browser/tabs/{tab_id}/view", dependencies=auth)
     async def browser_view(tab_id: str, body: TabView) -> dict[str, Any]:
+        if body.mode == "vertical":
+            not_while_agent(tab_id)
         try:
             await browser.set_view(tab_id, body.mode, body.width, body.height, body.scale)
         except ValueError as exc:
@@ -292,6 +301,7 @@ def create_app(hub: Hub, token: str, lifespan_hub: bool = True) -> FastAPI:
 
     @app.post("/api/browser/tabs/{tab_id}/input", dependencies=auth)
     async def browser_input(tab_id: str, body: BrowserInput) -> dict[str, Any]:
+        not_while_agent(tab_id)
         try:
             result = await browser.input(tab_id, body.model_dump(exclude_none=True))
         except ValueError as exc:

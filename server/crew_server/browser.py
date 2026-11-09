@@ -191,6 +191,9 @@ class Browser:
         self.links: dict[str, TabLink] = {}
         self.lock = asyncio.Lock()
         self.touched: dict[str, float] = {}  # tab id -> when the owner last sent it input
+        # The owner's vertical view per tab ({width, height, scale}). Kept across reconnects, so it comes
+        # back when the phone watches again; an agent using the tab drops it (agents work in horizontal).
+        self.views: dict[str, dict[str, float]] = {}
 
     def _http(self, path: str, method: str = "GET") -> Any:
         try:
@@ -204,7 +207,8 @@ class Browser:
     async def tabs(self) -> list[dict[str, Any]]:
         targets = await asyncio.to_thread(self._http, "/json/list")
         return [
-            {"id": t["id"], "title": t.get("title") or t.get("url", ""), "url": t.get("url", "")}
+            {"id": t["id"], "title": t.get("title") or t.get("url", ""), "url": t.get("url", ""),
+             "view": "vertical" if t["id"] in self.views else "horizontal"}
             for t in targets
             if t.get("type") == "page" and not t.get("url", "").startswith("devtools://")
         ]
@@ -222,20 +226,28 @@ class Browser:
 
     async def set_view(self, target_id: str, mode: str, width: int = 0, height: int = 0, scale: float = 0) -> None:
         """"vertical": lay the page out for the phone's screen (CSS pixels); "horizontal": the normal window."""
-        link = await self.link(target_id)
         if mode == "vertical":
             if not (200 <= width <= 1500 and 200 <= height <= 3000 and 0.5 <= scale <= 5):
                 raise ValueError("vertical needs width 200..1500, height 200..3000 and scale 0.5..5")
-            await link.call("Emulation.setDeviceMetricsOverride",
-                            {"width": int(width), "height": int(height), "deviceScaleFactor": scale, "mobile": True})
-            link.emulated = True
+            self.views[target_id] = {"width": int(width), "height": int(height), "scale": scale}
+            await self._emulate(await self.link(target_id))
         elif mode == "horizontal":
-            if link.emulated:
-                await link.call("Emulation.clearDeviceMetricsOverride")
-            link.emulated = False
+            self.views.pop(target_id, None)
+            await self._emulate(await self.link(target_id))
         else:
             raise ValueError("mode is vertical or horizontal")
         self.touched[target_id] = time.monotonic()
+
+    async def _emulate(self, link: TabLink) -> None:
+        """Make the tab's layout match the owner's choice in self.views."""
+        view = self.views.get(link.target_id)
+        if view:
+            await link.call("Emulation.setDeviceMetricsOverride",
+                            {"width": view["width"], "height": view["height"], "deviceScaleFactor": view["scale"], "mobile": True})
+            link.emulated = True
+        elif link.emulated:
+            await link.call("Emulation.clearDeviceMetricsOverride")
+            link.emulated = False
 
     async def watch(self, on_activity) -> None:
         """Follow the browser's tabs; report a tab that opens or navigates while the owner is not using it.
@@ -255,6 +267,7 @@ class Browser:
                         params = message.get("params") or {}
                         if method == "Target.targetDestroyed":
                             known.pop(params.get("targetId"), None)
+                            self.views.pop(params.get("targetId"), None)
                             continue
                         if method not in ("Target.targetCreated", "Target.targetInfoChanged"):
                             continue
@@ -270,9 +283,11 @@ class Browser:
                             continue
                         owner = await on_activity({"id": tab_id, "url": url, "title": info.get("title") or url})
                         link = self.links.get(tab_id)
+                        if owner:
+                            self.views.pop(tab_id, None)
                         if owner and link and link.emulated and not link.closed:
                             try:
-                                await self.set_view(tab_id, "horizontal")
+                                await self._emulate(link)
                             except Exception:
                                 pass
             except asyncio.CancelledError:
@@ -309,6 +324,8 @@ class Browser:
             link.idle_task.cancel()
             link.idle_task = None
         try:
+            if self.views.get(target_id) and not link.emulated:
+                await self._emulate(link)  # the owner's vertical view, after a reconnect
             if link.casting != quality:
                 if link.casting:
                     await link.call("Page.stopScreencast")
