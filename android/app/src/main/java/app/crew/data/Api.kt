@@ -56,6 +56,11 @@ class Prefs(context: Context) {
 
     fun setVertical(on: Boolean) = prefs.edit().putBoolean("browser_vertical", on).apply()
 
+    /** High quality live view: 60 fps and sharper frames, at about three times the data. Off: 30 fps. */
+    fun highQuality(): Boolean = prefs.getBoolean("browser_high_quality", false)
+
+    fun setHighQuality(on: Boolean) = prefs.edit().putBoolean("browser_high_quality", on).apply()
+
     /** Cursor (true) or touch input for the browser, remembered per agent, with the last pick as the fallback. */
     fun cursorMode(engineId: String?): Boolean =
         engineId?.let { engine(it).cursor } ?: prefs.getBoolean("browser_cursor", true)
@@ -192,8 +197,9 @@ class CrewApi(val baseUrl: String, private val token: String, val route: Route) 
         Approval.from(obj("POST", "/api/approvals/$id", JSONObject().put("option_id", optionId)))
 
     /** Opens the live JPEG stream of one browser tab; read it with [FrameStream.read] off the main thread. */
-    fun openBrowserStream(tabId: String): FrameStream {
-        val conn = URL("$baseUrl/api/browser/tabs/$tabId/stream").openConnection() as HttpURLConnection
+    fun openBrowserStream(tabId: String, high: Boolean = false): FrameStream {
+        val quality = if (high) "high" else "standard"
+        val conn = URL("$baseUrl/api/browser/tabs/$tabId/stream?quality=$quality").openConnection() as HttpURLConnection
         conn.connectTimeout = Timing.CONNECT_TIMEOUT_MS
         conn.readTimeout = 30_000 // the server repeats the last frame every 10 s
         conn.setRequestProperty("Authorization", "Bearer $token")

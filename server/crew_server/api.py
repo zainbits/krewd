@@ -75,6 +75,7 @@ class BrowserInput(BaseModel):
     dy: float | None = None
     text: str | None = Field(default=None, max_length=10000)
     key: str | None = None
+    modifiers: list[Literal["ctrl", "alt", "shift", "meta"]] | None = Field(default=None, max_length=4)  # with key
     action: str | None = None
     url: str | None = None
     button: str | None = None
@@ -267,10 +268,10 @@ def create_app(hub: Hub, token: str, lifespan_hub: bool = True) -> FastAPI:
         return {"ok": True}
 
     @app.get("/api/browser/tabs/{tab_id}/stream", dependencies=auth)
-    async def browser_stream(tab_id: str) -> StreamingResponse:
+    async def browser_stream(tab_id: str, quality: Literal["standard", "high"] = "standard") -> StreamingResponse:
         if tab_id not in {t["id"] for t in await browser.tabs()}:
             raise TabGone(tab_id)
-        frames = browser.stream(tab_id)
+        frames = browser.stream(tab_id, quality)
 
         async def body():
             try:

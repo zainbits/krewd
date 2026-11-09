@@ -23,13 +23,11 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.asPaddingValues
-import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.only
@@ -51,7 +49,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material3.AssistChip
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -61,7 +58,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -92,15 +88,12 @@ import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalViewConfiguration
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.text.input.PasswordVisualTransformation
-import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
@@ -114,11 +107,11 @@ import app.crew.constants.ShellDimensions
 import app.crew.data.BrowserFrame
 import app.crew.data.BrowserTab
 import kotlin.math.abs
-import kotlin.math.hypot
 import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withTimeoutOrNull
+import org.json.JSONArray
 import org.json.JSONObject
 
 private const val TAB_REFRESH_MS = 3_000L
@@ -152,7 +145,6 @@ fun BrowserScreen(state: UiState, viewModel: CrewViewModel, landscape: Boolean) 
     val engineId = state.sessions.firstOrNull { it.id == state.lastSessionId }?.engine
     var cursor by remember(engineId) { mutableStateOf(viewModel.inputCursor(engineId)) }
     var keyboard by remember { mutableStateOf(false) }
-    var hidden by remember { mutableStateOf(false) }
     var allTabs by remember { mutableStateOf(false) }
     var editingUrl by remember { mutableStateOf(false) }
     var picker by remember { mutableStateOf<Pair<BrowserTab, Boolean>?>(null) } // tab, true = picture-in-picture
@@ -195,6 +187,7 @@ fun BrowserScreen(state: UiState, viewModel: CrewViewModel, landscape: Boolean) 
             editing = editingUrl,
             onEditing = { editingUrl = it },
             vertical = state.vertical,
+            highQuality = state.highQuality,
             cursor = cursor,
             onNav = { action -> send("type" to "navigate", "action" to action) },
             onGo = { url -> send("type" to "navigate", "url" to url) },
@@ -203,6 +196,7 @@ fun BrowserScreen(state: UiState, viewModel: CrewViewModel, landscape: Boolean) 
                 viewModel.toast("URL copied")
             },
             onVertical = viewModel::setVertical,
+            onHighQuality = viewModel::setHighQuality,
             onCursor = {
                 cursor = it
                 viewModel.setInputCursor(engineId, it)
@@ -227,20 +221,13 @@ fun BrowserScreen(state: UiState, viewModel: CrewViewModel, landscape: Boolean) 
                     vertical = state.vertical,
                     cursor = cursor,
                     streamError = state.streamError,
-                    onEditable = { editable, password ->
-                        if (editable) {
-                            hidden = password
-                            keyboard = true
-                        }
-                    },
+                    onEditable = { editable, _ -> if (editable) keyboard = true },
                 )
             }
         }
         if (keyboard && tab != null) {
-            TypingBar(
-                hidden = hidden,
-                onHidden = { hidden = it },
-                onKey = { send("type" to "key", "key" to it) },
+            DirectKeyboard(
+                onKey = { key, mods -> send("type" to "key", "key" to key, "modifiers" to JSONArray(mods)) },
                 onText = { send("type" to "text", "text" to it) },
                 onDone = { keyboard = false },
             )
@@ -524,11 +511,13 @@ private fun ControlsRow(
     editing: Boolean,
     onEditing: (Boolean) -> Unit,
     vertical: Boolean,
+    highQuality: Boolean,
     cursor: Boolean,
     onNav: (String) -> Unit,
     onGo: (String) -> Unit,
     onCopy: () -> Unit,
     onVertical: (Boolean) -> Unit,
+    onHighQuality: (Boolean) -> Unit,
     onCursor: (Boolean) -> Unit,
     onKeyboard: () -> Unit,
     onAll: () -> Unit,
@@ -556,6 +545,7 @@ private fun ControlsRow(
                 Text("Display", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp))
                 CheckRow("Horizontal (1080p)", !vertical) { menu = false; onVertical(false) }
                 CheckRow("Vertical (fits the phone)", vertical) { menu = false; onVertical(true) }
+                CheckRow("High quality (60 fps)", highQuality) { menu = false; onHighQuality(!highQuality) }
                 HorizontalDivider()
                 Text("Input", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp))
                 CheckRow("Cursor", cursor) { menu = false; onCursor(true) }
@@ -953,56 +943,3 @@ private fun androidx.compose.foundation.layout.BoxScope.ScrollBar(frame: Browser
 }
 
 /** Keys and a text field for the focused page field. Typed text goes straight to the page and is never saved. */
-@Composable
-private fun TypingBar(hidden: Boolean, onHidden: (Boolean) -> Unit, onKey: (String) -> Unit, onText: (String) -> Unit, onDone: () -> Unit) {
-    // Not saveable on purpose: typed text (maybe a password) must not land in saved instance state.
-    var text by remember { mutableStateOf("") }
-    val focus = remember { FocusRequester() }
-    val keyboard = LocalSoftwareKeyboardController.current
-    LaunchedEffect(Unit) {
-        focus.requestFocus()
-        keyboard?.show()
-    }
-    Column(
-        Modifier.windowInsetsPadding(WindowInsets.ime.union(WindowInsets.navigationBars)).padding(horizontal = 10.dp, vertical = 6.dp),
-        verticalArrangement = Arrangement.spacedBy(6.dp),
-    ) {
-        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-            listOf("Enter" to "↵ Enter", "Backspace" to "⌫", "Tab" to "⇥ Tab", "Escape" to "Esc").forEach { (key, label) ->
-                AssistChip(onClick = { onKey(key) }, label = { Text(label) })
-            }
-            Spacer(Modifier.weight(1f))
-            TextButton(onClick = {
-                keyboard?.hide()
-                onDone()
-            }) { Text("Done") }
-        }
-        OutlinedTextField(
-            value = text,
-            onValueChange = { text = it },
-            modifier = Modifier.fillMaxWidth().focusRequester(focus),
-            placeholder = { Text("Type into the focused field") },
-            singleLine = true,
-            shape = RoundedCornerShape(24.dp),
-            visualTransformation = if (hidden) PasswordVisualTransformation() else VisualTransformation.None,
-            keyboardOptions = KeyboardOptions(
-                keyboardType = if (hidden) KeyboardType.Password else KeyboardType.Text,
-                autoCorrectEnabled = !hidden,
-                imeAction = ImeAction.Send,
-            ),
-            keyboardActions = KeyboardActions(onSend = {
-                if (text.isNotEmpty()) onText(text)
-                text = ""
-            }),
-            trailingIcon = {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    TextButton(onClick = { onHidden(!hidden) }) { Text(if (hidden) "Show" else "Hide") }
-                    IconButton(onClick = {
-                        if (text.isNotEmpty()) onText(text)
-                        text = ""
-                    }, enabled = text.isNotEmpty()) { Icon(painterResource(R.drawable.ic_send_24), contentDescription = "Type it") }
-                }
-            },
-        )
-    }
-}

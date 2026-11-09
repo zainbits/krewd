@@ -30,8 +30,12 @@ import websockets
 
 log = logging.getLogger("crew.browser")
 
-# Up to full 1080p, so the phone can zoom into a horizontal page without it going soft.
-SCREENCAST = {"format": "jpeg", "quality": 60, "maxWidth": 1920, "maxHeight": 1920, "everyNthFrame": 1}
+# Full 1080p in both, so text stays sharp when the phone zooms in. Standard: 30 fps (every other frame of
+# Brave's 60) and lighter JPEG; high: every frame and near-lossless JPEG, for when detail matters.
+SCREENCAST = {
+    "standard": {"format": "jpeg", "quality": 50, "maxWidth": 1920, "maxHeight": 1920, "everyNthFrame": 2},
+    "high": {"format": "jpeg", "quality": 85, "maxWidth": 1920, "maxHeight": 1920, "everyNthFrame": 1},
+}
 KEEPALIVE_SECONDS = 10  # resend the last frame so idle streams stay open and dead ones are noticed
 IDLE_CLOSE_SECONDS = 30
 OWNER_GRACE_SECONDS = 4  # a tab the owner just used is not taken for an agent's
@@ -63,6 +67,17 @@ KEYS = {
     "End": ("End", 35, None),
     "Space": ("Space", 32, " "),
 }
+MODIFIERS = {"alt": 1, "ctrl": 2, "meta": 4, "shift": 8}  # CDP modifier bits
+
+
+def key_info(key: str) -> tuple[str, int, str | None]:
+    """(code, windowsVirtualKeyCode, text) for a named key or a single letter or digit (for shortcuts)."""
+    if key in KEYS:
+        return KEYS[key]
+    if len(key) == 1 and key.isascii() and key.isalnum():
+        upper = key.upper()
+        return (f"Key{upper}" if key.isalpha() else f"Digit{key}", ord(upper), key)
+    raise ValueError(f"unknown key {key}")
 
 
 class BrowserUnavailable(Exception):
@@ -96,7 +111,7 @@ class TabLink:
     frame: Frame | None = None
     changed: asyncio.Condition = field(default_factory=asyncio.Condition)
     viewers: int = 0
-    casting: bool = False
+    casting: str | None = None  # the SCREENCAST profile in use
     closed: bool = False
     idle_task: asyncio.Task | None = None
     emulated: bool = False
@@ -283,7 +298,8 @@ class Browser:
             self.links[target_id] = link
             return link
 
-    async def stream(self, target_id: str) -> AsyncIterator[Frame]:
+    async def stream(self, target_id: str, quality: str = "standard") -> AsyncIterator[Frame]:
+        """Frames of a tab. Viewers of one tab share its screencast: the newest viewer's quality applies."""
         await self.activate(target_id)
         link = await self.link(target_id)
         link.viewers += 1
@@ -291,9 +307,11 @@ class Browser:
             link.idle_task.cancel()
             link.idle_task = None
         try:
-            if not link.casting:
-                await link.call("Page.startScreencast", SCREENCAST)
-                link.casting = True
+            if link.casting != quality:
+                if link.casting:
+                    await link.call("Page.stopScreencast")
+                await link.call("Page.startScreencast", SCREENCAST[quality])
+                link.casting = quality
             last = 0
             while not link.closed:
                 async with link.changed:
@@ -323,7 +341,7 @@ class Browser:
                 await link.call("Page.stopScreencast")
         except Exception:
             pass
-        link.casting = False
+        link.casting = None
         await link.ws.close()
 
     async def input(self, target_id: str, event: dict[str, Any]) -> dict[str, Any]:
@@ -355,16 +373,19 @@ class Browser:
             await link.call("Input.insertText", {"text": str(event.get("text", ""))})
         elif kind == "key":
             key = str(event.get("key"))
-            if key not in KEYS:
-                raise ValueError(f"unknown key {key}")
-            code, vk, text = KEYS[key]
-            down = {"type": "keyDown" if text else "rawKeyDown", "key": key, "code": code,
-                    "windowsVirtualKeyCode": vk, "nativeVirtualKeyCode": vk}
+            code, vk, text = key_info(key)
+            unknown = set(event.get("modifiers") or []) - MODIFIERS.keys()
+            if unknown:
+                raise ValueError(f"unknown modifier {sorted(unknown)[0]}")
+            mask = sum(MODIFIERS[m] for m in set(event.get("modifiers") or []))
+            if mask & ~MODIFIERS["shift"]:
+                text = None  # Ctrl, Alt or Meta make it a shortcut, not typing
+            base = {"key": key, "code": code, "windowsVirtualKeyCode": vk, "nativeVirtualKeyCode": vk, "modifiers": mask}
+            down = {"type": "keyDown" if text else "rawKeyDown", **base}
             if text:
                 down["text"] = text
             await link.call("Input.dispatchKeyEvent", down)
-            await link.call("Input.dispatchKeyEvent", {"type": "keyUp", "key": key, "code": code,
-                                                       "windowsVirtualKeyCode": vk, "nativeVirtualKeyCode": vk})
+            await link.call("Input.dispatchKeyEvent", {"type": "keyUp", **base})
         elif kind == "navigate":
             action = event.get("action")
             if action == "reload":

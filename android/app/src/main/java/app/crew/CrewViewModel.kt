@@ -101,6 +101,7 @@ data class UiState(
     /** "session:tab" pairs whose picture-in-picture the owner closed. */
     val pipHidden: Set<String> = emptySet(),
     val vertical: Boolean = false,
+    val highQuality: Boolean = false,
     val restarting: Boolean = false,
     val confirmStop: String? = null,
     /** The new-task card's text, kept while you look at other screens. */
@@ -135,7 +136,7 @@ class CrewViewModel(private val app: Application) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val prefs = Prefs(app)
     private val notifier = Notifier(app)
-    private val _state = MutableStateFlow(UiState(settings = prefs.load(), vertical = prefs.vertical()))
+    private val _state = MutableStateFlow(UiState(settings = prefs.load(), vertical = prefs.vertical(), highQuality = prefs.highQuality()))
     val state: StateFlow<UiState> = _state.asStateFlow()
 
     @Volatile private var api: CrewApi? = null
@@ -728,6 +729,14 @@ class CrewViewModel(private val app: Application) {
         _state.update { it.copy(vertical = on) }
     }
 
+    /** Standard (30 fps) or high quality live view; the stream restarts with the new setting. */
+    fun setHighQuality(on: Boolean) {
+        prefs.setHighQuality(on)
+        _state.update { it.copy(highQuality = on) }
+        val tabId = watched ?: return
+        api?.let { startStream(it, tabId, keepFrame = true) }
+    }
+
     /** Lays the tab out for the phone (vertical) or the normal 1080p window (horizontal). */
     fun applyView(tabId: String, vertical: Boolean, width: Int, height: Int, scale: Float) = act { client ->
         client.setTabView(tabId, vertical, width, height, scale)
@@ -807,14 +816,14 @@ class CrewViewModel(private val app: Application) {
         }
     }
 
-    private fun startStream(client: CrewApi, tabId: String) {
+    private fun startStream(client: CrewApi, tabId: String, keepFrame: Boolean = false) {
         stopStream()
-        _frame.value = null
+        if (!keepFrame) _frame.value = null
         streamJob = scope.launch(Dispatchers.IO) {
             var failures = 0
             while (watched == tabId) {
                 try {
-                    val s = client.openBrowserStream(tabId)
+                    val s = client.openBrowserStream(tabId, _state.value.highQuality)
                     stream = s
                     s.read { frame ->
                         failures = 0

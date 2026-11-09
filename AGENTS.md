@@ -20,10 +20,10 @@ Crew is a self-hosted, agent-agnostic agent team. The owner asks for a task in t
   - `api.py`: HTTP API (see `docs/api.md`).
   - `attachments.py`: uploads from the phone, saved as `~/.crew/common/attachments/<session id prefix>-<name>` and passed to the agent as paths and ACP resource links.
   - `files.py`: files the agents hand back: paths in a reply that name a file in a shared folder (`CREW_SHARE_DIRS`, default `$CREW_WORKDIR/outputs`) are listed on `turn_end`, and `GET /api/files` serves only those folders. The app saves them to Downloads/Crew.
-  - `browser.py`: the agents' Brave over DevTools: tabs (list, new, close), live JPEG screencast of a tab, mouse (move, press, release, click, double-click, right-click), scrolls, keys and typed text, the phone-sized vertical view, and a watcher that sees which tab opens or navigates. Typed text goes straight to the page and is never logged or stored.
+  - `browser.py`: the agents' Brave over DevTools: tabs (list, new, close), live JPEG screencast of a tab (standard 30 fps or high 60 fps, both 1080p), mouse (move, press, release, click, double-click, right-click), scrolls, keys and typed text, the phone-sized vertical view, and a watcher that sees which tab opens or navigates. Typed text goes straight to the page and is never logged or stored.
   - `schema*.sql`: migrations, applied in order by `db.migrate`.
   - `tests/`: end-to-end tests against a fake ACP agent and a real PostgreSQL.
-- `android/`: the app (Kotlin, Jetpack Compose, `app.crew`, minSdk 36). `CrewViewModel` lives for the whole process (`CrewApplication`); `Notifier` and its `LiveService` (a foreground service) show a live-activity notification per running task and keep alerts coming while the phone is locked. Markdown is rendered with commonmark-java.
+- `android/`: the app (Kotlin, Jetpack Compose, `app.crew`, minSdk 36). `CrewViewModel` lives for the whole process (`CrewApplication`); `Notifier` and its `LiveService` (a foreground service) show a live-activity notification per running task and keep alerts coming while the phone is locked. Markdown is rendered with commonmark-java. In the Browser screen the phone keyboard types straight into the page (`DirectKeyboard`: a `TYPE_NULL` input connection, like a terminal, so Backspace, arrows and Ctrl/Alt shortcuts arrive as real keys).
 - `deploy/`:
   - `supervise.py`: keeps one command alive in a named tmux session for systemd, and stops it gracefully.
   - `run-server.sh`, `run-browser.sh`.
@@ -60,6 +60,7 @@ All config is in `~/.config/crew/` (folder mode 700, files 600):
   - `CREW_PORT`: default 8800.
   - `CREW_SHARE_DIRS`: folders the agents hand files back from. Default `$CREW_WORKDIR/outputs`.
   - `CREW_BROWSER_PROFILE` and `CREW_CDP_PORT`.
+  - `CREW_BROWSER_GPU`: default 0. The agents' Brave renders in software, because with the GPU it stops painting (about 1 frame a second, every click waiting a second) once the monitor sleeps, and does not recover. Set 1 only where the display never sleeps.
 - `engines.toml`: start from `deploy/engines.example.toml`. Each engine is an ACP command with optional environment variables.
 - `token`: the phone's bearer token, created on the first start. `./master.sh token` shows it.
 
