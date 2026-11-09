@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+
+# Android Studio, Gradle, build output
+*.iml
+/android/.idea/
+/android/local.properties
+/android/.gradle/
+/android/.kotlin/
+**/build/
+/android/captures/
+
+# Packaged artifacts and signing material
+*.apk
+*.aab
+*.idsig
+*.jks
+*.keystore
+keystore.properties
+
+# Secrets and OS metadata
+.env
+.env.*
+*.secret
+.DS_Store
