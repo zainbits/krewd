@@ -26,6 +26,8 @@ from .config import CONFIG_DIR, load_env_file
 RULES = """\
 Rules for agents:
   - Create, change, pause, resume, run or delete a routine only when the owner asked for it in the chat.
+  - Never fill in a detail the owner did not give (the time or days it runs, the site, codes, names): ask in
+    the chat and wait. Show the planned routine and create or change it only after the owner says yes.
   - Before creating one, run `crew routines list`. If an existing routine does the same or a similar job,
     and you are not sure whether to update it or create a new one, ask the owner in the chat first and wait.
   - Before deleting one, ask the owner in the chat and wait for a yes.
