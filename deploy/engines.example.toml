@@ -1,0 +1,25 @@
+# Crew engines: any command that speaks the Agent Client Protocol (ACP) on stdin/stdout.
+# Copy to ~/.config/crew/engines.toml. The app lists every engine here; "default" is preselected.
+default = "claude"
+
+[engines.claude]
+name = "Claude Code"
+# Standalone adapter from https://github.com/agentclientprotocol/claude-agent-acp (bundles Claude Code).
+command = ["~/.local/bin/claude-agent-acp"]
+
+[engines.claude.env]
+# browser-harness attaches to the agents' Brave (crew-browser.service) instead of launching one.
+BU_CDP_URL = "http://127.0.0.1:9222"
+BH_TELEMETRY = "0"
+BH_UPDATE_CHECK = "0"
+BH_TAB_MARKER = "0"
+
+# [engines.codex]
+# name = "Codex"
+# command = ["~/.local/bin/codex-acp"]
+#
+# [engines.codex.env]
+# BU_CDP_URL = "http://127.0.0.1:9222"
+# BH_TELEMETRY = "0"
+# BH_UPDATE_CHECK = "0"
+# BH_TAB_MARKER = "0"

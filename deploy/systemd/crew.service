@@ -1,0 +1,21 @@
+# Installed by ./master.sh (it fills in @REPO@). Starts at boot when lingering is on.
+[Unit]
+Description=Crew server (watch it: tmux attach -t crew)
+After=network-online.target
+Wants=network-online.target
+# Give up after 6 restarts in 10 minutes (something keeps killing it); ./master.sh start retries.
+StartLimitIntervalSec=600
+StartLimitBurst=6
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 @REPO@/deploy/supervise.py --session crew --cwd @REPO@/server --stop-key C-c -- @REPO@/deploy/run-server.sh
+Restart=always
+RestartSec=10
+# The shared tmux server may start inside this unit; stop only the supervisor so other tmux
+# sessions survive. The supervisor removes its own session.
+KillMode=process
+TimeoutStopSec=30
+
+[Install]
+WantedBy=default.target

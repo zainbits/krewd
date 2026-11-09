@@ -1,0 +1,182 @@
+package app.crew.data
+
+import android.content.Context
+import app.crew.constants.Timing
+import java.io.IOException
+import java.net.HttpURLConnection
+import java.net.URL
+import org.json.JSONArray
+import org.json.JSONObject
+
+enum class Route(val label: String) { Lan("LAN"), Tailnet("Tailscale") }
+
+enum class NetworkChoice { Auto, Lan, Tailnet }
+
+data class ConnectionSettings(
+    val lanUrl: String,
+    val tailnetUrl: String,
+    val token: String,
+    val network: NetworkChoice,
+) {
+    val configured: Boolean get() = token.isNotBlank() && (lanUrl.isNotBlank() || tailnetUrl.isNotBlank())
+}
+
+class Prefs(context: Context) {
+    private val prefs = context.getSharedPreferences("crew", Context.MODE_PRIVATE)
+
+    fun load() = ConnectionSettings(
+        lanUrl = prefs.getString("lan_url", DEFAULT_LAN)!!,
+        tailnetUrl = prefs.getString("tailnet_url", DEFAULT_TAILNET)!!,
+        token = prefs.getString("token", "")!!,
+        network = NetworkChoice.entries.getOrElse(prefs.getInt("network", 0)) { NetworkChoice.Auto },
+    )
+
+    fun save(settings: ConnectionSettings) {
+        prefs.edit()
+            .putString("lan_url", settings.lanUrl.trim().trimEnd('/'))
+            .putString("tailnet_url", settings.tailnetUrl.trim().trimEnd('/'))
+            .putString("token", settings.token.trim())
+            .putInt("network", settings.network.ordinal)
+            .apply()
+    }
+
+    companion object {
+        const val DEFAULT_LAN = ""
+        const val DEFAULT_TAILNET = ""
+    }
+}
+
+class ApiException(val code: Int, message: String) : IOException(message)
+
+/** Blocking HTTP client for the Crew server; call it from Dispatchers.IO. */
+class CrewApi(val baseUrl: String, private val token: String, val route: Route) {
+
+    fun health(timeoutMs: Int = Timing.CONNECT_TIMEOUT_MS): JSONObject =
+        JSONObject(call("GET", "/api/health", null, timeoutMs, timeoutMs, auth = false))
+
+    fun state(): ServerState {
+        val o = obj("GET", "/api/state")
+        return ServerState(
+            lastSeq = o.optLong("last_seq"),
+            engines = o.optJSONArray("engines").objects().map {
+                EngineInfo(
+                    id = it.optString("id"),
+                    name = it.optString("name"),
+                    isDefault = it.optBoolean("default"),
+                    agent = AgentInfo.from(it.optJSONObject("agent")),
+                    config = ConfigOption.list(it.optJSONArray("config_options")),
+                )
+            },
+            workdir = o.optString("workdir"),
+        )
+    }
+
+    fun sessions(): List<SessionInfo> = arr("GET", "/api/sessions").objects().map(SessionInfo::from)
+
+    fun createSession(text: String, autoApprove: Boolean, engine: String?, config: Map<String, String>): SessionInfo {
+        val body = JSONObject().put("text", text).put("auto_approve", autoApprove)
+        if (engine != null) body.put("engine", engine)
+        if (config.isNotEmpty()) body.put("config", JSONObject(config))
+        return SessionInfo.from(obj("POST", "/api/sessions", body))
+    }
+
+    fun updateSession(id: String, changes: JSONObject): SessionInfo =
+        SessionInfo.from(obj("PATCH", "/api/sessions/$id", changes))
+
+    fun send(id: String, text: String) {
+        obj("POST", "/api/sessions/$id/messages", JSONObject().put("text", text))
+    }
+
+    fun cancel(id: String) {
+        obj("POST", "/api/sessions/$id/cancel", JSONObject())
+    }
+
+    fun sessionEvents(id: String, after: Long): List<Event> =
+        obj("GET", "/api/sessions/$id/events?after=$after").optJSONArray("events").objects().map(Event::from)
+
+    /** Long-poll: returns as soon as there are events after [after], or empty after the wait. */
+    fun events(after: Long): Pair<List<Event>, Long> {
+        val wait = Timing.LONG_POLL_SECONDS
+        val o = JSONObject(call("GET", "/api/events?after=$after&wait=$wait", null, Timing.CONNECT_TIMEOUT_MS, wait * 1000 + Timing.READ_MARGIN_MS))
+        return o.optJSONArray("events").objects().map(Event::from) to o.optLong("last_seq", after)
+    }
+
+    fun approvals(): List<Approval> = arr("GET", "/api/approvals").objects().map(Approval::from)
+
+    fun decide(id: String, optionId: String): Approval =
+        Approval.from(obj("POST", "/api/approvals/$id", JSONObject().put("option_id", optionId)))
+
+    /** Opens the live JPEG stream of one browser tab; read it with [FrameStream.read] off the main thread. */
+    fun openBrowserStream(tabId: String): FrameStream {
+        val conn = URL("$baseUrl/api/browser/tabs/$tabId/stream").openConnection() as HttpURLConnection
+        conn.connectTimeout = Timing.CONNECT_TIMEOUT_MS
+        conn.readTimeout = 30_000 // the server repeats the last frame every 10 s
+        conn.setRequestProperty("Authorization", "Bearer $token")
+        conn.setRequestProperty("Accept", "multipart/x-mixed-replace")
+        return FrameStream(conn)
+    }
+
+    internal fun rawCall(method: String, path: String, body: JSONObject? = null): String = call(method, path, body)
+
+    private fun obj(method: String, path: String, body: JSONObject? = null) =
+        JSONObject(call(method, path, body))
+
+    private fun arr(method: String, path: String) = JSONArray(call(method, path, null))
+
+    private fun call(
+        method: String,
+        path: String,
+        body: JSONObject?,
+        connectTimeoutMs: Int = Timing.CONNECT_TIMEOUT_MS,
+        readTimeoutMs: Int = 20_000,
+        auth: Boolean = true,
+    ): String {
+        val conn = URL(baseUrl + path).openConnection() as HttpURLConnection
+        try {
+            conn.requestMethod = method
+            conn.connectTimeout = connectTimeoutMs
+            conn.readTimeout = readTimeoutMs
+            conn.setRequestProperty("Accept", "application/json")
+            if (auth) conn.setRequestProperty("Authorization", "Bearer $token")
+            if (body != null) {
+                conn.doOutput = true
+                conn.setRequestProperty("Content-Type", "application/json")
+                conn.outputStream.use { it.write(body.toString().toByteArray()) }
+            }
+            val code = conn.responseCode
+            val stream = if (code in 200..299) conn.inputStream else conn.errorStream
+            val text = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
+            if (code !in 200..299) {
+                val detail = runCatching { JSONObject(text).optString("detail") }.getOrNull()
+                throw ApiException(code, detail?.takeIf { it.isNotBlank() } ?: "HTTP $code")
+            }
+            return text
+        } finally {
+            conn.disconnect()
+        }
+    }
+
+    companion object {
+        /** Picks the route to use. Auto tries the LAN first, since it is direct, then Tailscale. */
+        fun resolve(settings: ConnectionSettings): CrewApi {
+            val candidates = when (settings.network) {
+                NetworkChoice.Lan -> listOf(Route.Lan)
+                NetworkChoice.Tailnet -> listOf(Route.Tailnet)
+                NetworkChoice.Auto -> listOf(Route.Lan, Route.Tailnet)
+            }
+            var last: Exception? = null
+            for (route in candidates) {
+                val url = if (route == Route.Lan) settings.lanUrl else settings.tailnetUrl
+                if (url.isBlank()) continue
+                val api = CrewApi(url, settings.token, route)
+                try {
+                    api.health(if (settings.network == NetworkChoice.Auto && route == Route.Lan) 1_500 else Timing.CONNECT_TIMEOUT_MS)
+                    return api
+                } catch (e: Exception) {
+                    last = e
+                }
+            }
+            throw last ?: IOException("No server address set")
+        }
+    }
+}
