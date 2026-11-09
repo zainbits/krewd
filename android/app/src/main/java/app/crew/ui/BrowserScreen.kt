@@ -657,12 +657,16 @@ private fun LiveView(
         val boxW = maxWidth
         val boxH = maxHeight
         // Vertical: the page is laid out for exactly this box. Horizontal: the normal window.
-        // The tab's own layout comes from the server (an agent using it resets it to horizontal); this
-        // only keeps a vertical tab sized to this box, for example after the phone rotates.
-        LaunchedEffect(tab.id, vertical, boxW, boxH) {
+        // The tab's layout lives on the server: it brings the owner's vertical back by itself and drops it
+        // when an agent uses the tab. So opening the view sends nothing (a cached "vertical" could undo the
+        // agent's layout); only a new box size (the phone rotated) re-sizes a vertical tab.
+        var sentBox by remember(tab.id) { mutableStateOf<Triple<Int, Int, Float>?>(null) }
+        LaunchedEffect(tab.id, boxW, boxH) {
             val box = Triple(boxW.value.roundToInt(), boxH.value.roundToInt(), min(density.density, 1920f / boxH.value))
             viewModel.viewBox = box
-            if (vertical) viewModel.applyView(tab.id, true, box.first, box.second, box.third)
+            val before = sentBox
+            sentBox = box
+            if (before != null && before != box && vertical) viewModel.applyView(tab.id, true, box.first, box.second, box.third)
         }
 
         if (current == null) {
