@@ -1,6 +1,11 @@
 package app.crew
 
 import android.app.Application
+import android.content.ContentValues
+import android.content.Intent
+import android.net.Uri
+import android.provider.MediaStore
+import app.crew.data.Attachment
 import app.crew.constants.Timing
 import app.crew.data.ApiException
 import app.crew.data.Approval
@@ -40,6 +45,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.json.JSONObject
 
 sealed interface Connection {
@@ -602,6 +608,61 @@ class CrewViewModel(private val app: Application) {
         notifier.clear(session.id)
         act { it.deleteSession(session.id) }
     }
+
+    private val _downloading = MutableStateFlow<Set<String>>(emptySet())
+    /** Paths of handed-back files being downloaded right now. */
+    val downloading: StateFlow<Set<String>> = _downloading.asStateFlow()
+    private val saved = HashMap<String, Uri>() // "path|size" -> its copy in Downloads
+
+    /** Saves a file the agent handed back to Downloads/Crew (once), then opens it. */
+    fun openSharedFile(file: Attachment) {
+        val client = api ?: run { toast("Not connected to Crew"); return }
+        if (file.path in _downloading.value) return
+        val key = "${file.path}|${file.size}"
+        saved[key]?.takeIf { exists(it) }?.let { if (view(it, file.mime)) return }
+        _downloading.update { it + file.path }
+        scope.launch {
+            try {
+                val uri = withContext(Dispatchers.IO) { saveToDownloads(client, file) }
+                saved[key] = uri
+                if (!view(uri, file.mime)) toast("Saved ${file.name} to Downloads/Crew")
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                toast(e.message ?: "Download failed")
+            } finally {
+                _downloading.update { it - file.path }
+            }
+        }
+    }
+
+    private fun saveToDownloads(client: CrewApi, file: Attachment): Uri {
+        val resolver = app.contentResolver
+        val values = ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, file.name)
+            put(MediaStore.MediaColumns.MIME_TYPE, file.mime)
+            put(MediaStore.MediaColumns.RELATIVE_PATH, "Download/Crew")
+            put(MediaStore.MediaColumns.IS_PENDING, 1)
+        }
+        val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: error("Could not save to Downloads")
+        try {
+            resolver.openOutputStream(uri)!!.use { client.downloadFile(file.path, it) }
+            resolver.update(uri, ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }, null, null)
+            return uri
+        } catch (e: Exception) {
+            resolver.delete(uri, null, null)
+            throw e
+        }
+    }
+
+    /** Opens a saved file in an app that can show it; false when no app can. */
+    private fun view(uri: Uri, mime: String): Boolean {
+        val intent = Intent(Intent.ACTION_VIEW).setDataAndType(uri, mime)
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+        return runCatching { app.startActivity(intent) }.isSuccess
+    }
+
+    private fun exists(uri: Uri): Boolean = runCatching { app.contentResolver.openFileDescriptor(uri, "r")?.close() }.isSuccess
 
     fun dismissMessage() = _state.update { it.copy(message = null) }
 

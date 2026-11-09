@@ -21,6 +21,7 @@ from typing import Any
 import asyncpg
 
 from . import db
+from . import files as shared_files
 from .acp import AcpError, AcpProcess, MethodNotFound
 from .attachments import Attachments, UnknownUpload, prompt_blocks
 from .config import Settings
@@ -164,6 +165,7 @@ class Hub:
         self.attachments = Attachments(settings.data_dir / "common" / "attachments", settings.max_upload_mb * 1024 * 1024)
         self.probing: set[str] = set()
         self.tab_owner: dict[str, uuid.UUID] = {}  # browser tab id -> session that last used it
+        self.last_sent: dict[uuid.UUID, dict[str, Any]] = {}  # last session state emitted, to skip repeats
 
     # lifecycle
 
@@ -292,7 +294,16 @@ class Hub:
         return seq
 
     async def emit_session(self, session_id: uuid.UUID) -> None:
-        await self.emit(session_id, "session", await self.get_session(session_id))
+        """Send the session's state, unless it is the same as the last one sent (the time stamp aside)."""
+        try:
+            session = await self.get_session(session_id)
+        except NotFound:
+            return
+        same = {k: v for k, v in session.items() if k != "updated_at"}
+        if self.last_sent.get(session_id) == same:
+            return
+        self.last_sent[session_id] = same
+        await self.emit(session_id, "session", session)
 
     async def events(self, after: int, session_id: uuid.UUID | None = None, limit: int = 1000) -> list[dict[str, Any]]:
         if session_id is None:
@@ -449,6 +460,7 @@ class Hub:
                 del self.tab_owner[tab]
         # Events, approvals and messages go with it (on delete cascade).
         await self.pool.execute("delete from sessions where id = $1", session_id)
+        self.last_sent.pop(session_id, None)
 
     async def send(
         self,
@@ -477,6 +489,8 @@ class Hub:
             raise NotFound(f"unknown upload {exc}") from None
         tabs = [{k: str(t.get(k) or "") for k in ("id", "title", "url")} for t in tabs or []]
         wanted = delivery or ("steer" if self.can_steer(rt.engine) else "queue")
+        if wanted == "steer" and not rt.running:
+            wanted = "queue"  # nothing to steer into: it simply starts the next turn
         message_id = uuid.uuid4()
         try:
             await self.pool.execute(
@@ -769,7 +783,7 @@ class Hub:
         for config_id, value in (row["config_wanted"] or {}).items():
             # A reopened session may not remember the pick, so it is sent again; a new one only if it differs.
             if reopened or current.get(config_id) != value:
-                await self._apply_config(rt, proc, config_id, value)
+                await self._apply_config(rt, proc, config_id, value, emit=False)
         await self.emit_session(rt.id)
         return proc
 
@@ -779,7 +793,7 @@ class Hub:
         except AcpError as exc:
             await self.emit(rt.id, "error", {"message": f"Could not switch to mode {mode}: {exc}"})
 
-    async def _apply_config(self, rt: Runtime, proc: AcpProcess, config_id: str, value: Any) -> None:
+    async def _apply_config(self, rt: Runtime, proc: AcpProcess, config_id: str, value: Any, emit: bool = True) -> None:
         try:
             result = await proc.request(
                 "session/set_config_option",
@@ -802,7 +816,8 @@ class Hub:
                 config_id,
                 value,
             )
-        await self.emit_session(rt.id)
+        if emit:
+            await self.emit_session(rt.id)
 
     # turns
 
@@ -871,7 +886,11 @@ class Hub:
             rt.usage,
             preview,
         )
-        await self.emit(rt.id, "turn_end", {"stop_reason": stop_reason, "usage": usage, "preview": preview})
+        end: dict[str, Any] = {"stop_reason": stop_reason, "usage": usage, "preview": preview}
+        handed = shared_files.mentioned(rt.assistant_text, self.settings.shared)
+        if handed:
+            end["files"] = handed
+        await self.emit(rt.id, "turn_end", end)
         await self.emit_session(rt.id)
 
     # agent -> client

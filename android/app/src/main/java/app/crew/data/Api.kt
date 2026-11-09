@@ -226,6 +226,24 @@ class CrewApi(val baseUrl: String, private val token: String, val route: Route) 
         }
     }
 
+    /** Streams a file an agent handed back (GET /api/files) into [out]. */
+    fun downloadFile(path: String, out: java.io.OutputStream) {
+        val conn = URL("$baseUrl/api/files?path=" + java.net.URLEncoder.encode(path, "UTF-8").replace("+", "%20"))
+            .openConnection() as HttpURLConnection
+        try {
+            conn.connectTimeout = Timing.CONNECT_TIMEOUT_MS
+            conn.readTimeout = 120_000
+            conn.setRequestProperty("Authorization", "Bearer $token")
+            val code = conn.responseCode
+            if (code !in 200..299) {
+                throw ApiException(code, if (code == 404) "The file is no longer there" else "Download failed (HTTP $code)")
+            }
+            conn.inputStream.use { it.copyTo(out, 64 * 1024) }
+        } finally {
+            conn.disconnect()
+        }
+    }
+
     internal fun rawCall(method: String, path: String, body: JSONObject? = null): String = call(method, path, body)
 
     private fun obj(method: String, path: String, body: JSONObject? = null) =

@@ -38,20 +38,27 @@ SESSION_COLUMNS = (
 
 
 def session_json(row: asyncpg.Record, pending_approvals: int = 0) -> dict[str, Any]:
+    # One answer for the current mode: the agent's mode config option when it has one, else the mode column.
+    options = row["config_options"] or []
+    option = next((o for o in options if o.get("category") == "mode" and o.get("current")), None)
+    mode = option["current"] if option else row["mode"]
+    modes = row["modes"]
+    if modes and mode:
+        modes = {**modes, "currentModeId": mode}
     return {
         "id": str(row["id"]),
         "engine": row["engine"],
         "title": row["title"],
         "status": row["status"],
-        "mode": row["mode"],
-        "modes": row["modes"],
+        "mode": mode,
+        "modes": modes,
         "auto_approve": row["auto_approve"],
         "usage": row["usage"],
         "last_text": row["last_text"],
         "pinned": row["pinned"],
         "archived": row["archived"],
         "agent": row["agent"],
-        "config_options": row["config_options"] or [],
+        "config_options": options,
         "config": row["config_wanted"] or {},
         "model_used": row["model_used"],
         "browser_tab": row["browser_tab"],

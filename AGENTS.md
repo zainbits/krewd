@@ -19,6 +19,7 @@ Crew is a self-hosted, agent-agnostic agent team. The owner asks for a task in t
   - `hub.py`: sessions, turns, approvals, config options, and messages: stored first, then steered into the running turn (ACP `_session/steering`, only where the agent advertises it), queued, or sent after an interrupt; queued messages survive a restart. It also links a browser tab to the session whose agent is using it, and has the emergency restart.
   - `api.py`: HTTP API (see `docs/api.md`).
   - `attachments.py`: uploads from the phone, saved as `~/.crew/common/attachments/<session id prefix>-<name>` and passed to the agent as paths and ACP resource links.
+  - `files.py`: files the agents hand back: paths in a reply that name a file in a shared folder (`CREW_SHARE_DIRS`, default `$CREW_WORKDIR/outputs`) are listed on `turn_end`, and `GET /api/files` serves only those folders. The app saves them to Downloads/Crew.
   - `browser.py`: the agents' Brave over DevTools: tabs (list, new, close), live JPEG screencast of a tab, mouse (move, press, release, click, double-click, right-click), scrolls, keys and typed text, the phone-sized vertical view, and a watcher that sees which tab opens or navigates. Typed text goes straight to the page and is never logged or stored.
   - `schema*.sql`: migrations, applied in order by `db.migrate`.
   - `tests/`: end-to-end tests against a fake ACP agent and a real PostgreSQL.
@@ -57,6 +58,7 @@ All config is in `~/.config/crew/` (folder mode 700, files 600):
   - `CREW_DATABASE_URL`, and `CREW_TEST_DATABASE_URL` for a throwaway test database.
   - `CREW_WORKDIR`: the agents' starting folder. Default `~`.
   - `CREW_PORT`: default 8800.
+  - `CREW_SHARE_DIRS`: folders the agents hand files back from. Default `$CREW_WORKDIR/outputs`.
   - `CREW_BROWSER_PROFILE` and `CREW_CDP_PORT`.
 - `engines.toml`: start from `deploy/engines.example.toml`. Each engine is an ACP command with optional environment variables.
 - `token`: the phone's bearer token, created on the first start. `./master.sh token` shows it.

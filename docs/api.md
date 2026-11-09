@@ -33,7 +33,7 @@ Event: `{seq, session_id, kind, payload, created_at}`. Kinds:
 - `tool` `{tool_call_id, title, kind, status, input, output, paths}`: replace the row with the same id
 - `plan` `{entries: [{content, status}]}`
 - `approval` approval object (pending, then again when decided)
-- `turn_start` `{message_id}`, `turn_end` `{stop_reason, usage, preview}` (`preview`: first line of the reply), `error` `{message}`
+- `turn_start` `{message_id}`, `turn_end` `{stop_reason, usage, preview, files?}` (`preview`: first line of the reply; `files`: see Files from the agent), `error` `{message}`
 - `session` session object, whenever it changes
 
 ## Messages and delivery
@@ -41,7 +41,7 @@ Event: `{seq, session_id, kind, payload, created_at}`. Kinds:
 Every message is stored before anything else happens, so it survives the phone going offline and the server restarting. Message: `{id, session_id, client_id, seq, delivery, state, delivered_how, created_at, delivered_at}`.
 
 - `state` `queued`: the server has it (one tick in the app). `delivered`: the agent has it (two ticks), `delivered_how` `started` (its turn began) or `steered` (the agent confirmed it was injected into the running turn). `cancelled`: dropped by Stop.
-- `delivery` while a turn runs: `steer` sends ACP `_session/steering` with `_meta.steering.idleBehavior: "promptRequired"`; if the agent answers `promptRequired` (the turn just ended) or does not support it, the message runs as the next prompt. `queue` runs it after the current turn. `interrupt` stops the turn (like Stop, but keeps the queue) and runs this message next. Without `delivery`, the server steers where the engine supports steering and queues otherwise.
+- `delivery` while a turn runs: `steer` sends ACP `_session/steering` with `_meta.steering.idleBehavior: "promptRequired"`; if the agent answers `promptRequired` (the turn just ended) or does not support it, the message runs as the next prompt. `queue` runs it after the current turn. `interrupt` stops the turn (like Stop, but keeps the queue) and runs this message next. Without `delivery`, the server steers where the engine supports steering and queues otherwise. A `steer` sent while no turn runs is stored as `queue`, since it simply starts the next turn.
 - `client_id`: the phone's own id for the message. Sending the same `client_id` again returns the stored message instead of a second copy, so "tap to resend" is safe.
 - `tabs`: browser tabs from "Add to chat". The agent's prompt lists them with their DevTools target ids.
 
@@ -72,3 +72,9 @@ Typed text is passed to `Input.insertText` and nowhere else: not logged, not sto
 2. Send the ids with a message: `POST /api/sessions` or `POST /api/sessions/{id}/messages` with `{text?, attachments: [id, ...]}` (text may be empty when files are attached). Each id works once.
 
 Files are saved as `~/.crew/common/attachments/<first 8 characters of the session id>-<file name>` (`CREW_DATA_DIR` changes `~/.crew`), with `-2`, `-3` added on name clashes. The `user` event lists them as `attachments: [{name, path, size, mime}]`, and the agent's prompt gets the paths as text plus one ACP `resource_link` per file.
+
+## Files from the agent
+
+An agent hands a file back by saving it in a shared folder (`CREW_SHARE_DIRS`, colon-separated; default `$CREW_WORKDIR/outputs`) and writing its path in the reply. At the end of the turn, every absolute or `~` path in the reply that names a regular file inside a shared folder is listed on `turn_end` as `files: [{path, name, size, mime}]` (at most 10).
+
+`GET /api/files?path=<path>` returns the file as a download. Only regular files inside the shared folders are served, after resolving symlinks and `..`; anything else is 404.

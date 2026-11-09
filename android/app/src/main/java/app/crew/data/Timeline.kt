@@ -41,6 +41,9 @@ data class PlanItem(override val key: String, val entries: List<PlanEntry>) : Ch
 
 data class ApprovalItem(override val key: String, val approval: Approval) : ChatItem
 
+/** Files the agent handed back in its reply (they live in the server's shared folders). */
+data class FilesItem(override val key: String, val files: List<Attachment>) : ChatItem
+
 data class NoticeItem(override val key: String, val text: String, val isError: Boolean) : ChatItem
 
 /**
@@ -124,6 +127,7 @@ class Timeline {
             "error" -> add(NoticeItem("error-${event.seq}", p.optString("message", "Something went wrong"), isError = true))
             "turn_end" -> {
                 closePlan()
+                Attachment.list(p.optJSONArray("files")).takeIf { it.isNotEmpty() }?.let { add(FilesItem("files-${event.seq}", it)) }
                 when (p.optString("stop_reason")) {
                     "cancelled" -> add(NoticeItem("end-${event.seq}", "Stopped", isError = false))
                     "max_tokens", "max_turn_requests" -> add(NoticeItem("end-${event.seq}", "Stopped at the agent's limit", isError = true))

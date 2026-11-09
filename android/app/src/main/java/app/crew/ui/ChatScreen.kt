@@ -45,6 +45,7 @@ import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -72,6 +73,7 @@ import app.crew.UiState
 import app.crew.constants.ShellDimensions
 import app.crew.data.ApprovalItem
 import app.crew.data.ChatItem
+import app.crew.data.FilesItem
 import app.crew.data.NoticeItem
 import app.crew.data.PendingFile
 import app.crew.data.PlanItem
@@ -382,6 +384,10 @@ private fun ChatRow(item: ChatItem, viewModel: CrewViewModel, busy: Boolean) {
             }
         }
         is ApprovalItem -> ApprovalCard(item.approval, taskTitle = null, onDecide = { viewModel.decide(item.approval, it) })
+        is FilesItem -> {
+            val downloading by viewModel.downloading.collectAsStateWithLifecycle()
+            HandedFiles(item.files, downloading, viewModel::openSharedFile)
+        }
         is NoticeItem -> Text(
             item.text,
             style = MaterialTheme.typography.bodySmall,

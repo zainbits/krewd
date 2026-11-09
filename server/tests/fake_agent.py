@@ -106,6 +106,9 @@ async def run_prompt(request_id: int, sid: str, text: str, params: dict) -> None
     if running.get(sid):
         update(sid, {"sessionUpdate": "agent_message_chunk", "messageId": "m4",
                      "content": {"type": "text", "text": " steered=" + "|".join(running[sid])}})
+    if text.startswith("hand "):  # reply with the paths that follow, the way an agent names a file it made
+        update(sid, {"sessionUpdate": "agent_message_chunk", "messageId": "m1",
+                     "content": {"type": "text", "text": " Saved it at `" + text.split(" ", 1)[1] + "`."}})
     if "calls" in text:
         update(sid, {"sessionUpdate": "agent_message_chunk", "messageId": "m2",
                      "content": {"type": "text", "text": " calls=" + ",".join(f"{c[1]}:{c[2]}" for c in config_calls if c[0] == sid)}})

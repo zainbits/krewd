@@ -36,6 +36,11 @@ class Settings:
     cdp_port: int = 9222
     data_dir: Path = Path.home() / ".crew"
     max_upload_mb: int = 1024
+    share_dirs: tuple[Path, ...] = ()  # folders the agents hand files back from; empty means workdir/outputs
+
+    @property
+    def shared(self) -> list[Path]:
+        return list(self.share_dirs) or [self.workdir / "outputs"]
 
 
 def load_env_file(path: Path = ENV_FILE) -> None:
@@ -98,6 +103,9 @@ def load_settings() -> Settings:
         cdp_port=int(os.environ.get("CREW_CDP_PORT", "9222")),
         data_dir=Path(os.path.expanduser(os.environ.get("CREW_DATA_DIR", "~/.crew"))),
         max_upload_mb=int(os.environ.get("CREW_MAX_UPLOAD_MB", "1024")),
+        share_dirs=tuple(
+            Path(os.path.expanduser(d)) for d in os.environ.get("CREW_SHARE_DIRS", "").split(os.pathsep) if d.strip()
+        ),
     )
 
 

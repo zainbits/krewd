@@ -353,3 +353,46 @@ async def test_delete_stops_the_turn_and_removes_the_task(hub):
         pass
     other = await hub.create_session("Say hello")  # the engine keeps working for other tasks
     await wait_for(hub, uuid.UUID(other["id"]), "turn_end")
+
+
+async def test_files_the_agent_names_are_handed_back(hub):
+    shared = hub.settings.workdir / "outputs"
+    shared.mkdir()
+    (shared / "report.pdf").write_bytes(b"%PDF-1.4 test")
+    (hub.settings.workdir / "secret.txt").write_text("not shared")
+    (shared / "escape.txt").symlink_to(hub.settings.workdir / "secret.txt")
+    named = f"{shared}/report.pdf {shared}/escape.txt {hub.settings.workdir}/secret.txt {shared}/missing.pdf"
+    session = await hub.create_session("hand " + named)
+    sid = uuid.UUID(session["id"])
+    end = await wait_for(hub, sid, "turn_end")
+    assert end["files"] == [{"path": str((shared / "report.pdf").resolve()), "name": "report.pdf",
+                             "size": 13, "mime": "application/pdf"}]
+    app = create_app(hub, TOKEN, lifespan_hub=False)
+    transport = httpx.ASGITransport(app=app)
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        assert (await client.get("/api/files", params={"path": f"{shared}/report.pdf"})).status_code == 401
+        got = await client.get("/api/files", params={"path": f"{shared}/report.pdf"}, headers=headers)
+        assert got.status_code == 200 and got.content == b"%PDF-1.4 test"
+        assert "report.pdf" in got.headers["content-disposition"]
+        for outside in (f"{shared}/escape.txt", f"{hub.settings.workdir}/secret.txt", f"{shared}/../secret.txt", "secret.txt"):
+            assert (await client.get("/api/files", params={"path": outside}, headers=headers)).status_code == 404
+
+
+async def test_a_message_to_an_idle_task_is_queued_not_steered(hub):
+    session = await hub.create_session("hi")
+    sid = uuid.UUID(session["id"])
+    await wait_for(hub, sid, "turn_end")
+    message = await hub.send(sid, "and again")
+    assert message["delivery"] == "queue"
+
+
+async def test_repeated_session_states_are_sent_once(hub):
+    session = await hub.create_session("hi")
+    sid = uuid.UUID(session["id"])
+    await wait_for(hub, sid, "turn_end")
+    await hub.emit_session(sid)
+    await hub.emit_session(sid)
+    states = [e["payload"] for e in await hub.events(0, sid) if e["kind"] == "session"]
+    plain = [{k: v for k, v in p.items() if k != "updated_at"} for p in states]
+    assert all(a != b for a, b in zip(plain, plain[1:]))

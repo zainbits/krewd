@@ -9,10 +9,11 @@ from contextlib import asynccontextmanager, suppress
 from typing import Any, Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, model_validator
 
 from . import __version__
+from . import files as shared_files
 from .attachments import TooLarge
 from .browser import Browser, BrowserUnavailable, TabGone
 from .hub import Conflict, Hub, NotFound
@@ -211,6 +212,15 @@ def create_app(hub: Hub, token: str, lifespan_hub: bool = True) -> FastAPI:
         """Raw file body (any type), streamed to disk. Send the returned id with a message to attach it."""
         mime = (request.headers.get("content-type") or "").split(";")[0].strip() or None
         return await hub.attachments.receive(name, mime, request.stream())
+
+    @app.get("/api/files", dependencies=auth)
+    async def shared_file(path: str = Query(min_length=1, max_length=4096)) -> FileResponse:
+        """A file an agent handed back: only regular files inside the shared folders (CREW_SHARE_DIRS)."""
+        real = shared_files.resolve(path, hub.settings.shared)
+        if real is None:
+            raise HTTPException(404, "no such shared file")
+        info = shared_files.describe(real)
+        return FileResponse(real, media_type=info["mime"], filename=info["name"])
 
     @app.get("/api/approvals", dependencies=auth)
     async def approvals(status: str | None = "pending") -> list[dict[str, Any]]:

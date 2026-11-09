@@ -13,6 +13,8 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.InputChip
 import androidx.compose.material3.InputChipDefaults
+import androidx.compose.material3.SuggestionChip
+import androidx.compose.material3.SuggestionChipDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -73,6 +75,24 @@ fun SentFiles(files: List<Attachment>, color: Color) {
                 Icon(painterResource(R.drawable.ic_attach_24), contentDescription = null, tint = color, modifier = Modifier.size(16.dp))
                 Text("${f.name} · ${humanSize(f.size)}", color = color, style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
+        }
+    }
+}
+
+/** Files the agent handed back: tap one to save it to Downloads/Crew and open it. */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+fun HandedFiles(files: List<Attachment>, downloading: Set<String>, onOpen: (Attachment) -> Unit) {
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        files.forEach { f ->
+            SuggestionChip(
+                onClick = { onOpen(f) },
+                label = { Text("${f.name} · ${humanSize(f.size)}", maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                icon = {
+                    if (f.path in downloading) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+                    else Icon(painterResource(R.drawable.ic_download_24), contentDescription = "Download", Modifier.size(SuggestionChipDefaults.IconSize))
+                },
+            )
         }
     }
 }
