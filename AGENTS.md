@@ -16,13 +16,13 @@ Crew is a self-hosted, agent-agnostic agent team. The owner asks for a task in t
 
 - `server/`: the Crew server, `crew_server` (Python 3.12, FastAPI, asyncpg, managed with uv).
   - `acp.py`: JSON-RPC over stdio to one agent process per engine.
-  - `hub.py`: sessions, turns, approvals, config options.
+  - `hub.py`: sessions, turns, approvals, config options, and messages: stored first, then steered into the running turn (ACP `_session/steering`, only where the agent advertises it), queued, or sent after an interrupt; queued messages survive a restart. It also links a browser tab to the session whose agent is using it, and has the emergency restart.
   - `api.py`: HTTP API (see `docs/api.md`).
   - `attachments.py`: uploads from the phone, saved as `~/.crew/common/attachments/<session id prefix>-<name>` and passed to the agent as paths and ACP resource links.
-  - `browser.py`: the agents' Brave over DevTools: tab list, live JPEG screencast of a tab, taps, scrolls, keys and typed text. Typed text goes straight to the page and is never logged or stored.
+  - `browser.py`: the agents' Brave over DevTools: tabs (list, new, close), live JPEG screencast of a tab, mouse (move, press, release, click, double-click, right-click), scrolls, keys and typed text, the phone-sized vertical view, and a watcher that sees which tab opens or navigates. Typed text goes straight to the page and is never logged or stored.
   - `schema*.sql`: migrations, applied in order by `db.migrate`.
   - `tests/`: end-to-end tests against a fake ACP agent and a real PostgreSQL.
-- `android/`: the app (Kotlin, Jetpack Compose, `app.crew`, minSdk 36).
+- `android/`: the app (Kotlin, Jetpack Compose, `app.crew`, minSdk 36). `CrewViewModel` lives for the whole process (`CrewApplication`); `Notifier` and its `LiveService` (a foreground service) show a live-activity notification per running task and keep alerts coming while the phone is locked. Markdown is rendered with commonmark-java.
 - `deploy/`:
   - `supervise.py`: keeps one command alive in a named tmux session for systemd, and stops it gracefully.
   - `run-server.sh`, `run-browser.sh`.
@@ -39,6 +39,8 @@ The server and the browser each have a systemd user unit, and each unit shows it
 - `crew-browser.service` runs tmux session `agent-brave`. It starts with the desktop login, because Brave needs the display and the desktop keyring to decrypt its cookies.
 
 systemd restarts either one 10 s after it dies, and gives up after 6 restarts in 10 minutes (then `./master.sh start` tries again; the server also waits up to 3 minutes for the database at boot instead of crashing). To stop Brave, `supervise.py` sends `Browser.close` over DevTools, which flushes logins to disk; killing it can lose logins saved in the last ~30 s. The owner can always `tmux attach -t crew` or `tmux attach -t agent-brave` to watch or take over.
+
+Emergency restart: Settings in the app has "Restart Crew backend" (`POST /api/admin/restart`). The server stops every agent process group and exits; systemd brings it back after `RestartSec`, and startup marks the interrupted turns as errors. The browser unit is left alone. Closing or swiping away the app never cancels a task: only Stop does.
 
 User units, not system units, on purpose:
 - The agents must run as the owner's user, with their `~/.claude`, `~/.codex`, git and gh logins.

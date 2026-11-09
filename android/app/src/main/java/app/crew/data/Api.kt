@@ -40,9 +40,57 @@ class Prefs(context: Context) {
             .apply()
     }
 
+    /** The owner's last picks per agent (engine id): applied to that agent's new tasks. */
+    fun engine(id: String): EngineDefaults = prefs.getString("engine_$id", null)?.let(EngineDefaults::parse) ?: EngineDefaults()
+
+    fun updateEngine(id: String, change: (EngineDefaults) -> EngineDefaults) {
+        prefs.edit().putString("engine_$id", change(engine(id)).toJson()).apply()
+    }
+
+    fun vertical(): Boolean = prefs.getBoolean("browser_vertical", false)
+
+    fun setVertical(on: Boolean) = prefs.edit().putBoolean("browser_vertical", on).apply()
+
+    /** Cursor (true) or touch input for the browser, remembered per agent, with the last pick as the fallback. */
+    fun cursorMode(engineId: String?): Boolean =
+        engineId?.let { engine(it).cursor } ?: prefs.getBoolean("browser_cursor", true)
+
+    fun setCursorMode(engineId: String?, cursor: Boolean) {
+        prefs.edit().putBoolean("browser_cursor", cursor).apply()
+        if (engineId != null) updateEngine(engineId) { it.copy(cursor = cursor) }
+    }
+
     companion object {
         const val DEFAULT_LAN = ""
         const val DEFAULT_TAILNET = ""
+    }
+}
+
+/** One agent's remembered settings: its config picks (model, effort, mode...), legacy mode, auto-approve and browser input. */
+data class EngineDefaults(
+    val config: Map<String, String> = emptyMap(),
+    val mode: String? = null,
+    val autoApprove: Boolean = false,
+    val cursor: Boolean? = null,
+) {
+    fun toJson(): String = JSONObject()
+        .put("config", JSONObject(config))
+        .put("mode", mode ?: JSONObject.NULL)
+        .put("auto_approve", autoApprove)
+        .put("cursor", cursor ?: JSONObject.NULL)
+        .toString()
+
+    companion object {
+        fun parse(text: String): EngineDefaults = runCatching {
+            val o = JSONObject(text)
+            val c = o.optJSONObject("config") ?: JSONObject()
+            EngineDefaults(
+                config = c.keys().asSequence().associateWith { c.optString(it) },
+                mode = o.optStringOrNull("mode"),
+                autoApprove = o.optBoolean("auto_approve"),
+                cursor = if (o.isNull("cursor") || !o.has("cursor")) null else o.optBoolean("cursor"),
+            )
+        }.getOrDefault(EngineDefaults())
     }
 }
 
@@ -65,6 +113,7 @@ class CrewApi(val baseUrl: String, private val token: String, val route: Route) 
                     isDefault = it.optBoolean("default"),
                     agent = AgentInfo.from(it.optJSONObject("agent")),
                     config = ConfigOption.list(it.optJSONArray("config_options")),
+                    steering = it.optBoolean("steering"),
                 )
             },
             workdir = o.optString("workdir"),
@@ -73,9 +122,19 @@ class CrewApi(val baseUrl: String, private val token: String, val route: Route) 
 
     fun sessions(): List<SessionInfo> = arr("GET", "/api/sessions").objects().map(SessionInfo::from)
 
-    fun createSession(text: String, autoApprove: Boolean, engine: String?, config: Map<String, String>, attachments: List<String> = emptyList()): SessionInfo {
+    fun createSession(
+        text: String,
+        autoApprove: Boolean,
+        engine: String?,
+        config: Map<String, String>,
+        attachments: List<String> = emptyList(),
+        tabs: List<BrowserTab> = emptyList(),
+        mode: String? = null,
+    ): SessionInfo {
         val body = JSONObject().put("text", text).put("auto_approve", autoApprove)
         if (attachments.isNotEmpty()) body.put("attachments", JSONArray(attachments))
+        if (tabs.isNotEmpty()) body.put("tabs", tabsJson(tabs))
+        if (mode != null) body.put("mode", mode)
         if (engine != null) body.put("engine", engine)
         if (config.isNotEmpty()) body.put("config", JSONObject(config))
         return SessionInfo.from(obj("POST", "/api/sessions", body))
@@ -84,10 +143,24 @@ class CrewApi(val baseUrl: String, private val token: String, val route: Route) 
     fun updateSession(id: String, changes: JSONObject): SessionInfo =
         SessionInfo.from(obj("PATCH", "/api/sessions/$id", changes))
 
-    fun send(id: String, text: String, attachments: List<String> = emptyList()) {
-        val body = JSONObject().put("text", text)
+    /**
+     * Sends a message. [clientId] makes a resend safe (the server keeps one copy); [delivery] is steer,
+     * queue or interrupt, or null for the server's default. Returns the stored message.
+     */
+    fun send(id: String, text: String, attachments: List<String>, tabs: List<BrowserTab>, delivery: String?, clientId: String): JSONObject {
+        val body = JSONObject().put("text", text).put("client_id", clientId)
         if (attachments.isNotEmpty()) body.put("attachments", JSONArray(attachments))
-        obj("POST", "/api/sessions/$id/messages", body)
+        if (tabs.isNotEmpty()) body.put("tabs", tabsJson(tabs))
+        if (delivery != null) body.put("delivery", delivery)
+        return obj("POST", "/api/sessions/$id/messages", body).optJSONObject("message") ?: JSONObject()
+    }
+
+    private fun tabsJson(tabs: List<BrowserTab>) =
+        JSONArray(tabs.map { JSONObject().put("id", it.id).put("title", it.title).put("url", it.url) })
+
+    /** Emergency restart of the server and its agents; it is back after about 10 to 15 seconds. */
+    fun restartServer() {
+        obj("POST", "/api/admin/restart", JSONObject())
     }
 
     fun cancel(id: String) {
@@ -116,7 +189,7 @@ class CrewApi(val baseUrl: String, private val token: String, val route: Route) 
         conn.readTimeout = 30_000 // the server repeats the last frame every 10 s
         conn.setRequestProperty("Authorization", "Bearer $token")
         conn.setRequestProperty("Accept", "multipart/x-mixed-replace")
-        return FrameStream(conn)
+        return FrameStream(conn, tabId)
     }
 
     /** Streams a file to the server (no size limit in memory). Returns the upload id. */

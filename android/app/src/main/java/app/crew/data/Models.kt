@@ -97,6 +97,8 @@ data class SessionInfo(
     val agent: AgentInfo?,
     val config: List<ConfigOption>,
     val modelUsed: String?,
+    /** The browser tab the agent last used, seen from the browser side. */
+    val browserTab: BrowserTab? = null,
 ) {
     val isBusy: Boolean get() = status == "running" || status == "waiting"
 
@@ -124,6 +126,9 @@ data class SessionInfo(
                 agent = AgentInfo.from(o.optJSONObject("agent")),
                 config = ConfigOption.list(o.optJSONArray("config_options")),
                 modelUsed = o.optStringOrNull("model_used"),
+                browserTab = o.optJSONObject("browser_tab")?.let {
+                    BrowserTab(it.optString("id"), it.optString("title"), it.optString("url"))
+                },
             )
         }
     }
@@ -181,6 +186,8 @@ data class EngineInfo(
     val isDefault: Boolean,
     val agent: AgentInfo? = null,
     val config: List<ConfigOption> = emptyList(),
+    /** The agent takes messages into a running turn (ACP `_session/steering`). */
+    val steering: Boolean = false,
 )
 
 data class ServerState(val lastSeq: Long, val engines: List<EngineInfo>, val workdir: String)

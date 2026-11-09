@@ -5,7 +5,22 @@ sealed interface ChatItem {
     val key: String
 }
 
-data class UserItem(override val key: String, val text: String, val attachments: List<Attachment> = emptyList()) : ChatItem
+/**
+ * A message the owner sent. [state]: queued (stored on the server: one tick), delivered (the agent has it:
+ * two ticks; [how] is "steered" or "started"), cancelled (dropped by Stop). Local rows not yet stored use
+ * sending and failed.
+ */
+data class UserItem(
+    override val key: String,
+    val text: String,
+    val attachments: List<Attachment> = emptyList(),
+    val tabs: List<BrowserTab> = emptyList(),
+    val messageId: String? = null,
+    val clientId: String? = null,
+    val delivery: String? = null,
+    val state: String? = null,
+    val how: String? = null,
+) : ChatItem
 
 data class TextItem(override val key: String, val role: String, val text: String) : ChatItem {
     val isThought: Boolean get() = role == "thought"
@@ -36,6 +51,9 @@ data class NoticeItem(override val key: String, val text: String, val isError: B
 class Timeline {
     private val items = ArrayList<ChatItem>()
     private val index = HashMap<String, Int>()
+    private val messages = HashMap<String, String>() // message id -> row key
+    /** Client ids the server has stored, so local "sending" rows can be dropped. */
+    val clientIds = HashSet<String>()
     var lastSeq: Long = 0
         private set
 
@@ -46,7 +64,28 @@ class Timeline {
         lastSeq = event.seq
         val p = event.payload
         when (event.kind) {
-            "user" -> add(UserItem("user-${event.seq}", p.optString("text"), Attachment.list(p.optJSONArray("attachments"))))
+            "user" -> {
+                val messageId = p.optStringOrNull("message_id")
+                val item = UserItem(
+                    key = "user-${event.seq}",
+                    text = p.optString("text"),
+                    attachments = Attachment.list(p.optJSONArray("attachments")),
+                    tabs = p.optJSONArray("tabs").objects().map { BrowserTab(it.optString("id"), it.optString("title"), it.optString("url")) },
+                    messageId = messageId,
+                    clientId = p.optStringOrNull("client_id"),
+                    delivery = p.optStringOrNull("delivery"),
+                    // Messages from before delivery tracking: treat as delivered.
+                    state = if (messageId == null) "delivered" else "queued",
+                )
+                add(item)
+                if (messageId != null) messages[messageId] = item.key
+                item.clientId?.let { clientIds.add(it) }
+            }
+            "message" -> {
+                val key = messages[p.optString("id")] ?: return false
+                val item = items[index[key] ?: return false] as? UserItem ?: return false
+                put(key, item.copy(state = p.optString("state"), how = p.optStringOrNull("delivered_how")))
+            }
             "text" -> {
                 val key = "text-" + p.optString("message_id", event.seq.toString())
                 val existing = index[key]?.let { items[it] as? TextItem }

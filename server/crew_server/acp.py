@@ -12,6 +12,7 @@ import itertools
 import json
 import logging
 import os
+import signal
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
@@ -114,6 +115,18 @@ class AcpProcess:
             await asyncio.wait_for(self._proc.wait(), 10)
         except TimeoutError:
             self._proc.kill()
+
+    @property
+    def pid(self) -> int | None:
+        return self._proc.pid if self._proc else None
+
+    @property
+    def steering(self) -> bool:
+        """Whether the agent advertises the `_session/steering` extension (mid-turn messages)."""
+        for meta in (self.init_result.get("_meta"), self.capabilities.get("_meta")):
+            if isinstance(meta, dict) and isinstance(meta.get("steering"), dict) and meta["steering"].get("supported"):
+                return True
+        return False
 
     async def request(self, method: str, params: dict[str, Any], timeout: float | None = None) -> dict[str, Any]:
         if not self.alive:

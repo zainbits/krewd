@@ -1,4 +1,4 @@
-"""A tiny ACP agent for tests. Prompt words steer it: perm, slow, crash."""
+"""A tiny ACP agent for tests. Prompt words steer it: perm, slow, crash. Supports `_session/steering`."""
 
 import asyncio
 import json
@@ -12,6 +12,8 @@ next_id = 1000
 config_calls: list[tuple[str, str, str]] = []
 config: dict[str, dict[str, str]] = {}
 deleted: set[str] = set()
+# Messages steered into a running prompt, per session.
+running: dict[str, list[str]] = {}
 
 
 def config_options(sid: str) -> list[dict]:
@@ -47,6 +49,14 @@ async def ask(method: str, params: dict) -> dict:
 async def prompt(request_id: int, params: dict) -> None:
     sid = params["sessionId"]
     text = " ".join(block.get("text", "") for block in params["prompt"])
+    running[sid] = []
+    try:
+        await run_prompt(request_id, sid, text, params)
+    finally:
+        running.pop(sid, None)
+
+
+async def run_prompt(request_id: int, sid: str, text: str, params: dict) -> None:
     if "crash" in text:
         sys.exit(1)
     update(sid, {"sessionUpdate": "agent_thought_chunk", "content": {"type": "text", "text": "thinking"}})
@@ -93,6 +103,9 @@ async def prompt(request_id: int, params: dict) -> None:
     if links:
         update(sid, {"sessionUpdate": "agent_message_chunk", "messageId": "m3",
                      "content": {"type": "text", "text": " links=" + ",".join(links)}})
+    if running.get(sid):
+        update(sid, {"sessionUpdate": "agent_message_chunk", "messageId": "m4",
+                     "content": {"type": "text", "text": " steered=" + "|".join(running[sid])}})
     if "calls" in text:
         update(sid, {"sessionUpdate": "agent_message_chunk", "messageId": "m2",
                      "content": {"type": "text", "text": " calls=" + ",".join(f"{c[1]}:{c[2]}" for c in config_calls if c[0] == sid)}})
@@ -118,6 +131,7 @@ async def main() -> None:
                 "protocolVersion": 1,
                 "agentCapabilities": {"loadSession": True, "sessionCapabilities": {"resume": {}, "delete": {}}},
                 "agentInfo": {"name": "fake-agent", "title": "Fake Agent", "version": "9.9.9"},
+                "_meta": {"steering": {"supported": True}},
             }})
         elif method == "session/new":
             new_sid = str(uuid.uuid4())
@@ -145,6 +159,13 @@ async def main() -> None:
             task = asyncio.ensure_future(prompt(rid, params))
             tasks.add(task)
             task.add_done_callback(tasks.discard)
+        elif method == "_session/steering":
+            sid = params["sessionId"]
+            if sid in running:
+                running[sid].append(" ".join(b.get("text", "") for b in params["prompt"]))
+                send({"jsonrpc": "2.0", "id": rid, "result": {"outcome": "injected"}})
+            else:
+                send({"jsonrpc": "2.0", "id": rid, "result": {"outcome": "promptRequired", "reason": "noRunningTurn"}})
         elif method == "session/cancel":
             cancelled.add(params["sessionId"])
         elif rid is not None:

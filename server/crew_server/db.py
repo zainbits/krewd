@@ -8,8 +8,8 @@ from typing import Any
 
 import asyncpg
 
-SCHEMA_VERSION = 2
-MIGRATIONS = {1: "schema.sql", 2: "schema_v2.sql"}
+SCHEMA_VERSION = 3
+MIGRATIONS = {1: "schema.sql", 2: "schema_v2.sql", 3: "schema_v3.sql"}
 
 
 async def _init_connection(conn: asyncpg.Connection) -> None:
@@ -33,7 +33,7 @@ async def migrate(pool: asyncpg.Pool) -> None:
 
 SESSION_COLUMNS = (
     "id, engine, title, status, mode, modes, auto_approve, usage, last_text, pinned, archived, created_at, updated_at,"
-    " agent, config_options, config_wanted, model_used"
+    " agent, config_options, config_wanted, model_used, browser_tab"
 )
 
 
@@ -54,6 +54,7 @@ def session_json(row: asyncpg.Record, pending_approvals: int = 0) -> dict[str, A
         "config_options": row["config_options"] or [],
         "config": row["config_wanted"] or {},
         "model_used": row["model_used"],
+        "browser_tab": row["browser_tab"],
         "pending_approvals": pending_approvals,
         "created_at": row["created_at"].isoformat(),
         "updated_at": row["updated_at"].isoformat(),
@@ -67,6 +68,20 @@ def event_json(row: asyncpg.Record) -> dict[str, Any]:
         "kind": row["kind"],
         "payload": row["payload"],
         "created_at": row["created_at"].isoformat(),
+    }
+
+
+def message_json(row: asyncpg.Record) -> dict[str, Any]:
+    return {
+        "id": str(row["id"]),
+        "session_id": str(row["session_id"]),
+        "client_id": row["client_id"],
+        "seq": row["event_seq"],
+        "delivery": row["delivery"],
+        "state": row["state"],
+        "delivered_how": row["delivered_how"],
+        "created_at": row["created_at"].isoformat(),
+        "delivered_at": row["delivered_at"].isoformat() if row["delivered_at"] else None,
     }
 
 

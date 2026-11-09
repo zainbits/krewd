@@ -74,15 +74,24 @@ fun TasksScreen(state: UiState, viewModel: CrewViewModel, padding: PaddingValues
 @Composable
 private fun NewTaskCard(state: UiState, viewModel: CrewViewModel, onOpenSettings: () -> Unit) {
     var text by rememberSaveable { mutableStateOf("") }
-    var autoApprove by rememberSaveable { mutableStateOf(false) }
     var engineId by rememberSaveable { mutableStateOf<String?>(null) }
-    // Picks that differ from the engine's defaults; only these are sent.
-    var picks by remember(engineId) { mutableStateOf(mapOf<String, String>()) }
     val online = state.connection is Connection.Online
     val files = state.draft(NEW_DRAFT)
     val pick = rememberFilePicker { viewModel.attach(NEW_DRAFT, it) }
     val engine = state.engines.firstOrNull { it.id == engineId } ?: state.engines.firstOrNull { it.isDefault } ?: state.engines.firstOrNull()
     val options = ConfigOption.ordered(viewModel.engineConfig(engine?.id))
+    // Each agent starts with the owner's last picks for it (model, effort, permission mode, auto-approve).
+    val saved = remember(engine?.id) { viewModel.engineDefaults(engine?.id) }
+    var autoApprove by remember(engine?.id) { mutableStateOf(saved.autoApprove) }
+    // Picks that differ from the engine's defaults; only these are sent.
+    var picks by remember(engine?.id, options.size) {
+        mutableStateOf(
+            saved.config.filter { (id, value) ->
+                val option = options.firstOrNull { it.id == id }
+                option != null && value != option.current && option.choices.any { it.value == value }
+            },
+        )
+    }
     LaunchedEffect(online, engine?.id, options.isEmpty()) {
         // A new engine is probed in the background; ask again shortly so its choices appear.
         if (online && engine != null && options.isEmpty()) {

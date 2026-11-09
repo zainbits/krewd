@@ -6,6 +6,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -62,6 +63,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.material3.InputChip
 import app.crew.Connection
 import app.crew.CrewViewModel
 import app.crew.R
@@ -80,7 +83,7 @@ import app.crew.data.UserItem
 fun ChatScreen(state: UiState, viewModel: CrewViewModel) {
     val session = state.openSession
     val listState = rememberLazyListState()
-    val items = state.timeline
+    val items = state.timeline + (session?.let { viewModel.localRows(it.id) } ?: emptyList())
     val busy = session?.isBusy == true
     val rowCount = items.size + if (busy) 1 else 0
     val lastLength = (items.lastOrNull() as? TextItem)?.text?.length ?: 0
@@ -107,17 +110,34 @@ fun ChatScreen(state: UiState, viewModel: CrewViewModel) {
                 top = bars.calculateTopPadding() + ShellDimensions.TITLE_PILL_TOP_GAP +
                     ShellDimensions.TITLE_PILL_HEIGHT + ShellDimensions.CONTENT_CLEARANCE,
                 bottom = bottomInsets.calculateBottomPadding() + ShellDimensions.COMPOSER_MIN_HEIGHT +
-                    ShellDimensions.COMPOSER_MARGIN * 2 + ShellDimensions.AGENT_CHIPS_HEIGHT + ShellDimensions.CONTENT_CLEARANCE,
+                    ShellDimensions.COMPOSER_MARGIN * 2 + ShellDimensions.AGENT_CHIPS_HEIGHT + ShellDimensions.CONTENT_CLEARANCE +
+                    // room for the "Add to chat" tab chips above the composer
+                    (if (session != null && state.draftTabs[session.id].orEmpty().isNotEmpty()) ShellDimensions.AGENT_CHIPS_HEIGHT else 0.dp),
             ),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             if (state.timelineLoading) {
                 item(key = "loading") { CircularProgressIndicator(Modifier.padding(24.dp)) }
             }
-            items(items, key = { it.key }) { item -> ChatRow(item, viewModel) }
+            items(items, key = { it.key }) { item -> ChatRow(item, viewModel, session?.isBusy == true) }
             if (busy) {
                 item(key = "working") { WorkingRow(waiting = session?.status == "waiting") }
             }
+        }
+
+        val pipTab = state.pipTab(session)
+        if (session != null && pipTab != null) {
+            val tab = state.browser?.tabs?.firstOrNull { it.id == pipTab } ?: session.browserTab?.takeIf { it.id == pipTab }
+            BrowserPip(
+                tabId = pipTab,
+                label = listOfNotNull(state.engine(session.engine)?.name, tab?.host?.ifBlank { null }).joinToString(" · "),
+                viewModel = viewModel,
+                top = bars.calculateTopPadding() + ShellDimensions.TITLE_PILL_TOP_GAP + ShellDimensions.TITLE_PILL_HEIGHT,
+                bottom = bottomInsets.calculateBottomPadding() + ShellDimensions.COMPOSER_MIN_HEIGHT +
+                    ShellDimensions.COMPOSER_MARGIN * 2 + ShellDimensions.AGENT_CHIPS_HEIGHT,
+                onClose = { viewModel.hidePip(session.id, pipTab) },
+                onOpen = { viewModel.openBrowserAt(pipTab) },
+            )
         }
 
         ChatTopBar(state, viewModel)
@@ -141,8 +161,31 @@ fun ChatScreen(state: UiState, viewModel: CrewViewModel) {
             if (session != null) {
                 val files = state.draft(session.id)
                 PendingFiles(files, onRemove = { viewModel.removeAttachment(session.id, it) }, modifier = Modifier.padding(start = 4.dp, bottom = 4.dp))
+                val tabs = state.draftTabs[session.id].orEmpty()
+                if (tabs.isNotEmpty()) {
+                    Row(Modifier.padding(start = 4.dp, bottom = 4.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        tabs.forEach { tab ->
+                            InputChip(
+                                selected = false,
+                                onClick = { viewModel.removeDraftTab(session.id, tab.id) },
+                                label = { Text(tab.title.ifBlank { tab.host }, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 180.dp)) },
+                                leadingIcon = { Icon(painterResource(R.drawable.ic_web_24), contentDescription = null, modifier = Modifier.size(16.dp)) },
+                                trailingIcon = { Icon(painterResource(R.drawable.ic_close_24), contentDescription = "Remove", modifier = Modifier.size(16.dp)) },
+                                colors = androidx.compose.material3.InputChipDefaults.inputChipColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh),
+                            )
+                        }
+                    }
+                }
                 val pick = rememberFilePicker { viewModel.attach(session.id, it) }
-                Composer(busy = busy, files = files, onSend = viewModel::send, onStop = viewModel::stop, onAttach = pick)
+                Composer(
+                    busy = busy,
+                    steering = state.engine(session.engine)?.steering == true,
+                    files = files,
+                    hasTabs = tabs.isNotEmpty(),
+                    onSend = viewModel::send,
+                    onStop = viewModel::stop,
+                    onAttach = pick,
+                )
             }
         }
     }
@@ -203,7 +246,7 @@ private fun ChatTopBar(state: UiState, viewModel: CrewViewModel) {
                     HorizontalDivider()
                     DropdownMenuItem(text = { Text("Watch the browser") }, onClick = {
                         menuOpen = false
-                        viewModel.openTab()
+                        viewModel.openBrowserAt(session.browserTab?.id)
                     })
                     DropdownMenuItem(text = { Text("Archive task") }, onClick = {
                         menuOpen = false
@@ -215,18 +258,30 @@ private fun ChatTopBar(state: UiState, viewModel: CrewViewModel) {
     }
 }
 
+/** How a message goes while a turn runs: steer into it, queue after it, or stop it and send. */
+private enum class Delivery(val id: String, val label: String, val hint: String) {
+    Steer("steer", "Steer", "Add it to the running turn now"),
+    Queue("queue", "Queue", "Run it after this turn ends"),
+    Interrupt("interrupt", "Interrupt", "Stop this turn, then send"),
+}
+
 @Composable
 private fun Composer(
     busy: Boolean,
+    steering: Boolean,
     files: List<PendingFile>,
-    onSend: (String) -> Unit,
+    hasTabs: Boolean,
+    onSend: (String, String?) -> Unit,
     onStop: () -> Unit,
     onAttach: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     var text by rememberSaveable { mutableStateOf("") }
+    // Steer where the agent supports it, otherwise queue. Queue and interrupt work with every agent.
+    var delivery by rememberSaveable(steering) { mutableStateOf(if (steering) Delivery.Steer else Delivery.Queue) }
+    var deliveryMenu by remember { mutableStateOf(false) }
     val uploading = files.any { it.uploading }
-    val ready = files.any { it.uploadId != null }
+    val ready = files.any { it.uploadId != null } || hasTabs
     Surface(
         modifier = modifier.fillMaxWidth(),
         shape = RoundedCornerShape(28.dp),
@@ -251,14 +306,53 @@ private fun Composer(
                     unfocusedIndicatorColor = Color.Transparent,
                 ),
             )
-            if (busy && text.isBlank() && files.isEmpty()) {
+            if (busy) {
+                Box(Modifier.align(Alignment.CenterVertically)) {
+                    Surface(
+                        onClick = { deliveryMenu = true },
+                        shape = RoundedCornerShape(16.dp),
+                        color = MaterialTheme.colorScheme.secondaryContainer,
+                    ) {
+                        Text(
+                            delivery.label + " ▾",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSecondaryContainer,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
+                        )
+                    }
+                    DropdownMenu(expanded = deliveryMenu, onDismissRequest = { deliveryMenu = false }) {
+                        Text(
+                            "While the task is running",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+                        )
+                        Delivery.entries.filter { it != Delivery.Steer || steering }.forEach { option ->
+                            DropdownMenuItem(
+                                text = {
+                                    Column {
+                                        Text(option.label, fontWeight = if (option == delivery) FontWeight.SemiBold else FontWeight.Normal)
+                                        Text(option.hint, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    }
+                                },
+                                leadingIcon = { Text(if (option == delivery) "✓" else " ", color = MaterialTheme.colorScheme.primary) },
+                                onClick = {
+                                    delivery = option
+                                    deliveryMenu = false
+                                },
+                            )
+                        }
+                    }
+                }
+            }
+            if (busy && text.isBlank() && files.isEmpty() && !hasTabs) {
                 IconButton(onClick = onStop) {
                     Icon(painterResource(R.drawable.ic_stop_24), contentDescription = "Stop")
                 }
             } else {
                 IconButton(
                     onClick = {
-                        onSend(text.trim())
+                        onSend(text.trim(), if (busy) delivery.id else null)
                         text = ""
                     },
                     enabled = (text.isNotBlank() || ready) && !uploading,
@@ -271,23 +365,10 @@ private fun Composer(
 }
 
 @Composable
-private fun ChatRow(item: ChatItem, viewModel: CrewViewModel) {
+private fun ChatRow(item: ChatItem, viewModel: CrewViewModel, busy: Boolean) {
     when (item) {
-        is UserItem -> Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-            Surface(
-                shape = RoundedCornerShape(20.dp, 20.dp, 6.dp, 20.dp),
-                color = MaterialTheme.colorScheme.primaryContainer,
-                modifier = Modifier.widthIn(max = 320.dp),
-            ) {
-                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    if (item.text.isNotBlank()) {
-                        SelectionContainer { Text(item.text, color = MaterialTheme.colorScheme.onPrimaryContainer) }
-                    }
-                    if (item.attachments.isNotEmpty()) SentFiles(item.attachments, MaterialTheme.colorScheme.onPrimaryContainer)
-                }
-            }
-        }
-        is TextItem -> if (item.isThought) ThoughtRow(item.text) else SelectionContainer { RichText(item.text) }
+        is UserItem -> UserRow(item, busy, onResend = { item.clientId?.let(viewModel::resend) })
+        is TextItem -> if (item.isThought) ThoughtRow(item.text) else SelectionContainer { Markdown(item.text) }
         is ToolItem -> ToolRow(item)
         is PlanItem -> SectionCard {
             Text("Plan", style = MaterialTheme.typography.labelLarge)
@@ -307,6 +388,63 @@ private fun ChatRow(item: ChatItem, viewModel: CrewViewModel) {
             color = if (item.isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(horizontal = 4.dp),
         )
+    }
+}
+
+@Composable
+private fun UserRow(item: UserItem, busy: Boolean, onResend: () -> Unit) {
+    val failed = item.state == "failed"
+    val onBubble = if (failed) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onPrimaryContainer
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+        Surface(
+            shape = RoundedCornerShape(20.dp, 20.dp, 6.dp, 20.dp),
+            color = if (failed) MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.primaryContainer,
+            modifier = Modifier.widthIn(max = 320.dp).then(if (failed) Modifier.clickable(onClick = onResend) else Modifier),
+        ) {
+            Column(Modifier.padding(start = 12.dp, end = 12.dp, top = 10.dp, bottom = 6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                item.tabs.forEach { tab ->
+                    Row(
+                        Modifier.background(Color(0x22000000), RoundedCornerShape(10.dp)).padding(horizontal = 8.dp, vertical = 5.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(painterResource(R.drawable.ic_web_24), contentDescription = null, tint = onBubble, modifier = Modifier.size(14.dp))
+                        Text(tab.title.ifBlank { tab.host }, style = MaterialTheme.typography.labelMedium, color = onBubble, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                }
+                if (item.text.isNotBlank()) {
+                    SelectionContainer { Text(item.text, color = onBubble) }
+                }
+                if (item.attachments.isNotEmpty()) SentFiles(item.attachments, onBubble)
+                DeliveryLine(item, busy, onBubble)
+            }
+        }
+    }
+}
+
+/** One tick: stored on the server. Two ticks: the agent has it (steered in, or its turn started). */
+@Composable
+private fun ColumnScope.DeliveryLine(item: UserItem, busy: Boolean, color: Color) {
+    val (ticks, label) = when (item.state) {
+        "sending" -> "" to "Sending…"
+        "failed" -> "" to "Not sent · tap to resend"
+        "cancelled" -> "" to "Not run (stopped)"
+        "delivered" -> "✓✓" to if (item.how == "steered") "Steered" else ""
+        "queued", "steering" -> "✓" to if (item.delivery == "queue" || busy) "Queued" else ""
+        else -> "" to ""
+    }
+    if (ticks.isEmpty() && label.isEmpty()) return
+    Row(Modifier.align(Alignment.End), horizontalArrangement = Arrangement.spacedBy(5.dp), verticalAlignment = Alignment.CenterVertically) {
+        if (label.isNotEmpty()) Text(label, style = MaterialTheme.typography.labelSmall, color = color.copy(alpha = 0.75f))
+        if (ticks.isNotEmpty()) {
+            Text(
+                ticks,
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.Bold,
+                color = if (ticks == "✓✓") MaterialTheme.colorScheme.primary else color.copy(alpha = 0.7f),
+                letterSpacing = (-2).sp,
+            )
+        }
     }
 }
 
@@ -377,34 +515,3 @@ private fun WorkingRow(waiting: Boolean) {
     }
 }
 
-/** Light Markdown: fenced code blocks, inline `code` and **bold**. Enough for agent replies. */
-@Composable
-private fun RichText(text: String) {
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        text.split("```").forEachIndexed { i, part ->
-            if (i % 2 == 1) {
-                val code = part.substringAfter('\n', part).trimEnd()
-                MonoBlock(code)
-            } else if (part.isNotBlank()) {
-                Text(inlineMarkdown(part.trim('\n')), style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurface)
-            }
-        }
-    }
-}
-
-private val INLINE = Regex("""\*\*(.+?)\*\*|`([^`]+)`""")
-
-private fun inlineMarkdown(text: String): AnnotatedString = buildAnnotatedString {
-    var at = 0
-    for (match in INLINE.findAll(text)) {
-        append(text.substring(at, match.range.first))
-        val bold = match.groupValues[1]
-        if (bold.isNotEmpty()) {
-            withStyle(SpanStyle(fontWeight = FontWeight.SemiBold)) { append(bold) }
-        } else {
-            withStyle(SpanStyle(fontFamily = FontFamily.Monospace, background = Color(0x22888888))) { append(match.groupValues[2]) }
-        }
-        at = match.range.last + 1
-    }
-    append(text.substring(at))
-}

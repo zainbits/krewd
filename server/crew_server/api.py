@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import hmac
 import uuid
-from contextlib import asynccontextmanager
-from typing import Any
+from contextlib import asynccontextmanager, suppress
+from typing import Any, Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -19,14 +20,23 @@ from .hub import Conflict, Hub, NotFound
 LONG_POLL_MAX_SECONDS = 30
 
 
+class TabRef(BaseModel):
+    """A tab of the agents' browser, added to the chat with "Add to chat"."""
+    id: str = Field(max_length=100)
+    title: str = Field(default="", max_length=500)
+    url: str = Field(default="", max_length=4000)
+
+
 class WithAttachments(BaseModel):
     text: str = ""
     attachments: list[str] = Field(default_factory=list, max_length=50)  # upload ids from POST /api/uploads
+    tabs: list[TabRef] = Field(default_factory=list, max_length=10)
+    client_id: str | None = Field(default=None, max_length=64)  # makes a resend idempotent
 
     @model_validator(mode="after")
     def text_or_files(self):
-        if not self.text.strip() and not self.attachments:
-            raise ValueError("send some text or at least one attachment")
+        if not self.text.strip() and not self.attachments and not self.tabs:
+            raise ValueError("send some text, an attachment or a tab")
         return self
 
 
@@ -38,7 +48,8 @@ class NewSession(WithAttachments):
 
 
 class Message(WithAttachments):
-    pass
+    # steer: into the running turn (where the engine supports it); queue: after it; interrupt: stop it, then send.
+    delivery: Literal["steer", "queue", "interrupt"] | None = None
 
 
 class SessionChanges(BaseModel):
@@ -65,6 +76,9 @@ class BrowserInput(BaseModel):
     key: str | None = None
     action: str | None = None
     url: str | None = None
+    button: str | None = None
+    clicks: int | None = None
+    held: bool | None = None
 
     def __repr__(self) -> str:  # never show typed text in logs or tracebacks
         return f"BrowserInput(type={self.type!r})"
@@ -72,14 +86,29 @@ class BrowserInput(BaseModel):
     __str__ = __repr__
 
 
+class NewTab(BaseModel):
+    url: str | None = Field(default=None, max_length=4000)
+
+
+class TabView(BaseModel):
+    mode: Literal["vertical", "horizontal"]
+    width: int = 0  # CSS pixels of the phone's view, for vertical
+    height: int = 0
+    scale: float = 0
+
+
 def create_app(hub: Hub, token: str, lifespan_hub: bool = True) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         if lifespan_hub:
             await hub.start()
+        watcher = asyncio.create_task(browser.watch(hub.browser_activity))
         try:
             yield
         finally:
+            watcher.cancel()
+            with suppress(asyncio.CancelledError):
+                await watcher
             await browser.close()
             if lifespan_hub:
                 await hub.close()
@@ -132,7 +161,10 @@ def create_app(hub: Hub, token: str, lifespan_hub: bool = True) -> FastAPI:
 
     @app.post("/api/sessions", dependencies=auth, status_code=201)
     async def new_session(body: NewSession) -> dict[str, Any]:
-        return await hub.create_session(body.text, body.engine, body.mode, body.auto_approve, body.config, body.attachments)
+        return await hub.create_session(
+            body.text, body.engine, body.mode, body.auto_approve, body.config, body.attachments,
+            tabs=[t.model_dump() for t in body.tabs], client_id=body.client_id,
+        )
 
     @app.get("/api/sessions/{session_id}", dependencies=auth)
     async def session(session_id: uuid.UUID) -> dict[str, Any]:
@@ -145,8 +177,11 @@ def create_app(hub: Hub, token: str, lifespan_hub: bool = True) -> FastAPI:
     @app.post("/api/sessions/{session_id}/messages", dependencies=auth, status_code=202)
     async def message(session_id: uuid.UUID, body: Message) -> dict[str, Any]:
         await hub.get_session(session_id)
-        await hub.send(session_id, body.text, body.attachments)
-        return {"ok": True}
+        message = await hub.send(
+            session_id, body.text, body.attachments, tabs=[t.model_dump() for t in body.tabs],
+            delivery=body.delivery, client_id=body.client_id,
+        )
+        return {"ok": True, "message": message}
 
     @app.post("/api/sessions/{session_id}/cancel", dependencies=auth)
     async def cancel(session_id: uuid.UUID) -> dict[str, Any]:
@@ -182,12 +217,39 @@ def create_app(hub: Hub, token: str, lifespan_hub: bool = True) -> FastAPI:
 
     # The agents' browser: watch a tab live and take over (logins, codes) without the chat seeing it.
 
+    @app.post("/api/admin/restart", dependencies=auth, status_code=202)
+    async def restart() -> dict[str, Any]:
+        """Emergency: stop the agents and exit; systemd brings the server back in about 10 to 15 seconds."""
+        hub.restart()
+        return {"ok": True}
+
     @app.get("/api/browser/tabs", dependencies=auth)
     async def browser_tabs() -> dict[str, Any]:
         try:
-            return {"available": True, "tabs": await browser.tabs()}
+            tabs = await browser.tabs()
         except BrowserUnavailable as exc:
             return {"available": False, "reason": str(exc), "tabs": []}
+        for tab in tabs:
+            owner = hub.tab_owner.get(tab["id"])
+            tab["session_id"] = str(owner) if owner else None
+        return {"available": True, "tabs": tabs}
+
+    @app.post("/api/browser/tabs", dependencies=auth, status_code=201)
+    async def browser_new_tab(body: NewTab) -> dict[str, Any]:
+        return await browser.new_tab(body.url)
+
+    @app.delete("/api/browser/tabs/{tab_id}", dependencies=auth)
+    async def browser_close_tab(tab_id: str) -> dict[str, Any]:
+        await browser.close_tab(tab_id)
+        return {"ok": True}
+
+    @app.post("/api/browser/tabs/{tab_id}/view", dependencies=auth)
+    async def browser_view(tab_id: str, body: TabView) -> dict[str, Any]:
+        try:
+            await browser.set_view(tab_id, body.mode, body.width, body.height, body.scale)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+        return {"ok": True}
 
     @app.get("/api/browser/tabs/{tab_id}/stream", dependencies=auth)
     async def browser_stream(tab_id: str) -> StreamingResponse:
@@ -200,7 +262,9 @@ def create_app(hub: Hub, token: str, lifespan_hub: bool = True) -> FastAPI:
                 async for frame in frames:
                     head = (
                         f"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: {len(frame.jpeg)}\r\n"
-                        f"X-Viewport: {frame.width:.0f}x{frame.height:.0f}\r\n\r\n"
+                        f"X-Viewport: {frame.width:.0f}x{frame.height:.0f}\r\n"
+                        f"X-View: {'vertical' if frame.emulated else 'horizontal'}\r\n"
+                        f"X-Scroll: {frame.scroll_y:.0f}/{frame.content_height:.0f}\r\n\r\n"
                     )
                     yield head.encode() + frame.jpeg + b"\r\n"
             finally:
@@ -213,9 +277,9 @@ def create_app(hub: Hub, token: str, lifespan_hub: bool = True) -> FastAPI:
     @app.post("/api/browser/tabs/{tab_id}/input", dependencies=auth)
     async def browser_input(tab_id: str, body: BrowserInput) -> dict[str, Any]:
         try:
-            await browser.input(tab_id, body.model_dump(exclude_none=True))
+            result = await browser.input(tab_id, body.model_dump(exclude_none=True))
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from None
-        return {"ok": True}
+        return {"ok": True, **result}
 
     return app

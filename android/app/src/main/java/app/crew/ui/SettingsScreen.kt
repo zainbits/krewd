@@ -8,7 +8,10 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -37,6 +40,27 @@ fun SettingsScreen(state: UiState, viewModel: CrewViewModel, padding: PaddingVal
     var token by remember(saved) { mutableStateOf(saved.token) }
     var network by remember(saved) { mutableStateOf(saved.network) }
     var showToken by remember { mutableStateOf(false) }
+    var confirmRestart by remember { mutableStateOf(false) }
+
+    if (confirmRestart) {
+        AlertDialog(
+            onDismissRequest = { confirmRestart = false },
+            title = { Text("Restart the Crew backend?") },
+            text = {
+                Text(
+                    "Stops the server and every agent process, then systemd starts it again (about 10 to 15 seconds). " +
+                        "Running tasks end with an error; your chats stay. The browser keeps running.",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmRestart = false
+                    viewModel.restartBackend()
+                }) { Text("Restart") }
+            },
+            dismissButton = { TextButton(onClick = { confirmRestart = false }) { Text("Cancel") } },
+        )
+    }
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -100,6 +124,22 @@ fun SettingsScreen(state: UiState, viewModel: CrewViewModel, padding: PaddingVal
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+            }
+        }
+        item {
+            SectionCard {
+                Text("Emergency", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    "If the agents are stuck, restart the Crew backend. Only use this when Stop does not help.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                OutlinedButton(
+                    onClick = { confirmRestart = true },
+                    enabled = state.connection is Connection.Online && !state.restarting,
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                ) { Text(if (state.restarting) "Restarting…" else "Restart Crew backend") }
             }
         }
     }

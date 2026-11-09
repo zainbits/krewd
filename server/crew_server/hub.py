@@ -10,7 +10,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
+import signal
 import uuid
 from dataclasses import dataclass, field
 from functools import partial
@@ -39,13 +41,20 @@ class Conflict(Exception):
     pass
 
 
+class _Cancelled(Exception):
+    """Stop arrived while the turn was still opening the agent session."""
+
+
 @dataclass
 class Runtime:
     id: uuid.UUID
     engine: str
     agent_session: str | None
     generation: int = 0
-    queue: asyncio.Queue = field(default_factory=asyncio.Queue)
+    wake: asyncio.Event = field(default_factory=asyncio.Event)
+    running: bool = False
+    cancel_requested: bool = False  # Stop came before the agent session was ready
+    browser_tab: dict[str, Any] | None = None
     worker: asyncio.Task | None = None
     text: dict[str, Any] | None = None
     flush_task: asyncio.Task | None = None
@@ -122,6 +131,16 @@ def _reported_model(meta: Any) -> str | None:
     return None
 
 
+def _with_tabs(text: str, tabs: list[dict[str, Any]] | None) -> str:
+    """The owner's message plus the browser tabs they added to the chat with "Add to chat"."""
+    if not tabs:
+        return text
+    lines = ["The owner added these tabs of the agents' browser to this chat; use them "
+             "(browser-harness can switch to a tab by its DevTools target id):"]
+    lines += [f"- {t.get('title') or t.get('url')}: {t.get('url')} (target id {t.get('id')})" for t in tabs]
+    return (text + "\n\n" if text else "") + "\n".join(lines)
+
+
 def _first_line(text: str, limit: int) -> str:
     line = text.strip().splitlines()[0] if text.strip() else ""
     return line if len(line) <= limit else line[: limit - 1] + "…"
@@ -144,6 +163,7 @@ class Hub:
         self.engine_info: dict[str, dict[str, Any]] = {}
         self.attachments = Attachments(settings.data_dir / "common" / "attachments", settings.max_upload_mb * 1024 * 1024)
         self.probing: set[str] = set()
+        self.tab_owner: dict[str, uuid.UUID] = {}  # browser tab id -> session that last used it
 
     # lifecycle
 
@@ -153,15 +173,24 @@ class Hub:
         self.last_seq = await self.pool.fetchval("select coalesce(max(seq), 0) from events")
         for row in await self.pool.fetch("select * from engines"):
             self.engine_info[row["id"]] = {
-                "agent": row["agent"], "config_options": row["config_options"] or [], "modes": row["modes"]
+                "agent": row["agent"], "config_options": row["config_options"] or [], "modes": row["modes"],
+                "steering": row["steering"],
             }
         await self._recover()
+        # Messages stored before a restart still run, in order.
+        for row in await self.pool.fetch("select distinct session_id from messages where state in ('queued', 'steering')"):
+            await self.pool.execute("update messages set state = 'queued' where session_id = $1 and state = 'steering'",
+                                    row["session_id"])
+            self._kick(await self._runtime(row["session_id"]))
+        for row in await self.pool.fetch("select id, browser_tab from sessions where browser_tab is not null"):
+            self.tab_owner.setdefault(row["browser_tab"]["id"], row["id"])
 
     async def close(self) -> None:
         self.closing = True
-        for rt in self.runtimes.values():
-            if rt.worker:
-                rt.worker.cancel()
+        workers = [rt.worker for rt in self.runtimes.values() if rt.worker]
+        for worker in workers:
+            worker.cancel()
+        await asyncio.gather(*workers, return_exceptions=True)
         for proc in list(self.procs.values()):
             await proc.stop()
 
@@ -184,7 +213,8 @@ class Hub:
         listing = []
         for engine in self.settings.engines.values():
             info = self.engine_info.get(engine.id) or {}
-            if not info.get("config_options") and engine.id not in self.probing and not self.closing:
+            unknown = not info.get("config_options") or info.get("steering") is None
+            if unknown and engine.id not in self.probing and not self.closing:
                 self.probing.add(engine.id)
                 asyncio.create_task(self._probe(engine.id))
             listing.append({
@@ -194,8 +224,15 @@ class Hub:
                 "agent": info.get("agent"),
                 "config_options": info.get("config_options") or [],
                 "modes": info.get("modes"),
+                "steering": bool(info.get("steering")),
             })
         return listing
+
+    def can_steer(self, engine_id: str) -> bool:
+        proc = self.procs.get(engine_id)
+        if proc and proc.alive:
+            return proc.steering
+        return bool((self.engine_info.get(engine_id) or {}).get("steering"))
 
     async def _remember_engine(self, engine_id: str, **info: Any) -> None:
         current = self.engine_info.setdefault(engine_id, {})
@@ -204,13 +241,14 @@ class Hub:
             return
         current.update(changes)
         await self.pool.execute(
-            """insert into engines (id, agent, config_options, modes) values ($1, $2, $3, $4)
+            """insert into engines (id, agent, config_options, modes, steering) values ($1, $2, $3, $4, $5)
                on conflict (id) do update set agent = excluded.agent, config_options = excluded.config_options,
-                   modes = excluded.modes, updated_at = now()""",
+                   modes = excluded.modes, steering = excluded.steering, updated_at = now()""",
             engine_id,
             current.get("agent"),
             current.get("config_options"),
             current.get("modes"),
+            current.get("steering"),
         )
 
     async def _probe(self, engine_id: str) -> None:
@@ -311,6 +349,8 @@ class Hub:
         auto_approve: bool = False,
         config: dict[str, str] | None = None,
         attachments: list[str] | None = None,
+        tabs: list[dict[str, Any]] | None = None,
+        client_id: str | None = None,
     ) -> dict[str, Any]:
         engine = engine or self.settings.default_engine
         if engine not in self.settings.engines:
@@ -332,7 +372,7 @@ class Hub:
             (self.engine_info.get(engine) or {}).get("agent"),
             (self.engine_info.get(engine) or {}).get("config_options"),
         )
-        await self.send(session_id, text, attachments)
+        await self.send(session_id, text, attachments, tabs=tabs, client_id=client_id)
         return await self.get_session(session_id)
 
     def _upload_name(self, upload_ids: list[str] | None) -> str | None:
@@ -384,37 +424,173 @@ class Hub:
         await self.emit_session(session_id)
         return await self.get_session(session_id)
 
-    async def send(self, session_id: uuid.UUID, text: str, attachments: list[str] | None = None) -> None:
+    async def send(
+        self,
+        session_id: uuid.UUID,
+        text: str,
+        attachments: list[str] | None = None,
+        tabs: list[dict[str, Any]] | None = None,
+        delivery: str | None = None,
+        client_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Store a message, then deliver it: steer it into the running turn, queue it, or interrupt and send.
+
+        Without a delivery choice it steers where the engine supports steering, else it queues.
+        A repeated client_id returns the stored message instead of sending it twice.
+        """
         rt = await self._runtime(session_id)
+        if client_id:
+            row = await self.pool.fetchrow(
+                "select * from messages where session_id = $1 and client_id = $2", session_id, client_id
+            )
+            if row:
+                return db.message_json(row)
         try:
             files = self.attachments.claim(session_id, attachments or [])
         except UnknownUpload as exc:
             raise NotFound(f"unknown upload {exc}") from None
-        payload: dict[str, Any] = {"text": text}
+        tabs = [{k: str(t.get(k) or "") for k in ("id", "title", "url")} for t in tabs or []]
+        wanted = delivery or ("steer" if self.can_steer(rt.engine) else "queue")
+        message_id = uuid.uuid4()
+        try:
+            await self.pool.execute(
+                """insert into messages (id, session_id, client_id, text, attachments, tabs, delivery, priority)
+                   values ($1, $2, $3, $4, $5, $6, $7, $8)""",
+                message_id, session_id, client_id, text, files, tabs, wanted, 0 if wanted == "interrupt" else 1,
+            )
+        except asyncpg.UniqueViolationError:
+            row = await self.pool.fetchrow(
+                "select * from messages where session_id = $1 and client_id = $2", session_id, client_id
+            )
+            return db.message_json(row)
+        payload: dict[str, Any] = {"text": text, "message_id": str(message_id), "delivery": wanted}
         if files:
             payload["attachments"] = files
-        await self.emit(session_id, "user", payload)
-        preview = text or ", ".join(f["name"] for f in files)
+        if tabs:
+            payload["tabs"] = tabs
+        if client_id:
+            payload["client_id"] = client_id
+        seq = await self.emit(session_id, "user", payload)
+        await self.pool.execute("update messages set event_seq = $2 where id = $1", message_id, seq)
+        preview = text or ", ".join(f["name"] for f in files) or ", ".join(t["title"] or t["url"] for t in tabs)
         await self.pool.execute(
             "update sessions set last_text = $2, updated_at = now(), archived = false where id = $1",
             session_id,
             _first_line(preview, PREVIEW_MAX),
         )
-        await rt.queue.put((text, files))
+        if wanted == "interrupt" and rt.running:
+            await self._stop_turn(rt)
+        elif wanted == "steer" and rt.running and self.can_steer(rt.engine):
+            await self._steer(rt, message_id)
+        self._kick(rt)
+        return db.message_json(await self.pool.fetchrow("select * from messages where id = $1", message_id))
+
+    async def _steer(self, rt: Runtime, message_id: uuid.UUID) -> None:
+        """Inject a stored message into the running turn. If no turn is running it stays queued."""
+        proc = self.procs.get(rt.engine)
+        if not (proc and proc.alive and rt.agent_session and rt.generation == proc.generation):
+            return
+        row = await self.pool.fetchrow(
+            "update messages set state = 'steering' where id = $1 and state = 'queued' returning *", message_id
+        )
+        if row is None:
+            return
+        outcome = None
+        try:
+            result = await proc.request(
+                "_session/steering",
+                {
+                    "sessionId": rt.agent_session,
+                    "prompt": prompt_blocks(_with_tabs(row["text"], row["tabs"]), row["attachments"] or []),
+                    "_meta": {"steering": {"idleBehavior": "promptRequired"}},
+                },
+                timeout=30,
+            )
+            outcome = result.get("outcome")
+        except (AcpError, TimeoutError) as exc:
+            log.warning("steering failed for %s, queueing instead: %s", rt.id, exc)
+        if outcome == "injected":
+            await self._delivered(message_id, "steered", "steering")
+        else:  # promptRequired (the turn just ended) or an error: run it as the next prompt
+            await self.pool.execute("update messages set state = 'queued' where id = $1 and state = 'steering'", message_id)
+
+    async def _delivered(self, message_id: uuid.UUID, how: str, from_state: str = "queued") -> asyncpg.Record | None:
+        row = await self.pool.fetchrow(
+            """update messages set state = 'delivered', delivered_how = $2, delivered_at = now()
+               where id = $1 and state = $3 returning *""",
+            message_id, how, from_state,
+        )
+        if row:
+            await self.emit(row["session_id"], "message", db.message_json(row))
+        return row
+
+    def _kick(self, rt: Runtime) -> None:
+        rt.wake.set()
         if rt.worker is None or rt.worker.done():
             rt.worker = asyncio.create_task(self._worker(rt))
 
     async def cancel(self, session_id: uuid.UUID) -> None:
+        """Stop: end the running turn and drop the messages still waiting behind it."""
         rt = await self._runtime(session_id)
-        while not rt.queue.empty():
-            rt.queue.get_nowait()
-            rt.queue.task_done()
+        for row in await self.pool.fetch(
+            "update messages set state = 'cancelled' where session_id = $1 and state = 'queued' returning *", session_id
+        ):
+            await self.emit(session_id, "message", db.message_json(row))
+        await self._stop_turn(rt)
+
+    async def _stop_turn(self, rt: Runtime) -> None:
+        if rt.running:
+            rt.cancel_requested = True
         for approval_id, (sid, _) in list(self.waiters.items()):
-            if sid == session_id:
+            if sid == rt.id:
                 await self._resolve(approval_id, None, "cancelled", "user")
         proc = self.procs.get(rt.engine)
         if proc and proc.alive and rt.agent_session:
             await proc.notify("session/cancel", {"sessionId": rt.agent_session})
+
+    def restart(self) -> None:
+        """Emergency restart from the app: stop every agent process group, then exit.
+
+        systemd starts the server again; startup marks the interrupted turns as errors. The browser is
+        a separate unit and is left alone.
+        """
+        async def go() -> None:
+            await asyncio.sleep(0.5)  # let the HTTP answer go out
+            log.warning("restart requested from the app: stopping agents and exiting")
+            groups = [p.pid for p in self.procs.values() if p.pid]
+            for sig in (signal.SIGTERM, signal.SIGKILL):
+                for pid in groups:
+                    try:
+                        os.killpg(pid, sig)
+                    except (ProcessLookupError, PermissionError):
+                        pass
+                await asyncio.sleep(2)
+            os._exit(3)
+
+        asyncio.create_task(go())
+
+    async def browser_activity(self, tab: dict[str, Any]) -> uuid.UUID | None:
+        """A tab opened or navigated without the owner touching it: link it to the session doing that.
+
+        Detected from the browser side, so it works for any engine: the one session with a running turn
+        (or, if several run, the one in the middle of a tool call) is taken to be the one browsing.
+        """
+        running = [rt for rt in self.runtimes.values() if rt.running]
+        if len(running) > 1:
+            running = [rt for rt in running
+                       if any(t.get("status") in (None, "pending", "in_progress") for t in rt.tools.values())]
+        if len(running) != 1:
+            return None
+        rt = running[0]
+        info = {"id": tab["id"], "url": tab.get("url", ""), "title": tab.get("title") or tab.get("url", "")}
+        self.tab_owner[info["id"]] = rt.id
+        if rt.browser_tab and rt.browser_tab["id"] == info["id"] and rt.browser_tab["url"] == info["url"]:
+            return rt.id
+        rt.browser_tab = info
+        await self.pool.execute("update sessions set browser_tab = $2 where id = $1", rt.id, info)
+        await self.emit(rt.id, "browser", info)
+        await self.emit_session(rt.id)
+        return rt.id
 
     # approvals
 
@@ -485,9 +661,12 @@ class Hub:
             except (OSError, AcpError, TimeoutError) as exc:
                 await proc.stop()
                 raise AcpError(f"Could not start {engine.name}: {exc}") from exc
+            except BaseException:  # cancelled while starting: do not leave the process behind
+                await asyncio.shield(proc.stop())
+                raise
             self.procs[engine_id] = proc
             log.info("started %s (generation %s)", engine_id, proc.generation)
-            await self._remember_engine(engine_id, agent=proc.init_result.get("agentInfo"))
+            await self._remember_engine(engine_id, agent=proc.init_result.get("agentInfo"), steering=proc.steering)
             return proc
 
     async def _on_exit(self, proc: AcpProcess) -> None:
@@ -602,35 +781,60 @@ class Hub:
     # turns
 
     async def _worker(self, rt: Runtime) -> None:
+        """Runs a session's stored messages one turn at a time, oldest first ("interrupt" ones first)."""
         while True:
-            text, files = await rt.queue.get()
+            rt.wake.clear()
+            row = await self.pool.fetchrow(
+                """select id from messages where session_id = $1 and state = 'queued'
+                   order by priority, created_at limit 1""",
+                rt.id,
+            )
+            if row is None:
+                await rt.wake.wait()
+                continue
+            message = await self._delivered(row["id"], "started")
+            if message is None:
+                continue
             try:
-                await self._run_turn(rt, text, files)
+                await self._run_turn(rt, message["text"], message["attachments"], message["tabs"], message["id"])
             except Exception:
                 log.exception("turn failed for %s", rt.id)
-            finally:
-                rt.queue.task_done()
 
     async def _set_status(self, rt: Runtime, status: str) -> None:
         await self.pool.execute("update sessions set status = $2, updated_at = now() where id = $1", rt.id, status)
         await self.emit_session(rt.id)
 
-    async def _run_turn(self, rt: Runtime, text: str, files: list[dict[str, Any]] | None = None) -> None:
+    async def _run_turn(
+        self,
+        rt: Runtime,
+        text: str,
+        files: list[dict[str, Any]] | None = None,
+        tabs: list[dict[str, Any]] | None = None,
+        message_id: uuid.UUID | None = None,
+    ) -> None:
         rt.assistant_run, rt.assistant_text = None, ""
+        rt.running, rt.cancel_requested = True, False
         await self._set_status(rt, "running")
-        await self.emit(rt.id, "turn_start", {})
+        await self.emit(rt.id, "turn_start", {"message_id": str(message_id) if message_id else None})
         stop_reason = "error"
         usage = None
         try:
             proc = await self._ensure_loaded(rt)
+            if rt.cancel_requested:
+                raise _Cancelled()
             result = await proc.request(
-                "session/prompt", {"sessionId": rt.agent_session, "prompt": prompt_blocks(text, files or [])}
+                "session/prompt",
+                {"sessionId": rt.agent_session, "prompt": prompt_blocks(_with_tabs(text, tabs), files or [])},
             )
             stop_reason = result.get("stopReason", "end_turn")
             usage = result.get("usage")
+        except _Cancelled:
+            stop_reason = "cancelled"
         except AcpError as exc:
             await self._flush_text(rt)
             await self.emit(rt.id, "error", {"message": str(exc)})
+        finally:
+            rt.running = False
         await self._flush_text(rt)
         preview = _first_line(_plain(rt.assistant_text), PREVIEW_MAX) if rt.assistant_text else None
         await self.pool.execute(
@@ -641,7 +845,7 @@ class Hub:
             rt.usage,
             preview,
         )
-        await self.emit(rt.id, "turn_end", {"stop_reason": stop_reason, "usage": usage})
+        await self.emit(rt.id, "turn_end", {"stop_reason": stop_reason, "usage": usage, "preview": preview})
         await self.emit_session(rt.id)
 
     # agent -> client

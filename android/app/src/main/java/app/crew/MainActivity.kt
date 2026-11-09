@@ -9,11 +9,10 @@ import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.activity.viewModels
 import app.crew.ui.CrewApp
 
 class MainActivity : ComponentActivity() {
-    private val viewModel: CrewViewModel by viewModels()
+    private val viewModel: CrewViewModel get() = (application as CrewApplication).crew
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -26,7 +25,7 @@ class MainActivity : ComponentActivity() {
         if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
         }
-        openFrom(intent)
+        if (savedInstanceState == null) openFrom(intent)
         setContent {
             CrewTheme {
                 CrewApp(viewModel)
@@ -50,10 +49,15 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun openFrom(intent: Intent?) {
+        intent?.getStringExtra(EXTRA_STOP_SESSION_ID)?.let {
+            viewModel.askStop(it)
+            return
+        }
         intent?.getStringExtra(EXTRA_SESSION_ID)?.let(viewModel::openSession)
     }
 
     companion object {
         const val EXTRA_SESSION_ID = "session_id"
+        const val EXTRA_STOP_SESSION_ID = "stop_session_id"
     }
 }

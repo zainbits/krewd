@@ -1,37 +1,44 @@
 package app.crew
 
 import android.app.Application
-import androidx.lifecycle.AndroidViewModel
-import androidx.lifecycle.viewModelScope
 import app.crew.constants.Timing
 import app.crew.data.ApiException
+import app.crew.data.Approval
 import app.crew.data.BrowserFrame
 import app.crew.data.BrowserTab
 import app.crew.data.BrowserTabs
-import app.crew.data.FrameStream
-import app.crew.data.browserInput
-import app.crew.data.browserTabs
-import app.crew.data.Approval
 import app.crew.data.ChatItem
 import app.crew.data.ConfigOption
-import app.crew.data.PendingFile
 import app.crew.data.ConnectionSettings
 import app.crew.data.CrewApi
+import app.crew.data.EngineDefaults
 import app.crew.data.EngineInfo
 import app.crew.data.Event
+import app.crew.data.FrameStream
+import app.crew.data.PendingFile
 import app.crew.data.Prefs
 import app.crew.data.SessionInfo
 import app.crew.data.Timeline
+import app.crew.data.UserItem
+import app.crew.data.browserInput
+import app.crew.data.browserTabs
+import app.crew.data.closeBrowserTab
+import app.crew.data.newTab
+import app.crew.data.setTabView
+import java.util.UUID
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
-import kotlinx.coroutines.currentCoroutineContext
-import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import org.json.JSONObject
 
@@ -42,54 +49,104 @@ sealed interface Connection {
     data class Offline(val reason: String) : Connection
 }
 
+/** A message on its way to the server: shown in the chat as "Sending" until stored, or "Not sent" after a failure. */
+data class OutgoingMessage(
+    val clientId: String,
+    val sessionId: String,
+    val text: String,
+    val uploads: List<String>,
+    val files: List<PendingFile>,
+    val tabs: List<BrowserTab>,
+    val delivery: String?,
+    val failed: Boolean = false,
+)
+
+object NavTab {
+    const val TASKS = 0
+    const val BROWSER = 1
+    const val APPROVALS = 2
+    const val SETTINGS = 3
+}
+
 data class UiState(
     val settings: ConnectionSettings,
     val connection: Connection = Connection.Connecting,
     val engines: List<EngineInfo> = emptyList(),
     val sessions: List<SessionInfo> = emptyList(),
     val approvals: List<Approval> = emptyList(),
+    val navTab: Int = NavTab.TASKS,
     val openSessionId: String? = null,
+    /** The chat opened last: "Add to chat" goes there first. */
+    val lastSessionId: String? = null,
     val timeline: List<ChatItem> = emptyList(),
     val timelineLoading: Boolean = false,
     val message: String? = null,
     val browser: BrowserTabs? = null,
-    val openTabId: String? = null,
+    /** The tab the Browser screen shows. */
+    val browserTabId: String? = null,
     val streamError: String? = null,
     /** Files picked for the next message, per draft: "new" for the new-task card, else a session id. */
     val drafts: Map<String, List<PendingFile>> = emptyMap(),
+    /** Browser tabs added to the next message ("Add to chat"), per session. */
+    val draftTabs: Map<String, List<BrowserTab>> = emptyMap(),
+    val outbox: List<OutgoingMessage> = emptyList(),
+    /** Picture-in-picture picked by hand from the Browser screen, per session. */
+    val pipTabs: Map<String, String> = emptyMap(),
+    /** "session:tab" pairs whose picture-in-picture the owner closed. */
+    val pipHidden: Set<String> = emptySet(),
+    val vertical: Boolean = false,
+    val restarting: Boolean = false,
+    val confirmStop: String? = null,
 ) {
     fun draft(key: String): List<PendingFile> = drafts[key].orEmpty()
-    val openTab: BrowserTab? get() = browser?.tabs?.firstOrNull { it.id == openTabId }
+    val browserTab: BrowserTab? get() = browser?.tabs?.firstOrNull { it.id == browserTabId }
     val openSession: SessionInfo? get() = sessions.firstOrNull { it.id == openSessionId }
+    fun engine(id: String?): EngineInfo? = engines.firstOrNull { it.id == id }
+
+    /** The tab to show as picture-in-picture on a chat: picked by hand, or the one its agent is using right now. */
+    fun pipTab(session: SessionInfo?): String? {
+        session ?: return null
+        val tab = pipTabs[session.id] ?: session.browserTab?.id?.takeIf { session.isBusy } ?: return null
+        return tab.takeUnless { "${session.id}:$it" in pipHidden }
+    }
 }
 
-/**
- * One long-poll loop keeps sessions, approvals and the open task's chat in sync with the server.
- * Every change on the server is a durable event, so reconnecting just continues from the last seq.
- */
 const val NEW_DRAFT = "new"
 
-class CrewViewModel(application: Application) : AndroidViewModel(application) {
-    private val prefs = Prefs(application)
-    private val notifier = Notifier(application)
-    private val _state = MutableStateFlow(UiState(settings = prefs.load()))
+/**
+ * The app's state and its one connection to the server. It lives as long as the process (see
+ * [CrewApplication]), not the screen, so the long poll and its notifications keep going while the app
+ * is in the background and the live-activity service keeps the process alive.
+ *
+ * Every change on the server is a durable event, so reconnecting just continues from the last seq.
+ */
+class CrewViewModel(private val app: Application) {
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private val prefs = Prefs(app)
+    private val notifier = Notifier(app)
+    private val _state = MutableStateFlow(UiState(settings = prefs.load(), vertical = prefs.vertical()))
     val state: StateFlow<UiState> = _state.asStateFlow()
 
     @Volatile private var api: CrewApi? = null
     private var loop: Job? = null
     private var timeline: Timeline? = null
     private val pendingLive = ArrayList<Event>()
+    private val live = LinkedHashMap<String, LiveTask>()
+    private val lastError = HashMap<String, String>()
+
     @Volatile var inForeground = true
+        set(value) {
+            field = value
+            if (value) notifier.appVisible()
+        }
 
     // The agents' browser. Frames live in their own flow so a new picture does not re-render everything.
     private val _frame = MutableStateFlow<BrowserFrame?>(null)
     val frame: StateFlow<BrowserFrame?> = _frame.asStateFlow()
     private var streamJob: Job? = null
     @Volatile private var stream: FrameStream? = null
-
-    init {
-        connect()
-    }
+    @Volatile private var watched: String? = null
+    private val tabOrder = ArrayList<String>()
 
     fun connect() {
         loop?.cancel()
@@ -98,7 +155,7 @@ class CrewViewModel(application: Application) : AndroidViewModel(application) {
             _state.update { it.copy(connection = Connection.NotSetUp) }
             return
         }
-        loop = viewModelScope.launch(Dispatchers.IO) { runLoop(settings) }
+        loop = scope.launch(Dispatchers.IO) { runLoop(settings) }
     }
 
     fun saveSettings(settings: ConnectionSettings) {
@@ -106,6 +163,8 @@ class CrewViewModel(application: Application) : AndroidViewModel(application) {
         _state.update { it.copy(settings = prefs.load()) }
         connect()
     }
+
+    private var sawDown = false
 
     private suspend fun runLoop(settings: ConnectionSettings) {
         var attempt = 0
@@ -118,15 +177,21 @@ class CrewViewModel(application: Application) : AndroidViewModel(application) {
                 api = client
                 val sessions = client.sessions()
                 val approvals = client.approvals()
+                val wasRestarting = _state.value.restarting && sawDown
                 _state.update {
                     it.copy(
                         connection = Connection.Online(client.route.label, version),
                         engines = server.engines,
                         sessions = sessions,
                         approvals = approvals,
+                        restarting = if (wasRestarting) false else it.restarting,
+                        message = if (wasRestarting) "Crew is back" else it.message,
                     )
                 }
+                if (wasRestarting) sawDown = false
+                syncLive(sessions)
                 _state.value.openSessionId?.let { loadTimeline(client, it) }
+                retryOutbox()
                 attempt = 0
                 var after = server.lastSeq
                 while (true) {
@@ -144,33 +209,70 @@ class CrewViewModel(application: Application) : AndroidViewModel(application) {
                     e is ApiException && e.code == 401 -> "The token was not accepted"
                     else -> e.message ?: e.javaClass.simpleName
                 }
+                if (_state.value.restarting) sawDown = true
                 _state.update { it.copy(connection = Connection.Offline(reason)) }
                 if (e is ApiException && e.code == 401) return
-                delay(Timing.RETRY_DELAYS_MS[minOf(attempt, Timing.RETRY_DELAYS_MS.lastIndex)])
+                // While the server restarts, try every second so the app is back as soon as it is.
+                val wait = if (_state.value.restarting) 1_000L else Timing.RETRY_DELAYS_MS[minOf(attempt, Timing.RETRY_DELAYS_MS.lastIndex)]
+                delay(wait)
                 attempt++
             }
         }
     }
 
     private fun handle(event: Event) {
+        val sid = event.sessionId
         when (event.kind) {
             "session" -> {
                 val session = SessionInfo.from(event.payload)
                 _state.update { s -> s.copy(sessions = upsert(s.sessions, session)) }
+                if (session.isBusy) liveTask(session).also { it.title = session.title } else live.remove(sid)
+                pushLive()
             }
+            "turn_start" -> {
+                live[sid]?.let { it.activity = "Starting"; it.since = System.currentTimeMillis() }
+                lastError.remove(sid)
+                pushLive()
+            }
+            "tool" -> {
+                val status = event.payload.optString("status")
+                if (status != "completed" && status != "failed") {
+                    live[sid]?.activity = event.payload.optString("title", "Working")
+                    pushLive()
+                }
+            }
+            "text" -> live[sid]?.let {
+                val next = if (event.payload.optString("role") == "thought") "Thinking" else "Writing the reply"
+                if (it.activity != next && !it.waiting) { it.activity = next; pushLive() }
+            }
+            "browser" -> live[sid]?.let {
+                val host = event.payload.optString("url").substringAfter("://").substringBefore('/').removePrefix("www.")
+                it.activity = "Browsing $host"
+                pushLive()
+            }
+            "error" -> lastError[sid] = event.payload.optString("message", "Something went wrong")
             "approval" -> {
                 val approval = Approval.from(event.payload)
                 _state.update { s ->
                     val rest = s.approvals.filterNot { it.id == approval.id }
                     s.copy(approvals = if (approval.pending) rest + approval else rest)
                 }
-                if (approval.pending && !viewing(event.sessionId)) {
-                    notifier.approval(approval, titleOf(event.sessionId))
+                live[sid]?.let {
+                    it.waiting = approval.pending
+                    it.activity = if (approval.pending) "Needs your OK: ${approval.title}" else "Continuing"
+                    pushLive()
+                }
+                if (approval.pending && !viewing(sid)) notifier.approval(sid, titleOf(sid), engineName(sid), approval.title)
+            }
+            "turn_end" -> if (!viewing(sid)) {
+                when (event.payload.optString("stop_reason")) {
+                    "cancelled" -> {}
+                    "error" -> notifier.error(sid, titleOf(sid), lastError[sid] ?: "The task stopped unexpectedly")
+                    else -> notifier.finished(sid, titleOf(sid), event.payload.optString("preview").ifBlank { "Finished" })
                 }
             }
-            "turn_end" -> if (!viewing(event.sessionId)) notifier.finished(event.sessionId, titleOf(event.sessionId))
         }
-        if (event.sessionId == _state.value.openSessionId) {
+        if (sid == _state.value.openSessionId) {
             val snapshot = synchronized(pendingLive) {
                 val current = timeline
                 if (current == null) {
@@ -182,8 +284,32 @@ class CrewViewModel(application: Application) : AndroidViewModel(application) {
                     null
                 }
             }
-            if (snapshot != null) _state.update { it.copy(timeline = snapshot) }
+            if (snapshot != null) {
+                _state.update { it.copy(timeline = snapshot) }
+                dropStored()
+            }
         }
+    }
+
+    // live activity notifications
+
+    private fun liveTask(session: SessionInfo): LiveTask = live.getOrPut(session.id) {
+        LiveTask(session.id, session.title, engineName(session.id, session.engine), if (session.status == "waiting") "Needs your OK" else "Working", System.currentTimeMillis(), session.status == "waiting")
+    }
+
+    private fun syncLive(sessions: List<SessionInfo>) {
+        val busy = sessions.filter { it.isBusy }
+        live.keys.retainAll(busy.map { it.id }.toSet())
+        busy.forEach { liveTask(it) }
+        pushLive()
+    }
+
+    private fun pushLive() = notifier.live(live.values.map { it.copy() })
+
+    private fun engineName(sessionId: String, engineId: String? = null): String {
+        val s = _state.value
+        val id = engineId ?: s.sessions.firstOrNull { it.id == sessionId }?.engine
+        return s.engine(id)?.name ?: id ?: "Crew"
     }
 
     private fun viewing(sessionId: String) = inForeground && _state.value.openSessionId == sessionId
@@ -196,22 +322,36 @@ class CrewViewModel(application: Application) : AndroidViewModel(application) {
         return merged.sortedWith(compareByDescending<SessionInfo> { it.pinned }.thenByDescending { it.updatedAt })
     }
 
-    // the open task
+    // navigation
+
+    fun navigate(tab: Int) = _state.update { it.copy(navTab = tab) }
 
     fun openSession(id: String) {
         synchronized(pendingLive) {
             timeline = null
             pendingLive.clear()
         }
-        _state.update { it.copy(openSessionId = id, timeline = emptyList(), timelineLoading = true) }
+        _state.update { it.copy(openSessionId = id, lastSessionId = id, timeline = emptyList(), timelineLoading = true) }
         notifier.clear(id)
         val client = api ?: return
-        viewModelScope.launch(Dispatchers.IO) { loadTimeline(client, id) }
+        scope.launch(Dispatchers.IO) { loadTimeline(client, id) }
     }
 
     fun closeSession() {
         synchronized(pendingLive) { timeline = null }
         _state.update { it.copy(openSessionId = null, timeline = emptyList()) }
+    }
+
+    /** From a notification's Stop button: open the task and ask before stopping it. */
+    fun askStop(id: String) {
+        openSession(id)
+        _state.update { it.copy(confirmStop = id) }
+    }
+
+    fun answerStop(stop: Boolean) {
+        val id = _state.value.confirmStop ?: return
+        _state.update { it.copy(confirmStop = null) }
+        if (stop) act { it.cancel(id) }
     }
 
     private fun loadTimeline(client: CrewApi, id: String) {
@@ -225,6 +365,7 @@ class CrewViewModel(application: Application) : AndroidViewModel(application) {
                 timeline = fresh
             }
             _state.update { it.copy(timeline = fresh.snapshot(), timelineLoading = false) }
+            dropStored()
         } catch (e: Exception) {
             _state.update { it.copy(timelineLoading = false, message = "Could not load the task: ${e.message}") }
         }
@@ -234,18 +375,96 @@ class CrewViewModel(application: Application) : AndroidViewModel(application) {
 
     fun newTask(text: String, autoApprove: Boolean, engine: String?, config: Map<String, String>) = act { client ->
         val files = readyUploads(NEW_DRAFT)
+        val engineId = engine ?: _state.value.engines.firstOrNull { it.isDefault }?.id
         val session = client.createSession(text, autoApprove, engine, config, files)
+        engineId?.let { id -> prefs.updateEngine(id) { it.copy(autoApprove = autoApprove, config = it.config + config) } }
         clearDraft(NEW_DRAFT)
         _state.update { it.copy(sessions = upsert(it.sessions, session)) }
         launchMain { openSession(session.id) }
     }
 
-    fun send(text: String) {
+    /** What a new task on [engineId] starts with: the owner's last picks for that agent. */
+    fun engineDefaults(engineId: String?): EngineDefaults = engineId?.let(prefs::engine) ?: EngineDefaults()
+
+    /**
+     * Sends a message to the open task. [delivery]: steer, queue or interrupt while a turn runs, or null
+     * for the server's default. The message shows at once; if it does not reach the server it is marked
+     * "Not sent" and [resend] tries again with the same id, so it is never stored twice.
+     */
+    fun send(text: String, delivery: String?) {
         val id = _state.value.openSessionId ?: return
-        act { client ->
-            client.send(id, text, readyUploads(id))
-            clearDraft(id)
+        val message = OutgoingMessage(
+            clientId = UUID.randomUUID().toString(),
+            sessionId = id,
+            text = text,
+            uploads = readyUploads(id),
+            files = _state.value.draft(id).filter { it.uploadId != null },
+            tabs = _state.value.draftTabs[id].orEmpty(),
+            delivery = delivery,
+        )
+        clearDraft(id)
+        _state.update { it.copy(outbox = it.outbox + message, draftTabs = it.draftTabs - id) }
+        deliver(message)
+    }
+
+    fun resend(clientId: String) {
+        val message = _state.value.outbox.firstOrNull { it.clientId == clientId } ?: return
+        _state.update { s -> s.copy(outbox = s.outbox.map { if (it.clientId == clientId) it.copy(failed = false) else it }) }
+        deliver(message.copy(failed = false))
+    }
+
+    private fun deliver(message: OutgoingMessage) {
+        val client = api
+        if (client == null) {
+            markFailed(message.clientId)
+            return
         }
+        scope.launch(Dispatchers.IO) {
+            try {
+                client.send(message.sessionId, message.text, message.uploads, message.tabs, message.delivery, message.clientId)
+                dropStored(message.clientId)
+            } catch (e: ApiException) {
+                // The server answered but refused: show why; resending would fail the same way.
+                markFailed(message.clientId)
+                _state.update { it.copy(message = e.message ?: "Not sent") }
+            } catch (e: Exception) {
+                markFailed(message.clientId)
+            }
+        }
+    }
+
+    private fun markFailed(clientId: String) =
+        _state.update { s -> s.copy(outbox = s.outbox.map { if (it.clientId == clientId) it.copy(failed = true) else it }) }
+
+    /** Drops local rows the server has stored (its own row with the same client id is in the chat now). */
+    private fun dropStored(clientId: String? = null) {
+        val stored = synchronized(pendingLive) { timeline?.clientIds?.toSet() }.orEmpty()
+        _state.update { s ->
+            val keep = s.outbox.filterNot { it.clientId in stored }
+            if (keep.size == s.outbox.size && clientId == null) s else s.copy(outbox = keep)
+        }
+        if (clientId != null && clientId !in stored) {
+            // Stored, but its event has not arrived yet (or this chat is closed): it is safe to drop once seen.
+            scope.launch {
+                delay(4_000)
+                _state.update { s -> s.copy(outbox = s.outbox.filterNot { it.clientId == clientId && !it.failed }) }
+            }
+        }
+    }
+
+    /** After a reconnect, messages that failed while offline go again (same client ids: no duplicates). */
+    private fun retryOutbox() = _state.value.outbox.filter { it.failed }.forEach { resend(it.clientId) }
+
+    /** Rows for the open chat that are not stored on the server yet. */
+    fun localRows(sessionId: String): List<UserItem> = _state.value.outbox.filter { it.sessionId == sessionId }.map {
+        UserItem(
+            key = "local-${it.clientId}",
+            text = it.text,
+            tabs = it.tabs,
+            clientId = it.clientId,
+            delivery = it.delivery,
+            state = if (it.failed) "failed" else "sending",
+        )
     }
 
     // attachments: each picked file uploads at once; the message carries the upload ids
@@ -254,7 +473,7 @@ class CrewViewModel(application: Application) : AndroidViewModel(application) {
 
     fun attach(draft: String, uris: List<android.net.Uri>) {
         val client = api ?: run { _state.update { it.copy(message = "Not connected to Crew") }; return }
-        val resolver = getApplication<Application>().contentResolver
+        val resolver = app.contentResolver
         uris.forEach { uri ->
             val localId = synchronized(this) { nextLocalId++ }
             var name = "file"
@@ -266,7 +485,7 @@ class CrewViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
             updateDraft(draft) { it + PendingFile(localId, name, size) }
-            viewModelScope.launch(Dispatchers.IO) {
+            scope.launch(Dispatchers.IO) {
                 val result = runCatching {
                     val input = resolver.openInputStream(uri) ?: error("Cannot read $name")
                     client.upload(name, resolver.getType(uri), input)
@@ -297,12 +516,19 @@ class CrewViewModel(application: Application) : AndroidViewModel(application) {
 
     fun decide(approval: Approval, optionId: String) = act { it.decide(approval.id, optionId) }
 
-    fun setAutoApprove(id: String, on: Boolean) = act { it.updateSession(id, JSONObject().put("auto_approve", on)) }
+    fun setAutoApprove(id: String, on: Boolean) = act { client ->
+        val session = client.updateSession(id, JSONObject().put("auto_approve", on))
+        prefs.updateEngine(session.engine) { it.copy(autoApprove = on) }
+    }
 
-    fun setMode(id: String, mode: String) = act { it.updateSession(id, JSONObject().put("mode", mode)) }
+    fun setMode(id: String, mode: String) = act { client ->
+        val session = client.updateSession(id, JSONObject().put("mode", mode))
+        prefs.updateEngine(session.engine) { it.copy(mode = mode) }
+    }
 
     fun setConfig(id: String, configId: String, value: String) = act { client ->
         val session = client.updateSession(id, JSONObject().put("config", JSONObject().put(configId, value)))
+        prefs.updateEngine(session.engine) { it.copy(config = it.config + (configId to value)) }
         _state.update { it.copy(sessions = upsert(it.sessions, session)) }
     }
 
@@ -329,62 +555,169 @@ class CrewViewModel(application: Application) : AndroidViewModel(application) {
 
     fun dismissMessage() = _state.update { it.copy(message = null) }
 
-    // the agents' browser
+    fun toast(text: String) = _state.update { it.copy(message = text) }
 
-    fun refreshTabs() = act { client ->
-        val tabs = client.browserTabs()
-        _state.update { it.copy(browser = tabs) }
-    }
-
-    /** Opens a tab's live view; with no id, the tab the browser shows in front. */
-    fun openTab(id: String? = null) {
-        val client = api ?: run { _state.update { it.copy(message = "Not connected to Crew") }; return }
-        viewModelScope.launch(Dispatchers.IO) {
-            try {
-                val tabs = client.browserTabs()
-                val target = id ?: tabs.tabs.firstOrNull()?.id
-                if (target == null) {
-                    _state.update { it.copy(browser = tabs, message = tabs.reason ?: "The browser has no open tabs") }
-                    return@launch
-                }
-                _state.update { it.copy(browser = tabs, openTabId = target, streamError = null) }
-                startStream(client, target)
-            } catch (e: Exception) {
-                _state.update { it.copy(message = e.message ?: "Could not open the browser") }
-            }
+    /** Emergency: the server stops its agents and exits; systemd starts it again. The app reconnects by itself. */
+    fun restartBackend() = act { client ->
+        sawDown = false
+        _state.update { it.copy(restarting = true) }
+        try {
+            client.restartServer()
+        } catch (e: Exception) {
+            // The server may already be gone; the loop notices either way.
+        }
+        scope.launch {
+            delay(90_000)
+            if (_state.value.restarting) _state.update { it.copy(restarting = false, message = "Crew did not come back yet; still retrying") }
         }
     }
 
-    fun closeTab() {
-        _state.update { it.copy(openTabId = null, streamError = null) }
+    // the agents' browser
+
+    fun refreshTabs() = act { client -> setTabs(client.browserTabs()) }
+
+    /** Keeps the tab pills in a stable order: tabs stay where they are, new ones go to the end. */
+    private fun setTabs(tabs: BrowserTabs) {
+        val ids = tabs.tabs.map { it.id }
+        synchronized(tabOrder) {
+            tabOrder.retainAll(ids.toSet())
+            ids.filterNot { it in tabOrder }.forEach { tabOrder.add(it) }
+        }
+        val byId = tabs.tabs.associateBy { it.id }
+        val ordered = synchronized(tabOrder) { tabOrder.mapNotNull { byId[it] } }
+        _state.update { s ->
+            val selected = s.browserTabId?.takeIf { it in byId } ?: ordered.firstOrNull()?.id
+            s.copy(browser = tabs.copy(tabs = ordered), browserTabId = selected)
+        }
+    }
+
+    fun selectTab(id: String) = _state.update { it.copy(browserTabId = id) }
+
+    /** Opens the Browser screen on a tab (from a chat's picture-in-picture or menu). */
+    fun openBrowserAt(tabId: String?) {
+        _state.update { it.copy(navTab = NavTab.BROWSER, browserTabId = tabId ?: it.browserTabId) }
+        closeSession()
+    }
+
+    fun newTab(url: String? = null, done: (BrowserTab) -> Unit = {}) = act { client ->
+        val tab = client.newTab(url)
+        setTabs(client.browserTabs())
+        _state.update { it.copy(browserTabId = tab.id) }
+        launchMain { done(tab) }
+    }
+
+    fun closeTab(id: String) = act { client ->
+        client.closeBrowserTab(id)
+        if (_state.value.browserTabId == id) _state.update { it.copy(browserTabId = null) }
+        setTabs(client.browserTabs())
+    }
+
+    fun setVertical(on: Boolean) {
+        prefs.setVertical(on)
+        _state.update { it.copy(vertical = on) }
+    }
+
+    /** Lays the tab out for the phone (vertical) or the normal 1080p window (horizontal). */
+    fun applyView(tabId: String, vertical: Boolean, width: Int, height: Int, scale: Float) = act { client ->
+        client.setTabView(tabId, vertical, width, height, scale)
+    }
+
+    fun inputCursor(engineId: String?): Boolean = prefs.cursorMode(engineId)
+
+    fun setInputCursor(engineId: String?, cursor: Boolean) = prefs.setCursorMode(engineId, cursor)
+
+    fun addTabToChat(sessionId: String, tab: BrowserTab) {
+        _state.update { s ->
+            val list = s.draftTabs[sessionId].orEmpty().filterNot { it.id == tab.id } + tab
+            s.copy(draftTabs = s.draftTabs + (sessionId to list))
+        }
+        openSession(sessionId)
+    }
+
+    fun removeDraftTab(sessionId: String, tabId: String) = _state.update { s ->
+        s.copy(draftTabs = s.draftTabs + (sessionId to s.draftTabs[sessionId].orEmpty().filterNot { it.id == tabId }))
+    }
+
+    fun showPip(sessionId: String, tabId: String) {
+        _state.update { s -> s.copy(pipTabs = s.pipTabs + (sessionId to tabId), pipHidden = s.pipHidden - "$sessionId:$tabId") }
+        openSession(sessionId)
+    }
+
+    /** Hides a chat's picture-in-picture. The task keeps running. */
+    fun hidePip(sessionId: String, tabId: String) =
+        _state.update { s -> s.copy(pipHidden = s.pipHidden + "$sessionId:$tabId", pipTabs = s.pipTabs - sessionId) }
+
+    /** Streams [tabId] live into [frame], for whichever screen shows it. One stream at a time. */
+    fun watchTab(tabId: String) {
+        if (watched == tabId && streamJob?.isActive == true) return
+        val client = api ?: return
+        watched = tabId
+        startStream(client, tabId)
+    }
+
+    fun unwatch(tabId: String) {
+        if (watched != tabId) return
+        watched = null
         stopStream()
         _frame.value = null
     }
 
-    fun tabInput(event: JSONObject) {
-        val id = _state.value.openTabId ?: return
-        act { it.browserInput(id, event) }
+    // Input goes out one request at a time, in order; pointer moves are merged so only the latest is sent.
+    private val inputQueue = ArrayDeque<Triple<String, JSONObject, ((JSONObject) -> Unit)?>>()
+    private val inputSignal = Channel<Unit>(Channel.CONFLATED)
+
+    fun tabInput(tabId: String, event: JSONObject, onResult: ((JSONObject) -> Unit)? = null) {
+        synchronized(inputQueue) {
+            val last = inputQueue.lastOrNull()
+            if (event.isMove() && last != null && last.first == tabId && last.second.isMove() && last.third == null) {
+                inputQueue.removeLast()
+            }
+            inputQueue.addLast(Triple(tabId, event, onResult))
+        }
+        inputSignal.trySend(Unit)
+    }
+
+    private fun JSONObject.isMove() = optString("type") == "mouse" && optString("action") == "move"
+
+    private fun startInputWorker() = scope.launch(Dispatchers.IO) {
+        for (signal in inputSignal) {
+            while (true) {
+                val next = synchronized(inputQueue) { inputQueue.removeFirstOrNull() } ?: break
+                val client = api ?: continue
+                try {
+                    val result = client.browserInput(next.first, next.second)
+                    next.third?.let { callback -> launchMain { callback(result) } }
+                } catch (e: ApiException) {
+                    if (e.code == 404) refreshTabs()
+                } catch (e: Exception) {
+                    // A dropped pointer move is harmless; the next one carries the position.
+                }
+            }
+        }
     }
 
     private fun startStream(client: CrewApi, tabId: String) {
         stopStream()
         _frame.value = null
-        streamJob = viewModelScope.launch(Dispatchers.IO) {
+        streamJob = scope.launch(Dispatchers.IO) {
             var failures = 0
-            while (_state.value.openTabId == tabId) {
+            while (watched == tabId) {
                 try {
                     val s = client.openBrowserStream(tabId)
                     stream = s
                     s.read { frame ->
                         failures = 0
-                        _frame.value = frame
+                        if (watched == tabId) _frame.value = frame
                         if (_state.value.streamError != null) _state.update { it.copy(streamError = null) }
                     }
                 } catch (e: Exception) {
-                    if (_state.value.openTabId != tabId) break
+                    if (watched != tabId) break
                     failures++
                     _state.update { it.copy(streamError = e.message ?: "The live view stopped") }
-                    if (e is ApiException && e.code == 404) break
+                    if (e is ApiException && e.code == 404) {
+                        refreshTabs()
+                        break
+                    }
                 }
                 delay(if (failures > 3) 5_000 else 1_000)
             }
@@ -397,7 +730,7 @@ class CrewViewModel(application: Application) : AndroidViewModel(application) {
         val s = stream
         stream = null
         // disconnect() unblocks the reading thread; do it off the main thread.
-        if (s != null) viewModelScope.launch(Dispatchers.IO) { runCatching { s.close() } }
+        if (s != null) scope.launch(Dispatchers.IO) { runCatching { s.close() } }
     }
 
     private fun act(block: (CrewApi) -> Unit) {
@@ -406,7 +739,7 @@ class CrewViewModel(application: Application) : AndroidViewModel(application) {
             _state.update { it.copy(message = "Not connected to Crew") }
             return
         }
-        viewModelScope.launch(Dispatchers.IO) {
+        scope.launch(Dispatchers.IO) {
             try {
                 block(client)
             } catch (e: Exception) {
@@ -416,6 +749,22 @@ class CrewViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun launchMain(block: () -> Unit) {
-        viewModelScope.launch(Dispatchers.Main) { block() }
+        scope.launch(Dispatchers.Main) { block() }
+    }
+
+    // Last in the class: everything above must be initialised before the loops start.
+    init {
+        startInputWorker()
+        connect()
     }
 }
+
+/** What the live-activity notification shows for one running task. */
+data class LiveTask(
+    val sessionId: String,
+    var title: String,
+    val engine: String,
+    var activity: String,
+    var since: Long,
+    var waiting: Boolean,
+)

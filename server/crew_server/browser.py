@@ -4,6 +4,10 @@ Uses the Chrome DevTools Protocol on the loopback port the agents' browser liste
 streamed with `Page.startScreencast` (JPEG frames of the visible viewport). Input goes in with
 `Input.dispatchMouseEvent`, `Input.dispatchKeyEvent` and `Input.insertText`.
 
+The "vertical" view sizes the page to the phone with `Emulation.setDeviceMetricsOverride`. That
+override belongs to Crew's DevTools connection, so it ends by itself when nobody watches the tab,
+and Crew clears it as soon as an agent starts using the tab: agents always get the normal layout.
+
 Typed text goes straight to the page. It is never logged, stored or shown to the agent as text, so
 passwords and one-time codes can be entered from the phone without passing through the chat.
 """
@@ -15,6 +19,8 @@ import base64
 import itertools
 import json
 import logging
+import time
+import urllib.parse
 import urllib.request
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
@@ -24,9 +30,22 @@ import websockets
 
 log = logging.getLogger("crew.browser")
 
-SCREENCAST = {"format": "jpeg", "quality": 60, "maxWidth": 1080, "maxHeight": 1920, "everyNthFrame": 1}
+# Up to full 1080p, so the phone can zoom into a horizontal page without it going soft.
+SCREENCAST = {"format": "jpeg", "quality": 60, "maxWidth": 1920, "maxHeight": 1920, "everyNthFrame": 1}
 KEEPALIVE_SECONDS = 10  # resend the last frame so idle streams stay open and dead ones are noticed
 IDLE_CLOSE_SECONDS = 30
+OWNER_GRACE_SECONDS = 4  # a tab the owner just used is not taken for an agent's
+BUTTONS = {"left": 1, "right": 2, "middle": 4}
+FOCUS_JS = """(() => {
+  let e = document.activeElement;
+  try { while (e && e.tagName === 'IFRAME' && e.contentDocument) e = e.contentDocument.activeElement; } catch (_) {}
+  while (e && e.shadowRoot && e.shadowRoot.activeElement) e = e.shadowRoot.activeElement;
+  if (!e) return {editable: false, password: false};
+  const tag = (e.tagName || '').toLowerCase(), type = (e.type || '').toLowerCase();
+  const plain = ['button','checkbox','radio','submit','reset','file','image','range','color','hidden'];
+  const editable = e.isContentEditable || tag === 'textarea' || (tag === 'input' && !plain.includes(type));
+  return {editable: !!editable, password: type === 'password'};
+})()"""
 KEYS = {
     # key: (code, windowsVirtualKeyCode, text)
     "Enter": ("Enter", 13, "\r"),
@@ -39,6 +58,10 @@ KEYS = {
     "ArrowRight": ("ArrowRight", 39, None),
     "PageDown": ("PageDown", 34, None),
     "PageUp": ("PageUp", 33, None),
+    "Delete": ("Delete", 46, None),
+    "Home": ("Home", 36, None),
+    "End": ("End", 35, None),
+    "Space": ("Space", 32, " "),
 }
 
 
@@ -56,6 +79,9 @@ class Frame:
     width: float  # viewport size in CSS pixels, for mapping taps
     height: float
     number: int
+    emulated: bool = False  # true while the phone-sized (vertical) view is on
+    scroll_y: float = 0  # the page's scroll position and height in CSS pixels, for the phone's scroll bar
+    content_height: float = 0
 
 
 @dataclass
@@ -73,6 +99,10 @@ class TabLink:
     casting: bool = False
     closed: bool = False
     idle_task: asyncio.Task | None = None
+    emulated: bool = False
+    scroll_y: float = 0
+    content_height: float = 0
+    metrics_at: float = 0
 
     async def call(self, method: str, params: dict[str, Any] | None = None, timeout: float = 10) -> dict[str, Any]:
         if self.closed:
@@ -102,7 +132,12 @@ class TabLink:
                     meta = params.get("metadata") or {}
                     number = (self.frame.number + 1) if self.frame else 1
                     self.frame = Frame(base64.b64decode(params["data"]), meta.get("deviceWidth", 0),
-                                       meta.get("deviceHeight", 0), number)
+                                       meta.get("deviceHeight", 0), number, self.emulated,
+                                       meta.get("scrollOffsetY", self.scroll_y) or 0, self.content_height)
+                    self.scroll_y = self.frame.scroll_y
+                    if time.monotonic() - self.metrics_at > 1:
+                        self.metrics_at = time.monotonic()
+                        asyncio.create_task(self._metrics())
                     # Ack at once; viewers always take the newest frame, so a slow phone just skips frames.
                     asyncio.create_task(self._ack(params["sessionId"]))
                     async with self.changed:
@@ -119,6 +154,13 @@ class TabLink:
             async with self.changed:
                 self.changed.notify_all()
 
+    async def _metrics(self) -> None:
+        try:
+            metrics = await self.call("Page.getLayoutMetrics", timeout=3)
+            self.content_height = (metrics.get("cssContentSize") or metrics.get("contentSize") or {}).get("height", 0)
+        except Exception:
+            pass
+
     async def _ack(self, session_id: int) -> None:
         try:
             await self.call("Page.screencastFrameAck", {"sessionId": session_id})
@@ -131,10 +173,12 @@ class Browser:
         self.port = cdp_port
         self.links: dict[str, TabLink] = {}
         self.lock = asyncio.Lock()
+        self.touched: dict[str, float] = {}  # tab id -> when the owner last sent it input
 
-    def _http(self, path: str) -> Any:
+    def _http(self, path: str, method: str = "GET") -> Any:
         try:
-            with urllib.request.urlopen(f"http://127.0.0.1:{self.port}{path}", timeout=3) as r:
+            request = urllib.request.Request(f"http://127.0.0.1:{self.port}{path}", method=method)
+            with urllib.request.urlopen(request, timeout=3) as r:
                 body = r.read()
         except OSError as exc:
             raise BrowserUnavailable(f"the agents' browser is not running (DevTools port {self.port})") from exc
@@ -147,6 +191,78 @@ class Browser:
             for t in targets
             if t.get("type") == "page" and not t.get("url", "").startswith("devtools://")
         ]
+
+    async def new_tab(self, url: str | None = None) -> dict[str, Any]:
+        quoted = urllib.parse.quote(url or "about:blank", safe=":/?&=#%+@,;~")
+        target = await asyncio.to_thread(self._http, f"/json/new?{quoted}", "PUT")
+        self.touched[target["id"]] = time.monotonic()
+        return {"id": target["id"], "title": target.get("title") or target.get("url", ""), "url": target.get("url", "")}
+
+    async def close_tab(self, target_id: str) -> None:
+        if target_id not in {t["id"] for t in await self.tabs()}:
+            raise TabGone(target_id)
+        await asyncio.to_thread(self._http, f"/json/close/{target_id}")
+
+    async def set_view(self, target_id: str, mode: str, width: int = 0, height: int = 0, scale: float = 0) -> None:
+        """"vertical": lay the page out for the phone's screen (CSS pixels); "horizontal": the normal window."""
+        link = await self.link(target_id)
+        if mode == "vertical":
+            if not (200 <= width <= 1500 and 200 <= height <= 3000 and 0.5 <= scale <= 5):
+                raise ValueError("vertical needs width 200..1500, height 200..3000 and scale 0.5..5")
+            await link.call("Emulation.setDeviceMetricsOverride",
+                            {"width": int(width), "height": int(height), "deviceScaleFactor": scale, "mobile": True})
+            link.emulated = True
+        elif mode == "horizontal":
+            if link.emulated:
+                await link.call("Emulation.clearDeviceMetricsOverride")
+            link.emulated = False
+        else:
+            raise ValueError("mode is vertical or horizontal")
+        self.touched[target_id] = time.monotonic()
+
+    async def watch(self, on_activity) -> None:
+        """Follow the browser's tabs; report a tab that opens or navigates while the owner is not using it.
+
+        `on_activity({id, url, title})` returns the session it was linked to, or None. A linked tab that is
+        in the vertical view goes back to horizontal, since an agent is now driving it.
+        """
+        while True:
+            try:
+                known = {t["id"]: t["url"] for t in await self.tabs()}
+                version = await asyncio.to_thread(self._http, "/json/version")
+                async with websockets.connect(version["webSocketDebuggerUrl"], max_size=None, open_timeout=5) as ws:
+                    await ws.send(json.dumps({"id": 1, "method": "Target.setDiscoverTargets", "params": {"discover": True}}))
+                    async for raw in ws:
+                        message = json.loads(raw)
+                        method = message.get("method")
+                        params = message.get("params") or {}
+                        if method == "Target.targetDestroyed":
+                            known.pop(params.get("targetId"), None)
+                            continue
+                        if method not in ("Target.targetCreated", "Target.targetInfoChanged"):
+                            continue
+                        info = params.get("targetInfo") or {}
+                        url = info.get("url", "")
+                        if info.get("type") != "page" or url.startswith("devtools://"):
+                            continue
+                        tab_id = info["targetId"]
+                        if known.get(tab_id) == url:
+                            continue
+                        known[tab_id] = url
+                        if time.monotonic() - self.touched.get(tab_id, 0) < OWNER_GRACE_SECONDS:
+                            continue
+                        owner = await on_activity({"id": tab_id, "url": url, "title": info.get("title") or url})
+                        link = self.links.get(tab_id)
+                        if owner and link and link.emulated and not link.closed:
+                            try:
+                                await self.set_view(tab_id, "horizontal")
+                            except Exception:
+                                pass
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.debug("browser watch: %s", exc)
+            await asyncio.sleep(5)
 
     async def activate(self, target_id: str) -> None:
         """Bring the tab to the front, so it paints (background tabs send no screencast frames)."""
@@ -210,15 +326,19 @@ class Browser:
         link.casting = False
         await link.ws.close()
 
-    async def input(self, target_id: str, event: dict[str, Any]) -> None:
+    async def input(self, target_id: str, event: dict[str, Any]) -> dict[str, Any]:
+        """Returns {editable, password} after a click, so the phone can open its keyboard for a text field."""
         link = await self.link(target_id)
+        self.touched[target_id] = time.monotonic()
         kind = event.get("type")
         size = link.frame or Frame(b"", 0, 0, 0)
-        if kind in ("tap", "scroll") and not (size.width and size.height):
+        if kind in ("tap", "scroll", "mouse") and not (size.width and size.height):
             # No frame yet: ask for the viewport size.
             metrics = await link.call("Page.getLayoutMetrics")
             view = metrics.get("cssVisualViewport") or metrics.get("layoutViewport") or {}
             size = Frame(b"", view.get("clientWidth", 0), view.get("clientHeight", 0), 0)
+        if kind == "mouse":
+            return await self._mouse(link, event, float(event["x"]) * size.width, float(event["y"]) * size.height)
         if kind == "tap":
             x, y = float(event["x"]) * size.width, float(event["y"]) * size.height
             await link.call("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": x, "y": y})
@@ -261,8 +381,51 @@ class Browser:
                 raise ValueError("navigate needs action back, forward, reload, or a url")
         else:
             raise ValueError(f"unknown input type {kind}")
+        return {}
+
+    async def _mouse(self, link: TabLink, event: dict[str, Any], x: float, y: float) -> dict[str, Any]:
+        """move (with held set while a button is down: drags and selections), down, up, click (clicks 1 or 2)."""
+        action = event.get("action")
+        button = event.get("button") or "left"
+        if button not in BUTTONS:
+            raise ValueError(f"unknown button {button}")
+        mask = BUTTONS[button]
+        mouse = partial_mouse(link)
+        if action == "move":
+            params: dict[str, Any] = {"type": "mouseMoved", "x": x, "y": y}
+            if event.get("held"):
+                params.update(button=button, buttons=mask)
+            await mouse(params)
+            return {}
+        count = 2 if event.get("clicks") == 2 else 1  # 2 on down and up: the second press of a double-click
+        if action == "down":
+            await mouse({"type": "mousePressed", "x": x, "y": y, "button": button, "buttons": mask, "clickCount": count})
+            return {}
+        if action == "up":
+            await mouse({"type": "mouseReleased", "x": x, "y": y, "button": button, "buttons": 0, "clickCount": count})
+        elif action == "click":
+            clicks = 2 if event.get("clicks") == 2 else 1
+            await mouse({"type": "mouseMoved", "x": x, "y": y})
+            for count in range(1, clicks + 1):
+                await mouse({"type": "mousePressed", "x": x, "y": y, "button": button, "buttons": mask, "clickCount": count})
+                await mouse({"type": "mouseReleased", "x": x, "y": y, "button": button, "buttons": 0, "clickCount": count})
+        else:
+            raise ValueError("mouse action is move, down, up or click")
+        if button != "left":
+            return {}
+        try:
+            reply = await link.call("Runtime.evaluate", {"expression": FOCUS_JS, "returnByValue": True}, timeout=3)
+            return (reply.get("result") or {}).get("value") or {}
+        except Exception:
+            return {}
 
     async def close(self) -> None:
         for link in list(self.links.values()):
             if not link.closed:
                 await link.ws.close()
+
+
+def partial_mouse(link: TabLink):
+    async def send(params: dict[str, Any]) -> None:
+        await link.call("Input.dispatchMouseEvent", params)
+    return send

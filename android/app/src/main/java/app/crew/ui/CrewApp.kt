@@ -24,7 +24,16 @@ import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.size
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -39,6 +48,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import android.widget.Toast
 import app.crew.Connection
 import app.crew.CrewViewModel
+import app.crew.NavTab
 import app.crew.R
 import app.crew.constants.LiquidNavDimensions
 import app.crew.constants.ShellDimensions
@@ -57,8 +67,9 @@ private val navItems = Tab.entries.map { LiquidNavItem(it.label, it.icon) }
 @Composable
 fun CrewApp(viewModel: CrewViewModel) {
     val state by viewModel.state.collectAsStateWithLifecycle()
-    var tabIndex by rememberSaveable { mutableIntStateOf(0) }
+    val tabIndex = state.navTab
     val context = LocalContext.current
+    val landscape = LocalConfiguration.current.let { it.screenWidthDp > it.screenHeightDp }
 
     LaunchedEffect(state.message) {
         state.message?.let {
@@ -67,18 +78,24 @@ fun CrewApp(viewModel: CrewViewModel) {
         }
     }
     LaunchedEffect(state.connection) {
-        if (state.connection == Connection.NotSetUp) tabIndex = Tab.Settings.ordinal
+        if (state.connection == Connection.NotSetUp) viewModel.navigate(NavTab.SETTINGS)
     }
-    BackHandler(enabled = state.openTabId != null || state.openSessionId != null) {
-        if (state.openTabId != null) viewModel.closeTab() else viewModel.closeSession()
+    BackHandler(enabled = state.openSessionId != null) { viewModel.closeSession() }
+    BackHandler(enabled = state.openSessionId == null && tabIndex != NavTab.TASKS) { viewModel.navigate(NavTab.TASKS) }
+
+    state.confirmStop?.let { id ->
+        AlertDialog(
+            onDismissRequest = { viewModel.answerStop(false) },
+            title = { Text("Stop this task?") },
+            text = { Text(state.sessions.firstOrNull { it.id == id }?.title ?: "The running turn ends and queued messages are dropped.") },
+            confirmButton = { TextButton(onClick = { viewModel.answerStop(true) }) { Text("Stop") } },
+            dismissButton = { TextButton(onClick = { viewModel.answerStop(false) }) { Text("Keep running") } },
+        )
     }
 
-    // Depth: 0 tabs, 1 a task's chat, 2 a live browser tab (opened from either).
-    val depth = when {
-        state.openTabId != null -> 2
-        state.openSessionId != null -> 1
-        else -> 0
-    }
+    // Depth: 0 tabs, 1 a task's chat.
+    val depth = if (state.openSessionId != null) 1 else 0
+    Box(Modifier.fillMaxSize()) {
     AnimatedContent(
         targetState = depth,
         transitionSpec = {
@@ -90,21 +107,19 @@ fun CrewApp(viewModel: CrewViewModel) {
         },
         label = "chat",
     ) { level ->
-        if (level == 2) {
-            BrowserViewer(state, viewModel)
-        } else if (level == 1) {
+        if (level == 1) {
             ChatScreen(state, viewModel)
         } else {
             val tab = Tab.entries[tabIndex]
             Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surface)) {
                 val padding = shellContentPadding()
                 when (tab) {
-                    Tab.Tasks -> TasksScreen(state, viewModel, padding, onOpenSettings = { tabIndex = Tab.Settings.ordinal })
-                    Tab.Browser -> BrowserScreen(state, viewModel, padding)
+                    Tab.Tasks -> TasksScreen(state, viewModel, padding, onOpenSettings = { viewModel.navigate(NavTab.SETTINGS) })
+                    Tab.Browser -> BrowserScreen(state, viewModel, landscape)
                     Tab.Approvals -> ApprovalsScreen(state, viewModel, padding)
                     Tab.Settings -> SettingsScreen(state, viewModel, padding)
                 }
-                TitlePill(
+                if (tab != Tab.Browser) TitlePill(
                     title = if (tab == Tab.Approvals && state.approvals.isNotEmpty()) "Approvals · ${state.approvals.size}" else tab.title,
                     connection = state.connection,
                     modifier = Modifier
@@ -115,10 +130,10 @@ fun CrewApp(viewModel: CrewViewModel) {
                         )
                         .padding(start = ShellDimensions.TITLE_PILL_START_MARGIN, top = ShellDimensions.TITLE_PILL_TOP_GAP),
                 )
-                LiquidNavBar(
+                if (!(tab == Tab.Browser && landscape)) LiquidNavBar(
                     items = navItems,
                     selectedIndex = tabIndex,
-                    onSelect = { tabIndex = it },
+                    onSelect = { viewModel.navigate(it) },
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
                         .windowInsetsPadding(
@@ -132,6 +147,30 @@ fun CrewApp(viewModel: CrewViewModel) {
                         ),
                 )
             }
+        }
+    }
+    if (state.restarting) {
+        RestartingPill(
+            Modifier
+                .align(Alignment.TopCenter)
+                .windowInsetsPadding(WindowInsets.statusBars)
+                .padding(top = ShellDimensions.TITLE_PILL_TOP_GAP + ShellDimensions.TITLE_PILL_HEIGHT + 8.dp),
+        )
+    }
+    }
+}
+
+/** While the server restarts: a pill at the top until it answers again (the chat history is on the server). */
+@Composable
+private fun RestartingPill(modifier: Modifier = Modifier) {
+    FloatingPill(modifier) {
+        Row(
+            Modifier.padding(horizontal = 16.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+            Text("Restarting Crew… reconnecting", style = MaterialTheme.typography.labelLarge)
         }
     }
 }
