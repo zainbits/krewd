@@ -465,6 +465,12 @@ class CrewViewModel(private val app: Application) {
         _state.update { it.copy(sessions = upsert(it.sessions, session)) }
     }
 
+    fun switchEngine(id: String, engine: String) = act { client ->
+        client.switchEngine(id, engine)
+        val name = _state.value.engine(engine)?.name ?: engine
+        _state.update { it.copy(message = "Moving to $name after the current turn") }
+    }
+
     fun compact(id: String) = act { client ->
         client.compact(id)
         _state.update { it.copy(message = "Compacting after the current turn") }

@@ -131,6 +131,9 @@ async def run_prompt(request_id: int, sid: str, text: str, params: dict) -> None
     if "Handover from the earlier part" in text and "MK-42" in text:
         update(sid, {"sessionUpdate": "agent_message_chunk", "messageId": "m5",
                      "content": {"type": "text", "text": " carried=MK-42"}})
+    if "moves between agents" in text:
+        update(sid, {"sessionUpdate": "agent_message_chunk", "messageId": "m7",
+                     "content": {"type": "text", "text": " briefed"}})
     if "Scheduled run of the Crew routine" in text or "Run started by the owner" in text:
         update(sid, {"sessionUpdate": "agent_message_chunk", "messageId": "m6",
                      "content": {"type": "text", "text": " routine-ran"}})

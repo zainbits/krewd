@@ -9,6 +9,7 @@
     crew routines later ID (--in 5m | --at 19:05) --reason TEXT     during a run: try this trigger again later
     crew routines notes ID [--set TEXT | --set-file PATH | --append TEXT]
     crew schedule CRON [--timezone TZ]      check a schedule and show its next runs
+    crew chat history CHAT [--last N] [--after SEQ]     a chat's messages (owner, agents), e.g. after a switch
 
 A routine has one or more named triggers (cron schedules), e.g. check-in "55 9 * * 1-5" and check-out
 "0 19 * * 1-5". Every run goes into the routine's own chat and is told which trigger fired. A trigger can
@@ -228,6 +229,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
+    chat = sub.add_parser("chat", help="read a Crew chat (CHAT is its id or the first characters)")
+    csub = chat.add_subparsers(dest="chat_action", required=True)
+    hist = csub.add_parser("history", help="the chat's messages without tool calls")
+    hist.add_argument("chat")
+    hist.add_argument("--last", type=int, default=30, help="how many messages from the end (default 30)")
+    hist.add_argument("--after", type=int, default=0, help="only messages after this event seq")
+
     sched = sub.add_parser("schedule", help="check a 5-field cron schedule and show its next runs")
     sched.add_argument("cron")
     sched.add_argument("--timezone")
@@ -283,6 +291,14 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
     try:
+        if args.cmd == "chat":
+            ids = [s["id"] for s in call("GET", "/api/sessions") + call("GET", "/api/sessions?archived=true")
+                   if s["id"].startswith(args.chat.lower())]
+            if len(ids) != 1:
+                raise CliError(f"{args.chat!r} matches {len(ids)} chats; give more characters of the chat id")
+            for m in call("GET", f"/api/sessions/{ids[0]}/transcript?after={args.after}&last={args.last}"):
+                print(f"[{m['seq']}] {m['from']}:\n{m['text'].strip()}\n")
+            return 0
         if args.cmd == "schedule":
             body = {"schedule": args.cron}
             if args.timezone:

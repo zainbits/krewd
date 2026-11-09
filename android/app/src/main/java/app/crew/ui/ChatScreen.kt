@@ -28,7 +28,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
@@ -80,6 +80,7 @@ import app.crew.data.FilesItem
 import app.crew.data.NoticeItem
 import app.crew.data.PendingFile
 import app.crew.data.PlanItem
+import app.crew.data.SwitchItem
 import app.crew.data.TextItem
 import app.crew.data.ToolItem
 import app.crew.data.UserItem
@@ -87,29 +88,29 @@ import app.crew.data.UserItem
 @Composable
 fun ChatScreen(state: UiState, viewModel: CrewViewModel) {
     val session = state.openSession
-    val listState = rememberLazyListState()
+    // One scroll state per chat. The list is laid out bottom-up (reverseLayout), newest row first, so a chat
+    // opens on its last message with no scrolling, and new output stays in view while you are at the bottom.
+    val listState = remember(state.openSessionId) { LazyListState() }
     val items = state.timeline + (session?.let { viewModel.localRows(it.id) } ?: emptyList())
+    val rows = items.asReversed()
     val busy = session?.isBusy == true
     val rowCount = items.size + if (busy) 1 else 0
     val lastLength = (items.lastOrNull() as? TextItem)?.text?.length ?: 0
 
     // Opened from a routine's run: scroll to the message that started that run, once it is loaded.
-    val focusIndex = state.chatFocus?.let { key -> items.indexOfFirst { it.key == key }.takeIf { it >= 0 } }
+    val focusIndex = state.chatFocus?.let { key -> rows.indexOfFirst { it.key == key }.takeIf { it >= 0 } }
     LaunchedEffect(focusIndex) {
         if (focusIndex != null) {
-            listState.scrollToItem(focusIndex + if (state.timelineLoading) 1 else 0)
+            // The run's message sits at the top of the screen, its reply below it.
+            listState.scrollToItem(focusIndex + if (busy) 1 else 0)
             viewModel.focusDone()
         }
     }
 
-    // Follow the newest output unless the user has scrolled up to read.
+    // Follow the newest output while you are at the bottom; leave the list alone once you scroll up to read.
     LaunchedEffect(rowCount, lastLength) {
         if (rowCount == 0 || state.chatFocus != null) return@LaunchedEffect
-        val info = listState.layoutInfo
-        val lastVisible = info.visibleItemsInfo.lastOrNull()?.index ?: 0
-        if (info.totalItemsCount == 0 || lastVisible >= info.totalItemsCount - 3) {
-            listState.animateScrollToItem(rowCount - 1)
-        }
+        if (listState.firstVisibleItemIndex <= 1) listState.scrollToItem(0)
     }
 
     val bars = WindowInsets.statusBars.union(WindowInsets.displayCutout).asPaddingValues()
@@ -128,14 +129,15 @@ fun ChatScreen(state: UiState, viewModel: CrewViewModel) {
                     // room for the "Add to chat" tab chips above the composer
                     (if (session != null && state.draftTabs[session.id].orEmpty().isNotEmpty()) ShellDimensions.AGENT_CHIPS_HEIGHT else 0.dp),
             ),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
+            reverseLayout = true,
+            verticalArrangement = Arrangement.spacedBy(10.dp, Alignment.Bottom),
         ) {
-            if (state.timelineLoading) {
-                item(key = "loading") { CircularProgressIndicator(Modifier.padding(24.dp)) }
-            }
-            items(items, key = { it.key }) { item -> ChatRow(item, viewModel, session?.isBusy == true) }
             if (busy) {
                 item(key = "working") { WorkingRow(waiting = session?.status == "waiting") }
+            }
+            items(rows, key = { it.key }) { item -> ChatRow(item, viewModel, session?.isBusy == true) }
+            if (state.timelineLoading && rows.isEmpty()) {
+                item(key = "loading") { CircularProgressIndicator(Modifier.padding(24.dp)) }
             }
         }
 
@@ -210,6 +212,41 @@ private fun ChatTopBar(state: UiState, viewModel: CrewViewModel) {
     val session = state.openSession
     var menuOpen by remember { mutableStateOf(false) }
     var confirmCompact by remember { mutableStateOf(false) }
+    var switching by remember { mutableStateOf(false) }
+    if (switching && session != null) {
+        var pick by remember { mutableStateOf<String?>(null) }
+        val current = state.engine(session.engine)?.name ?: session.engine
+        AlertDialog(
+            onDismissRequest = { switching = false },
+            title = { Text("Switch agent") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    state.engines.filter { it.id != session.engine }.forEach { engine ->
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = if (pick == engine.id) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent,
+                            modifier = Modifier.fillMaxWidth().clickable { pick = engine.id },
+                        ) {
+                            Text(
+                                listOfNotNull(engine.name, engine.agent?.label?.takeIf { it != engine.name }).joinToString(" · "),
+                                modifier = Modifier.padding(12.dp),
+                            )
+                        }
+                    }
+                    Text(
+                        "$current writes a short handover, then the new agent continues in this chat. Each agent keeps its own session: switching back resumes it and briefs it on what it missed.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 8.dp),
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(enabled = pick != null, onClick = { switching = false; pick?.let { viewModel.switchEngine(session.id, it) } }) { Text("Switch") }
+            },
+            dismissButton = { TextButton(onClick = { switching = false }) { Text("Cancel") } },
+        )
+    }
     if (confirmCompact && session != null) {
         AlertDialog(
             onDismissRequest = { confirmCompact = false },
@@ -279,6 +316,14 @@ private fun ChatTopBar(state: UiState, viewModel: CrewViewModel) {
                         onClick = {
                             menuOpen = false
                             viewModel.setPinned(session.id, !session.pinned)
+                        },
+                    )
+                    if (state.engines.size > 1) DropdownMenuItem(
+                        text = { Text("Switch agent · now ${state.engine(session.engine)?.name ?: session.engine}") },
+                        leadingIcon = { Icon(painterResource(R.drawable.ic_swap_24), contentDescription = null) },
+                        onClick = {
+                            menuOpen = false
+                            switching = true
                         },
                     )
                     DropdownMenuItem(
@@ -427,6 +472,7 @@ private fun ChatRow(item: ChatItem, viewModel: CrewViewModel, busy: Boolean) {
         is UserItem -> when (item.purpose) {
             "routine" -> RoutineRunRow(item)
             "compact" -> CompactRow(item)
+            "switch" -> SwitchPendingRow(item, viewModel.state.value.engine(item.switchTo)?.name ?: item.switchTo ?: "another agent")
             else -> UserRow(item, busy, onResend = { item.clientId?.let(viewModel::resend) })
         }
         is TextItem -> if (item.isThought) ThoughtRow(item.text) else SelectionContainer { Markdown(item.text) }
@@ -447,6 +493,7 @@ private fun ChatRow(item: ChatItem, viewModel: CrewViewModel, busy: Boolean) {
             val downloading by viewModel.downloading.collectAsStateWithLifecycle()
             HandedFiles(item.files, downloading, viewModel::openSharedFile)
         }
+        is SwitchItem -> SwitchRow(item)
         is NoticeItem -> Text(
             item.text,
             style = MaterialTheme.typography.bodySmall,
@@ -521,6 +568,48 @@ private fun RoutineRunRow(item: UserItem) {
                 )
             }
             if (open) SelectionContainer { Text(item.text, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSecondaryContainer) }
+        }
+    }
+}
+
+/** The chat is moving to another agent (after the current turn). */
+@Composable
+private fun SwitchPendingRow(item: UserItem, toName: String) {
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
+        Icon(painterResource(R.drawable.ic_swap_24), contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(14.dp))
+        Spacer(Modifier.width(6.dp))
+        Text(
+            when (item.state) {
+                "queued", "steering" -> "Moving to $toName after this turn"
+                "cancelled" -> "Move to $toName cancelled (stopped)"
+                else -> "Handing over to $toName"
+            },
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+/** The chat moved to another agent: a divider, with the handover the previous agent wrote behind a tap. */
+@Composable
+private fun SwitchRow(item: SwitchItem) {
+    var open by remember { mutableStateOf(false) }
+    Surface(
+        shape = RoundedCornerShape(16.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        modifier = Modifier.fillMaxWidth().clickable(enabled = item.summary != null) { open = !open },
+    ) {
+        Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Icon(painterResource(R.drawable.ic_swap_24), contentDescription = null, modifier = Modifier.size(18.dp))
+                Text("Now on ${item.toName}", style = MaterialTheme.typography.labelLarge, modifier = Modifier.weight(1f))
+                Text(
+                    if (item.summary == null) "from ${item.fromName}" else if (open) "Hide handover" else "Handover",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            if (open && item.summary != null) SelectionContainer { Markdown(item.summary) }
         }
     }
 }

@@ -30,7 +30,12 @@ data class UserItem(
     val triggers: List<String> = emptyList(),
     val attempt: Int = 1,
     val maxAttempts: Int = 1,
+    /** For a switch: the agent (engine id) the chat moves to. */
+    val switchTo: String? = null,
 ) : ChatItem
+
+/** The chat moved to another agent; [summary] is the handover the previous agent wrote. */
+data class SwitchItem(override val key: String, val fromName: String, val toName: String, val summary: String?) : ChatItem
 
 data class TextItem(override val key: String, val role: String, val text: String) : ChatItem {
     val isThought: Boolean get() = role == "thought"
@@ -96,6 +101,7 @@ class Timeline {
                     triggers = p.optJSONObject("meta")?.optJSONArray("triggers")?.let { a -> (0 until a.length()).map { a.optString(it) } } ?: emptyList(),
                     attempt = p.optJSONObject("meta")?.optInt("attempt", 1) ?: 1,
                     maxAttempts = p.optJSONObject("meta")?.optInt("max_attempts", 1) ?: 1,
+                    switchTo = p.optJSONObject("meta")?.optStringOrNull("to"),
                 )
                 add(item)
                 if (messageId != null) messages[messageId] = item.key
@@ -142,6 +148,14 @@ class Timeline {
                 put("approval-${approval.id}", ApprovalItem("approval-${approval.id}", approval))
             }
             "error" -> add(NoticeItem("error-${event.seq}", p.optString("message", "Something went wrong"), isError = true))
+            "switch" -> add(
+                SwitchItem(
+                    "switch-${event.seq}",
+                    p.optString("from_name", p.optString("from")),
+                    p.optString("to_name", p.optString("to")),
+                    p.optStringOrNull("summary"),
+                ),
+            )
             "compact" -> add(
                 when {
                     !p.optBoolean("ok") -> NoticeItem("compact-${event.seq}", "Compacting did not finish; the context is unchanged", isError = true)

@@ -14,6 +14,8 @@ Every route except `/api/health` needs `Authorization: Bearer <token>`.
 | `PATCH /api/sessions/{id}` | `{title?, auto_approve?, pinned?, archived?, mode?, config?: {config_id: value}}` | session |
 | `POST /api/sessions/{id}/messages` | `{text, attachments?, tabs?, delivery?: steer\|queue\|interrupt, client_id?}` | `{ok, message}` (see Messages below) |
 | `POST /api/sessions/{id}/cancel` | | `{ok}`; stops the turn, answers its open approvals with "cancelled" and drops the messages queued behind it |
+| `POST /api/sessions/{id}/engine` | `{engine, config?, mode?}` | `{ok, message}`; moves the chat to another agent after the running turn (see Switching agents) |
+| `GET /api/sessions/{id}/transcript?after=0&last=N` | | the chat as messages `[{seq, from, text}]` (owner, agents, Crew notes), without tool calls or thinking |
 | `POST /api/sessions/{id}/compact` | | `{ok, message}`; compacts the agent's context after the running turn (see Compact below); 409 when the chat has no agent context yet. A second call while one is queued returns the queued one. |
 | `POST /api/admin/restart` | | `{ok}`; emergency: stops every agent process and exits, so systemd starts the server again (about 10 to 15 s). Interrupted turns end with an error; queued messages run after the restart. The browser is not touched. |
 | `GET /api/sessions/{id}/events?after=0` | | `{events, last_seq}`: the task's whole timeline |
@@ -30,6 +32,7 @@ Event: `{seq, session_id, kind, payload, created_at}`. Kinds:
 - `user` `{text, message_id, delivery, client_id?, attachments?, tabs?, purpose?, meta?}`: `purpose` is set when Crew sent the message itself: `routine` (a run; `meta` `{routine_id, run_id, title, trigger, version}`) or `compact` (`meta` `{how}`)
 - `routine` routine object (without runs) whenever it or its runs change, on the routine's chat; `{id, deleted: true}` when deleted
 - `compact` `{how: native|handover, ok}`: a compaction finished
+- `switch` `{from, to, from_name, to_name, from_session, summary}`: the chat moved to another agent
 - `message` message object, whenever its state changes (delivered or cancelled)
 - `browser` `{id, url, title}`: the agent started using a tab
 - `text` `{message_id, role: assistant|thought, text}`: append to the row with the same `message_id`
@@ -51,6 +54,10 @@ Every message is stored before anything else happens, so it survives the phone g
 Clients replay a task with `/sessions/{id}/events`, then follow `/api/events` from `last_seq`. Events are durable, so a client can disconnect at any time and continue from the last seq it saw.
 
 
+## Switching agents
+
+One chat can move between agents (Claude Code, Codex, any ACP agent) and stays one chat. Each agent keeps its own session and settings in the chat (`session_agents`), with the last event it saw. On a switch the current agent first writes a handover (skipped when it has no context yet); Crew parks its session, brings in the target agent's own session (or a new one), and puts a briefing in front of the next message: the handovers written since that agent last saw the chat, the previous agents' session ids, and `crew chat history <chat id>` for exact messages. A returning agent resumes its own session and hears only what it missed. The `switch` event `{from, to, from_name, to_name, from_session, summary}` marks it in the timeline. A routine's chat and its routine always use the same agent: changing the routine's agent switches its chat, and switching the chat changes the routine.
+
 ## Compact
 
 Where the agent advertises a `compact` slash command (Claude Code and Codex do), Crew sends `/compact` as the next prompt and the agent keeps its session. Otherwise (OpenCode) the agent is asked for a handover summary; Crew then closes that agent session, opens a fresh one in the same chat, and puts the handover in front of the next message. The chat history in Crew is never changed. `usage` is cleared after a handover.
@@ -71,7 +78,7 @@ The scheduler looks every 15 s. A due trigger is claimed by moving its `next_run
 | `POST /api/routines` | `{title, instructions, triggers: [{name, schedule, max_attempts?, enabled?}] (or schedule for one trigger "main"), timezone?, engine?, mode?, config?, auto_approve?, enabled?, notes?, note?, by?: owner\|agent}` | the routine (201); 422 for a bad schedule, timezone or trigger name |
 | `POST /api/routines/preview` | `{schedule, timezone?}` | `{schedule, timezone, schedule_text, next_runs}`; 422 with the reason when it is not valid |
 | `GET /api/routines/{id}` | | the routine with `runs` (last 50) |
-| `PATCH /api/routines/{id}` | any of the create fields; `triggers` replaces the list, matched by name (a trigger whose schedule is unchanged keeps its next time) | the routine. A new `engine` starts a new chat on the next run (a chat belongs to one agent); the old chat stays. |
+| `PATCH /api/routines/{id}` | any of the create fields; `triggers` replaces the list, matched by name (a trigger whose schedule is unchanged keeps its next time) | the routine. A new `engine` switches the routine's chat to that agent (with a handover); `config` and `mode` are the picks for the routine's agent and reset to the new agent's own when the agent changes without new picks. |
 | `PUT /api/routines/{id}/notes` | `{notes, append?}` | the routine; notes are at most 8000 characters and not versioned |
 | `POST /api/routines/{id}/later` | `{minutes? \| at?, reason}` | the follow-up trigger (201); 409 outside a run or with no attempts left; 1 minute to 12 hours ahead |
 | `DELETE /api/routines/{id}/later/{trigger_id}` | | `{ok}`: cancels a follow-up |

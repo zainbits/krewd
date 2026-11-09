@@ -45,6 +45,12 @@ HANDOVER_PROMPT = (
     "this chat, what was done and its result, and what is still open or next. Be complete but brief; use "
     "short Markdown sections. Do not run tools for this."
 )
+SWITCH_PROMPT = (
+    "Crew is moving this chat to another agent, {to}, at the owner's request. Write a handover for it, and "
+    "nothing else: the goal, the decisions and facts established (with exact names, paths, ids and numbers), the "
+    "owner's preferences and rules from this chat, what was done while you handled it and its result, and what "
+    "is still open or next. Be complete but brief; use short Markdown sections. Do not run tools for this."
+)
 
 
 class NotFound(Exception):
@@ -890,6 +896,13 @@ class Hub:
             message = await self._delivered(row["id"], "started")
             if message is None:
                 continue
+            if message["purpose"] == "switch" and not rt.agent_session:
+                # Nothing to hand over yet: change agents at once, without a turn.
+                try:
+                    await self._switched(rt, message["meta"] or {}, None)
+                except Exception:
+                    log.exception("switch failed for %s", rt.id)
+                continue
             try:
                 await self._run_turn(
                     rt, message["text"], message["attachments"], message["tabs"], message["id"],
@@ -931,10 +944,7 @@ class Hub:
             else:
                 carry = await self.pool.fetchval("select carry from sessions where id = $1", rt.id)
                 if carry:
-                    prompt_text = (
-                        "Handover from the earlier part of this chat, which was compacted (written by the agent "
-                        "before the reset):\n\n" + carry + "\n\n---\n\nThe next message in the chat:\n\n" + prompt_text
-                    )
+                    prompt_text = carry + "\n\n---\n\nThe next message in the chat:\n\n" + prompt_text
             result = await proc.request(
                 "session/prompt",
                 {"sessionId": rt.agent_session, "prompt": prompt_blocks(prompt_text, files or [])},
@@ -967,6 +977,8 @@ class Hub:
         await self.emit(rt.id, "turn_end", end)
         if purpose == "compact":
             await self._compacted(rt, stop_reason, (meta or {}).get("how"))
+        if purpose == "switch":
+            await self._switched(rt, meta or {}, rt.assistant_text.strip() if stop_reason == "end_turn" else None)
         if message_id and purpose == "routine":
             status = {"end_turn": "done", "cancelled": "cancelled", "error": "error"}.get(stop_reason, "done")
             await self._run_finished(message_id, status, _clip(rt.assistant_text.strip(), RUN_SUMMARY_MAX) or None)
@@ -1190,11 +1202,177 @@ class Hub:
                             continue
             rt.agent_session = None
             rt.tools.clear()
+            carry = ("Handover from the earlier part of this chat, which was compacted (written by the agent before "
+                     "the reset):\n\n" + summary)
             await self.pool.execute(
-                "update sessions set agent_session = null, carry = $2, usage = null where id = $1", rt.id, summary
+                "update sessions set agent_session = null, carry = $2, usage = null where id = $1", rt.id, carry
             )
             rt.usage = None
         await self.emit(rt.id, "compact", {"how": how, "ok": True})
+
+    # switching agents in one chat
+
+    def _engine_name(self, engine_id: str) -> str:
+        engine = self.settings.engines.get(engine_id)
+        return engine.name if engine else engine_id
+
+    async def switch_engine(
+        self, session_id: uuid.UUID, engine: str, config: dict[str, str] | None = None, mode: str | None = None
+    ) -> dict[str, Any]:
+        """Move a chat to another agent, after the running turn if there is one.
+
+        The current agent writes a handover first (when it has context). The chat stays one chat: each agent
+        keeps its own session, and an agent that comes back resumes its own session and gets only the
+        handovers written since it left. `config`/`mode` are picks for the new agent.
+        """
+        if engine not in self.settings.engines:
+            raise NotFound(f"unknown engine {engine}")
+        row = await self.pool.fetchrow("select engine, agent_session from sessions where id = $1", session_id)
+        if row is None:
+            raise NotFound("session not found")
+        meta = {"from": row["engine"], "to": engine, "config": config or {}, "mode": mode}
+        waiting = await self.pool.fetchrow(
+            "select * from messages where session_id = $1 and purpose = 'switch' and state in ('queued', 'steering')",
+            session_id,
+        )
+        if waiting:  # a newer pick replaces the target of a switch still waiting
+            await self.pool.execute(
+                "update messages set meta = meta || $2, text = $3 where id = $1",
+                waiting["id"], {"to": engine, "config": config or {}, "mode": mode},
+                SWITCH_PROMPT.format(to=self._engine_name(engine)),
+            )
+            return db.message_json(await self.pool.fetchrow("select * from messages where id = $1", waiting["id"]))
+        if engine == row["engine"]:
+            if config or mode:
+                await self.update_session(session_id, {k: v for k, v in (("config", config), ("mode", mode)) if v})
+            return {"switched": False}
+        return await self.send(
+            session_id, SWITCH_PROMPT.format(to=self._engine_name(engine)), delivery="queue", purpose="switch",
+            meta=meta, preview=f"Switching to {self._engine_name(engine)}",
+        )
+
+    async def _switched(self, rt: Runtime, meta: dict[str, Any], summary: str | None) -> None:
+        """Park the current agent's session and settings, bring in the target agent's, and brief it."""
+        to = meta.get("to")
+        if not to or to not in self.settings.engines:
+            return
+        cur = await self.pool.fetchrow(
+            """select engine, agent_session, mode, config_wanted, config_options, modes, agent, commands, carry
+               from sessions where id = $1""",
+            rt.id,
+        )
+        if cur["engine"] == to:
+            return
+        # The switch event itself is the last thing the parked agent saw (its own handover is not news to it).
+        seen = await self.emit(rt.id, "switch", {
+            "from": cur["engine"], "to": to, "from_session": cur["agent_session"], "summary": summary,
+            "from_name": self._engine_name(cur["engine"]), "to_name": self._engine_name(to),
+        })
+        await self.pool.execute(
+            """insert into session_agents (session_id, engine, agent_session, mode, config_wanted, config_options,
+                   modes, agent, commands, last_seq) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+               on conflict (session_id, engine) do update set agent_session = excluded.agent_session,
+                   mode = excluded.mode, config_wanted = excluded.config_wanted,
+                   config_options = excluded.config_options, modes = excluded.modes, agent = excluded.agent,
+                   commands = excluded.commands, last_seq = excluded.last_seq, updated_at = now()""",
+            rt.id, cur["engine"], cur["agent_session"], cur["mode"], cur["config_wanted"] or {}, cur["config_options"],
+            cur["modes"], cur["agent"], cur["commands"], seen,
+        )
+        target = await self.pool.fetchrow(
+            "select * from session_agents where session_id = $1 and engine = $2", rt.id, to
+        )
+        since = target["last_seq"] if target else 0
+        handovers = await self.pool.fetch(
+            "select payload from events where session_id = $1 and kind = 'switch' and seq > $2 order by seq",
+            rt.id, since,
+        )
+        lines = [f"This Crew chat (chat id {rt.id}) moves between agents; you are {self._engine_name(to)}."]
+        if target and target["agent_session"]:
+            lines.append("You handled this chat before. Since you left, other agents continued it; their handovers, "
+                         "oldest first:")
+        else:
+            lines.append("You are joining this chat. Handovers from the agents before you, oldest first:")
+        for h in handovers:
+            p = h["payload"]
+            if p.get("to") == to and p.get("from") == to:
+                continue
+            ref = f" (its own session id {p['from_session']})" if p.get("from_session") else ""
+            lines += ["", f"From {p.get('from_name') or p.get('from')}{ref}:",
+                      (p.get("summary") or "(it wrote no handover)").strip()]
+        lines += ["", f"For exact earlier messages, run `crew chat history {str(rt.id)[:8]} --last 30` (Crew keeps "
+                      "the whole chat; `--help` for more)."]
+        carry = "\n".join(lines)
+        if cur["carry"]:
+            carry = cur["carry"] + "\n\n" + carry
+        # A routine's chat and its routine use the same agent.
+        await self.pool.execute("update routines set engine = $2 where session_id = $1 and engine <> $2", rt.id, to)
+        info = self.engine_info.get(to) or {}
+        config_wanted = dict((target["config_wanted"] if target else None) or {})
+        config_wanted.update(meta.get("config") or {})
+        await self.pool.execute(
+            """update sessions set engine = $2, agent_session = $3, mode = $4, config_wanted = $5,
+                   config_options = $6, modes = $7, agent = $8, commands = $9, carry = $10, usage = null,
+                   model_used = null, updated_at = now() where id = $1""",
+            rt.id, to,
+            target["agent_session"] if target else None,
+            meta.get("mode") or (target["mode"] if target else None),
+            config_wanted,
+            (target["config_options"] if target else None) or info.get("config_options"),
+            (target["modes"] if target else None) or info.get("modes"),
+            (target["agent"] if target else None) or info.get("agent"),
+            (target["commands"] if target else None) or info.get("commands"),
+            carry,
+        )
+        if cur["agent_session"]:
+            self.by_agent_session.pop((cur["engine"], cur["agent_session"]), None)
+        rt.engine = to
+        rt.agent_session = target["agent_session"] if target else None
+        rt.generation = 0  # a returning agent's session is resumed on its next turn
+        rt.tools.clear()
+        rt.usage = None
+        if rt.agent_session:
+            self.by_agent_session[(to, rt.agent_session)] = rt.id
+        self.last_sent.pop(rt.id, None)
+        await self.emit_session(rt.id)
+
+    async def transcript(self, session_id: uuid.UUID, after: int = 0, last: int | None = None) -> list[dict[str, Any]]:
+        """The chat as messages (owner, agents, switches), without tool calls or thinking."""
+        await self.get_session(session_id)
+        rows = await self.pool.fetch(
+            """select seq, kind, payload, created_at from events where session_id = $1 and seq > $2
+               and kind in ('user', 'text', 'switch', 'compact') order by seq""",
+            session_id, after,
+        )
+        engine = await self.pool.fetchval(
+            """select coalesce((select payload->>'from' from events where session_id = $1 and kind = 'switch'
+                                order by seq limit 1), (select engine from sessions where id = $1))""",
+            session_id,
+        )
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            p = r["payload"]
+            if r["kind"] == "user":
+                who = {"routine": "Crew (routine run)", "compact": "Crew", "switch": "Crew"}.get(p.get("purpose"), "owner")
+                if p.get("purpose") in ("compact", "switch"):
+                    continue
+                out.append({"seq": r["seq"], "from": who, "text": p.get("text", "")})
+            elif r["kind"] == "text":
+                if p.get("role") != "assistant":
+                    continue
+                if out and out[-1].get("message_id") == p.get("message_id") and out[-1]["from"] != "owner":
+                    out[-1]["text"] += p.get("text", "")
+                else:
+                    out.append({"seq": r["seq"], "from": self._engine_name(engine), "text": p.get("text", ""),
+                                "message_id": p.get("message_id")})
+            elif r["kind"] == "switch":
+                engine = p.get("to") or engine
+                out.append({"seq": r["seq"], "from": "Crew",
+                            "text": f"Switched from {p.get('from_name')} to {p.get('to_name')}."})
+            elif r["kind"] == "compact" and p.get("ok"):
+                out.append({"seq": r["seq"], "from": "Crew", "text": "Context compacted."})
+        for item in out:
+            item.pop("message_id", None)
+        return out[-last:] if last else out
 
     # routines
 
@@ -1412,6 +1590,8 @@ class Hub:
                 new[key] = value.strip() if isinstance(value, str) and key in ("title", "instructions") else value
         if not new["title"] or not new["instructions"]:
             raise rtn.Invalid("a routine needs a title and instructions")
+        if new["engine"] != row["engine"] and "config" not in changes:
+            new["config"], new["mode"] = {}, None  # settings are per agent: the new agent starts from its own
         rtn.zone(new["timezone"])
         if changes.get("triggers") is not None:
             wanted = changes["triggers"]
@@ -1427,8 +1607,7 @@ class Hub:
         versioned = (any(new[k] != row[k] for k in ("title", "instructions", "timezone")) or found != old_triggers)
         version = row["version"] + 1 if versioned else row["version"]
         session_id = row["session_id"]
-        if new["engine"] != row["engine"]:
-            session_id = None  # a chat belongs to one agent: the next run starts a new chat; the old one stays
+        switching = new["engine"] != row["engine"]
         now = datetime.now(UTC)
         by_name = {t["name"]: t for t in existing}
         resumed = new["enabled"] and not row["enabled"]
@@ -1473,16 +1652,21 @@ class Hub:
                     changed_by, note, found,
                 )
         await self._sync_routine(routine_id)
-        if session_id:
+        if session_id and await self.pool.fetchval("select 1 from sessions where id = $1", session_id):
             chat: dict[str, Any] = {}
             if new["title"] != row["title"]:
                 chat["title"] = new["title"]
             if new["auto_approve"] != row["auto_approve"]:
                 chat["auto_approve"] = new["auto_approve"]
-            if new["mode"] != row["mode"] and new["mode"]:
-                chat["mode"] = new["mode"]
-            if new["config"] != (row["config"] or {}):
-                chat["config"] = new["config"]
+            if switching:
+                # One chat for the routine: its agent changes with a handover, after any running turn, and the
+                # routine's settings go to the new agent.
+                await self.switch_engine(session_id, new["engine"], config=new["config"], mode=new["mode"])
+            else:
+                if new["mode"] != row["mode"] and new["mode"]:
+                    chat["mode"] = new["mode"]
+                if new["config"] != (row["config"] or {}):
+                    chat["config"] = new["config"]
             if chat:
                 await self.update_session(session_id, chat)
         return await self._routine_changed(routine_id)

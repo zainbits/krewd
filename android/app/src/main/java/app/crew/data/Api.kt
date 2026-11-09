@@ -187,6 +187,11 @@ class CrewApi(val baseUrl: String, private val token: String, val route: Route) 
         return o.optJSONArray("events").objects().map(Event::from) to o.optLong("last_seq", after)
     }
 
+    /** Move the chat to another agent after the running turn; the current agent writes a handover first. */
+    fun switchEngine(id: String, engine: String) {
+        obj("POST", "/api/sessions/$id/engine", JSONObject().put("engine", engine))
+    }
+
     /** Compact the chat's agent context after the running turn (the agent's own /compact, or a handover). */
     fun compact(id: String) {
         obj("POST", "/api/sessions/$id/compact", JSONObject())

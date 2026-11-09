@@ -112,6 +112,12 @@ class SchedulePreview(BaseModel):
     timezone: str | None = Field(default=None, max_length=64)
 
 
+class EngineSwitch(BaseModel):
+    engine: str = Field(min_length=1, max_length=100)
+    config: dict[str, str] | None = None
+    mode: str | None = None
+
+
 class Decision(BaseModel):
     option_id: str
 
@@ -248,6 +254,16 @@ def create_app(hub: Hub, token: str, lifespan_hub: bool = True) -> FastAPI:
     async def cancel(session_id: uuid.UUID) -> dict[str, Any]:
         await hub.cancel(session_id)
         return {"ok": True}
+
+    @app.post("/api/sessions/{session_id}/engine", dependencies=auth, status_code=202)
+    async def switch_engine(session_id: uuid.UUID, body: EngineSwitch) -> dict[str, Any]:
+        """Move the chat to another agent after the running turn; the current one writes a handover first."""
+        return {"ok": True, "message": await hub.switch_engine(session_id, body.engine, body.config, body.mode)}
+
+    @app.get("/api/sessions/{session_id}/transcript", dependencies=auth)
+    async def transcript(session_id: uuid.UUID, after: int = 0, last: int | None = Query(default=None, ge=1, le=2000)) -> list[dict[str, Any]]:
+        """The chat as messages (owner, agents, switches), without tool calls: for agents catching up."""
+        return await hub.transcript(session_id, after, last)
 
     @app.post("/api/sessions/{session_id}/compact", dependencies=auth, status_code=202)
     async def compact(session_id: uuid.UUID) -> dict[str, Any]:

@@ -241,6 +241,8 @@ data class Routine(
     val triggers: List<RoutineTrigger> = emptyList(),
     /** What the routine's agent learned and keeps between runs. */
     val notes: String = "",
+    /** The routine's picks for its agent (model, effort, permission mode...), by ACP config option id. */
+    val config: Map<String, String> = emptyMap(),
 ) {
     val cronTriggers: List<RoutineTrigger> get() = triggers.filterNot { it.isFollowUp }
     val followUps: List<RoutineTrigger> get() = triggers.filter { it.isFollowUp }
@@ -266,6 +268,7 @@ data class Routine(
             runs = if (o.has("runs")) o.optJSONArray("runs").objects().map(RoutineRun::from) else null,
             triggers = o.optJSONArray("triggers").objects().map(RoutineTrigger::from),
             notes = o.optString("notes"),
+            config = o.optJSONObject("config")?.let { c -> c.keys().asSequence().associateWith { c.optString(it) } } ?: emptyMap(),
         )
     }
 }

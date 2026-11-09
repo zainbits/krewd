@@ -31,7 +31,7 @@ TOKEN = "test-token"
 async def hub(tmp_path):
     pool = await db.connect(DATABASE_URL)
     await pool.execute(
-        "drop table if exists routine_triggers, routine_runs, routine_versions, routines, messages, events, approvals, sessions,"
+        "drop table if exists session_agents, routine_triggers, routine_runs, routine_versions, routines, messages, events, approvals, sessions,"
         " engines, schema_version cascade"
     )
     settings = Settings(
@@ -709,3 +709,81 @@ async def test_trigger_api_later_and_notes(hub):
         r = await client.put(f"/api/routines/{rid}/notes", headers=h, json={"notes": "learned"})
         assert r.json()["notes"] == "learned"
         await hub.cancel(uuid.UUID(detail["session_id"]))
+
+
+# one chat, several agents
+
+
+async def wait_engine(hub: Hub, sid, engine: str, timeout: float = 10.0) -> None:
+    deadline = asyncio.get_running_loop().time() + timeout
+    while asyncio.get_running_loop().time() < deadline:
+        if await hub.pool.fetchval("select engine from sessions where id = $1", sid) == engine:
+            return
+        await asyncio.sleep(0.05)
+    raise AssertionError(f"chat did not move to {engine}")
+
+
+async def test_switching_agents_keeps_one_chat_and_each_agents_session(hub):
+    session = await hub.create_session("first on fake")
+    sid = uuid.UUID(session["id"])
+    await wait_for(hub, sid, "turn_end")
+    fake_session = await hub.pool.fetchval("select agent_session from sessions where id = $1", sid)
+    await hub.switch_engine(sid, "native")
+    switch = await wait_for(hub, sid, "switch")
+    assert switch["from"] == "fake" and switch["to"] == "native" and switch["summary"]  # the fake's handover
+    await wait_engine(hub, sid, "native")
+    row = await hub.pool.fetchrow("select engine, agent_session, carry from sessions where id = $1", sid)
+    assert row["engine"] == "native" and row["agent_session"] is None
+    assert "You are joining this chat" in row["carry"] and str(sid) in row["carry"] and fake_session in row["carry"]
+    after = (await hub.events(0, sid))[-1]["seq"]
+    await hub.send(sid, "hello native")
+    await wait_for(hub, sid, "text", lambda p: "briefed" in p["text"])
+    await wait_for(hub, sid, "turn_end", lambda p: True)
+    native_session = await hub.pool.fetchval("select agent_session from sessions where id = $1", sid)
+    assert native_session and native_session != fake_session
+    assert (await hub.get_session(sid))["engine"] == "native"
+    # Back to the fake: its own session again, briefed only with the native agent's handover.
+    await hub.switch_engine(sid, "fake")
+    await wait_engine(hub, sid, "fake")
+    row = await hub.pool.fetchrow("select engine, agent_session, carry from sessions where id = $1", sid)
+    assert row["engine"] == "fake" and row["agent_session"] == fake_session
+    assert "You handled this chat before" in row["carry"] and native_session in row["carry"]
+    assert row["carry"].count("From ") == 1
+    await hub.send(sid, "back on fake")
+    await wait_for(hub, sid, "text", lambda p: "briefed" in p["text"] and True)
+    assert len(await hub.list_sessions()) == 1
+    transcript = await hub.transcript(sid)
+    froms = [m["from"] for m in transcript]
+    assert "owner" in froms and "Fake" in froms and "Fake with /compact" in froms
+    assert any("Switched from Fake to Fake with /compact" in m["text"] for m in transcript)
+
+
+async def test_switch_without_context_is_immediate_and_routines_switch_their_chat(hub):
+    routine = await hub.create_routine("R", "Do it.", "0 9 * * *", timezone="UTC")
+    rid, sid = uuid.UUID(routine["id"]), uuid.UUID(routine["session_id"])
+    edited = await hub.update_routine(rid, {"engine": "native", "config": {"model": "big"}})
+    assert edited["session_id"] == routine["session_id"]
+    await wait_engine(hub, sid, "native")
+    row = await hub.pool.fetchrow("select engine, config_wanted from sessions where id = $1", sid)
+    assert row["engine"] == "native" and row["config_wanted"] == {"model": "big"}
+    await hub.run_routine(rid)
+    await wait_run(hub, rid, "done")
+    assert (await hub.get_routine(rid))["engine"] == "native"
+    # The chat's own switch moves the routine with it.
+    await hub.switch_engine(sid, "fake")
+    await wait_engine(hub, sid, "fake")
+    assert (await hub.get_routine(rid))["engine"] == "fake"
+
+
+async def test_switch_api_and_transcript(hub):
+    app = create_app(hub, TOKEN, lifespan_hub=False)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        h = {"Authorization": f"Bearer {TOKEN}"}
+        session = await hub.create_session("hi")
+        sid = session["id"]
+        await wait_for(hub, uuid.UUID(sid), "turn_end")
+        assert (await client.post(f"/api/sessions/{sid}/engine", headers=h, json={"engine": "nope"})).status_code == 404
+        assert (await client.post(f"/api/sessions/{sid}/engine", headers=h, json={"engine": "native"})).status_code == 202
+        await wait_for(hub, uuid.UUID(sid), "switch")
+        r = await client.get(f"/api/sessions/{sid}/transcript?last=2", headers=h)
+        assert r.status_code == 200 and len(r.json()) == 2 and r.json()[-1]["from"] == "Crew"

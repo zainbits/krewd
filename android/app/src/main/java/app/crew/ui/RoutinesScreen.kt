@@ -70,6 +70,7 @@ import app.crew.CrewViewModel
 import app.crew.R
 import app.crew.UiState
 import app.crew.constants.ShellDimensions
+import app.crew.data.ConfigOption
 import app.crew.data.Routine
 import app.crew.data.RoutineRun
 import app.crew.data.RoutineTrigger
@@ -610,6 +611,15 @@ private fun RoutineEditor(state: UiState, viewModel: CrewViewModel, existing: Ro
     var instructions by remember { mutableStateOf(existing?.instructions ?: "") }
     var engineId by remember { mutableStateOf(existing?.engine ?: state.engines.firstOrNull { it.isDefault }?.id) }
     var autoApprove by remember { mutableStateOf(existing?.autoApprove ?: false) }
+    // The agent's own settings (model, effort, permission mode...): the routine's picks for its agent, else the
+    // last picks for that agent from the new-task card. A different agent starts from its own.
+    val options = ConfigOption.ordered(viewModel.engineConfig(engineId))
+    var picks by remember(engineId, options.size) {
+        mutableStateOf(
+            (if (existing != null && engineId == existing.engine) existing.config else viewModel.engineDefaults(engineId).config)
+                .filter { (id, value) -> options.any { o -> o.id == id && o.choices.any { it.value == value } } },
+        )
+    }
     var note by remember { mutableStateOf("") }
     var saving by remember { mutableStateOf(false) }
     var engineMenu by remember { mutableStateOf(false) }
@@ -645,6 +655,7 @@ private fun RoutineEditor(state: UiState, viewModel: CrewViewModel, existing: Ro
                                 .put("instructions", instructions.trim())
                                 .put("auto_approve", autoApprove)
                             engineId?.let { fields.put("engine", it) }
+                            fields.put("config", JSONObject(picks))
                             if (existing != null && note.isNotBlank()) fields.put("note", note.trim())
                             // A refused save shows its reason as a message, and the owner can try again.
                             viewModel.saveRoutine(existing?.id, fields, failed = { saving = false }) { saving = false; onSaved(it) }
@@ -705,9 +716,21 @@ private fun RoutineEditor(state: UiState, viewModel: CrewViewModel, existing: Ro
                         }
                     }
                 }
+                if (options.isNotEmpty()) {
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        options.forEach { option ->
+                            ConfigChip(
+                                option = option,
+                                selected = picks[option.id] ?: option.current,
+                                enabled = true,
+                                onPick = { value -> picks = picks + (option.id to value) },
+                            )
+                        }
+                    }
+                }
                 if (existing != null && engineId != existing.engine) {
                     Text(
-                        "A chat belongs to one agent: the next run starts a new chat; the current one stays as a task.",
+                        "The routine's chat moves to this agent: the current agent writes a handover first, and switching back later resumes its own session.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.tertiary,
                     )
