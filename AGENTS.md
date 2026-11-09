@@ -67,6 +67,7 @@ All config is in `~/.config/crew/` (folder mode 700, files 600):
   - `CREW_BROWSER_PROFILE` and `CREW_CDP_PORT`.
   - `CREW_TIMEZONE`: the timezone routine schedules are read in. Default: the machine's own.
   - `CREW_BROWSER_GPU`: default 0. The agents' Brave renders in software, because with the GPU it stops painting (about 1 frame a second, every click waiting a second) once the monitor sleeps, and does not recover. Set 1 only where the display never sleeps.
+  - `CREW_BROWSER_LOCATION`: `LAT,LON[,ACCURACY_M]`, the machine's real, fixed location. Brave on Linux has no system location source and a home server has no GPS or Wi-Fi, so pages that ask for the location wait forever. When set, `run-browser.sh` loads `deploy/fixed-location`, a small extension that answers the page's Geolocation API with it. Never put a location in the repo.
 - `engines.toml`: start from `deploy/engines.example.toml`. Each engine is an ACP command with optional environment variables.
 - `token`: the phone's bearer token, created on the first start. `./master.sh token` shows it.
 

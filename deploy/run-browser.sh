@@ -19,5 +19,27 @@ fi
 # CREW_BROWSER_GPU=1 keeps the GPU for a machine whose display is always on.
 GPU_FLAG=(--disable-gpu)
 [[ "$(conf CREW_BROWSER_GPU 0)" == 1 ]] && GPU_FLAG=()
+# CREW_BROWSER_LOCATION=LAT,LON[,ACCURACY_M]: the machine's real, fixed location. A home server has no GPS
+# or Wi-Fi and Brave on Linux has no system location source, so location requests (for example a web
+# attendance check-in) wait forever. If set, a small extension (deploy/fixed-location) answers them with it.
+EXT_FLAGS=()
+LOCATION="$(conf CREW_BROWSER_LOCATION '')"
+if [[ -n "$LOCATION" ]]; then
+  IFS=, read -r LAT LON ACC <<<"$LOCATION"
+  ACC="${ACC:-50}"
+  NUM='^-?[0-9]+(\.[0-9]+)?$'
+  if [[ "$LAT" =~ $NUM && "$LON" =~ $NUM && "$ACC" =~ $NUM ]]; then
+    EXT="$CONFIG_DIR/fixed-location"
+    mkdir -p "$EXT"
+    cp "$REPO/deploy/fixed-location/manifest.json" "$EXT/"
+    sed -e "s/__LAT__/$LAT/" -e "s/__LON__/$LON/" -e "s/__ACC__/$ACC/" \
+      "$REPO/deploy/fixed-location/location.template.js" > "$EXT/location.js"
+    # Recent Chromium ignores --load-extension unless this feature is turned off.
+    EXT_FLAGS=(--load-extension="$EXT" --disable-features=DisableLoadExtensionCommandLineSwitch)
+  else
+    echo "CREW_BROWSER_LOCATION must be LAT,LON[,ACCURACY_M] in decimal degrees and metres; ignoring it" >&2
+  fi
+fi
 exec "$BRAVE" --user-data-dir="$PROFILE" --remote-debugging-port="$PORT" --remote-debugging-address=127.0.0.1 \
-  --no-first-run --no-default-browser-check --window-position=0,0 --window-size=1920,1080 "${GPU_FLAG[@]}"
+  --no-first-run --no-default-browser-check --window-position=0,0 --window-size=1920,1080 "${GPU_FLAG[@]}" \
+  "${EXT_FLAGS[@]}"
