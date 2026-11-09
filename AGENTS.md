@@ -76,6 +76,8 @@ Prerequisites that `master.sh` checks but does not install:
 7. Optional, for use away from home: Tailscale, then `tailscale serve --bg --https=8800 http://127.0.0.1:8800`.
 8. Optional: `sudo loginctl enable-linger $USER`, so Crew starts at boot before anyone logs in. Brave still waits for the desktop login.
 
+9. Optional, to build the app here: JDK 21, the Android SDK, and a signing key. The key is a properties file at `~/.android/keystores/release.properties` (or `$ANDROID_SIGNING_PROPERTIES`) with `storeFile` (relative to that file), `storePassword`, `keyAlias` and `keyPassword`. Keep it, and the keystore, outside the repo and backed up: every update must be signed with the same key. Without it, `./master.sh app` builds a debug-signed APK.
+
 Then run `./master.sh setup`. It creates the config, installs the Python environment and the units, starts both, and runs `doctor`. Finally, enter the machine's address and the token in the app under Settings.
 
 ## Rules
@@ -87,7 +89,7 @@ Then run `./master.sh setup`. It creates the config, installs the Python environ
 - Secrets: never print, log or commit database URLs, passwords or the token. `doctor` reports only whether they are set.
 - Every long-running process runs in a named tmux session the owner can attach to. Use sudo only in a tmux session where the owner types the password.
 - Work on a feature branch, currently `feat/phase1`. Use conventional commit messages, with no AI attribution lines.
-- Android: build and install with `./master.sh app` on any machine with JDK 21 and the Android SDK.
+- Android: build and install with `./master.sh app`. It builds the release APK signed with the shared key (step 9); never ship a debug-signed build, since a different key cannot update an installed app.
 
 ## Checks before you finish
 

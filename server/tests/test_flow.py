@@ -40,6 +40,8 @@ async def hub(tmp_path):
         state_dir=tmp_path / "state",
         engines={"fake": Engine(id="fake", name="Fake", command=[sys.executable, str(FAKE)])},
         default_engine="fake",
+        data_dir=tmp_path / "data",
+        max_upload_mb=1,
     )
     hub = Hub(settings, pool)
     await hub.start()
@@ -193,3 +195,37 @@ async def test_engines_are_probed_for_their_options(hub):
     assert listing[0]["agent"]["title"] == "Fake Agent"
     rows = await hub.pool.fetch("select * from engines")
     assert rows[0]["id"] == "fake" and rows[0]["config_options"]
+
+
+async def test_attachments_are_stored_and_reach_the_agent(hub):
+    app = create_app(hub, TOKEN, lifespan_hub=False)
+    transport = httpx.ASGITransport(app=app)
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        up = await client.post("/api/uploads?name=../Résumé 2026.pdf", content=b"%PDF-1.7 hello",
+                               headers={**headers, "Content-Type": "application/pdf"})
+        assert up.status_code == 201
+        meta = up.json()
+        assert meta["name"] == "Résumé 2026.pdf" and meta["size"] == 14 and meta["mime"] == "application/pdf"
+        second = (await client.post("/api/uploads?name=Résumé 2026.pdf", content=b"again", headers=headers)).json()
+        created = await client.post("/api/sessions", json={"text": "", "attachments": [meta["id"], second["id"]]}, headers=headers)
+        assert created.status_code == 201, created.text
+        session = created.json()
+        assert session["title"] == "File: Résumé 2026.pdf"
+        sid = uuid.UUID(session["id"])
+        user = await wait_for(hub, sid, "user")
+        paths = [Path(f["path"]) for f in user["attachments"]]
+        prefix = str(sid)[:8]
+        assert [p.name for p in paths] == [f"{prefix}-Résumé 2026.pdf", f"{prefix}-Résumé 2026-2.pdf"]
+        assert paths[0].parent == hub.settings.data_dir / "common" / "attachments"
+        assert paths[0].read_bytes() == b"%PDF-1.7 hello"
+        text = await wait_for(hub, sid, "text", lambda p: "links=" in p["text"])
+        assert "links=Résumé 2026.pdf,Résumé 2026.pdf" in text["text"]
+        # An id can be used once, unknown ids are rejected, and empty messages are refused.
+        again = await client.post(f"/api/sessions/{sid}/messages", json={"attachments": [meta["id"]]}, headers=headers)
+        assert again.status_code == 404
+        empty = await client.post(f"/api/sessions/{sid}/messages", json={"text": " "}, headers=headers)
+        assert empty.status_code == 422
+        big = await client.post("/api/uploads?name=big.bin", content=b"x" * (1024 * 1024 + 1), headers=headers)
+        assert big.status_code == 413
+        assert not [p for p in hub.attachments.incoming.iterdir() if not p.name.endswith(".json")]

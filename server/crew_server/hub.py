@@ -20,6 +20,7 @@ import asyncpg
 
 from . import db
 from .acp import AcpError, AcpProcess, MethodNotFound
+from .attachments import Attachments, UnknownUpload, prompt_blocks
 from .config import Settings
 
 log = logging.getLogger("crew.hub")
@@ -141,12 +142,14 @@ class Hub:
         self.last_seq = 0
         self.closing = False
         self.engine_info: dict[str, dict[str, Any]] = {}
+        self.attachments = Attachments(settings.data_dir / "common" / "attachments", settings.max_upload_mb * 1024 * 1024)
         self.probing: set[str] = set()
 
     # lifecycle
 
     async def start(self) -> None:
         await db.migrate(self.pool)
+        self.attachments.prepare()
         self.last_seq = await self.pool.fetchval("select coalesce(max(seq), 0) from events")
         for row in await self.pool.fetch("select * from engines"):
             self.engine_info[row["id"]] = {
@@ -307,25 +310,37 @@ class Hub:
         mode: str | None = None,
         auto_approve: bool = False,
         config: dict[str, str] | None = None,
+        attachments: list[str] | None = None,
     ) -> dict[str, Any]:
         engine = engine or self.settings.default_engine
         if engine not in self.settings.engines:
             raise NotFound(f"unknown engine {engine}")
         session_id = uuid.uuid4()
+        if attachments:
+            for upload_id in attachments:
+                if not (self.attachments.incoming / f"{upload_id}.json").is_file():
+                    raise NotFound(f"unknown upload {upload_id}")
         await self.pool.execute(
             """insert into sessions (id, engine, title, mode, auto_approve, config_wanted, agent, config_options)
                values ($1, $2, $3, $4, $5, $6, $7, $8)""",
             session_id,
             engine,
-            _first_line(text, TITLE_MAX) or "New task",
+            _first_line(text, TITLE_MAX) or self._upload_name(attachments) or "New task",
             mode,
             auto_approve,
             config or {},
             (self.engine_info.get(engine) or {}).get("agent"),
             (self.engine_info.get(engine) or {}).get("config_options"),
         )
-        await self.send(session_id, text)
+        await self.send(session_id, text, attachments)
         return await self.get_session(session_id)
+
+    def _upload_name(self, upload_ids: list[str] | None) -> str | None:
+        for upload_id in upload_ids or []:
+            meta = self.attachments.incoming / f"{upload_id}.json"
+            if meta.is_file():
+                return "File: " + json.loads(meta.read_text())["name"]
+        return None
 
     async def update_session(self, session_id: uuid.UUID, changes: dict[str, Any]) -> dict[str, Any]:
         await self.get_session(session_id)
@@ -369,15 +384,23 @@ class Hub:
         await self.emit_session(session_id)
         return await self.get_session(session_id)
 
-    async def send(self, session_id: uuid.UUID, text: str) -> None:
+    async def send(self, session_id: uuid.UUID, text: str, attachments: list[str] | None = None) -> None:
         rt = await self._runtime(session_id)
-        await self.emit(session_id, "user", {"text": text})
+        try:
+            files = self.attachments.claim(session_id, attachments or [])
+        except UnknownUpload as exc:
+            raise NotFound(f"unknown upload {exc}") from None
+        payload: dict[str, Any] = {"text": text}
+        if files:
+            payload["attachments"] = files
+        await self.emit(session_id, "user", payload)
+        preview = text or ", ".join(f["name"] for f in files)
         await self.pool.execute(
             "update sessions set last_text = $2, updated_at = now(), archived = false where id = $1",
             session_id,
-            _first_line(text, PREVIEW_MAX),
+            _first_line(preview, PREVIEW_MAX),
         )
-        await rt.queue.put(text)
+        await rt.queue.put((text, files))
         if rt.worker is None or rt.worker.done():
             rt.worker = asyncio.create_task(self._worker(rt))
 
@@ -580,9 +603,9 @@ class Hub:
 
     async def _worker(self, rt: Runtime) -> None:
         while True:
-            text = await rt.queue.get()
+            text, files = await rt.queue.get()
             try:
-                await self._run_turn(rt, text)
+                await self._run_turn(rt, text, files)
             except Exception:
                 log.exception("turn failed for %s", rt.id)
             finally:
@@ -592,7 +615,7 @@ class Hub:
         await self.pool.execute("update sessions set status = $2, updated_at = now() where id = $1", rt.id, status)
         await self.emit_session(rt.id)
 
-    async def _run_turn(self, rt: Runtime, text: str) -> None:
+    async def _run_turn(self, rt: Runtime, text: str, files: list[dict[str, Any]] | None = None) -> None:
         rt.assistant_run, rt.assistant_text = None, ""
         await self._set_status(rt, "running")
         await self.emit(rt.id, "turn_start", {})
@@ -601,7 +624,7 @@ class Hub:
         try:
             proc = await self._ensure_loaded(rt)
             result = await proc.request(
-                "session/prompt", {"sessionId": rt.agent_session, "prompt": [{"type": "text", "text": text}]}
+                "session/prompt", {"sessionId": rt.agent_session, "prompt": prompt_blocks(text, files or [])}
             )
             stop_reason = result.get("stopReason", "end_turn")
             usage = result.get("usage")

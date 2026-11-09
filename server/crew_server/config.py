@@ -34,6 +34,8 @@ class Settings:
     engines: dict[str, Engine]
     default_engine: str
     cdp_port: int = 9222
+    data_dir: Path = Path.home() / ".crew"
+    max_upload_mb: int = 1024
 
 
 def load_env_file(path: Path = ENV_FILE) -> None:
@@ -94,6 +96,8 @@ def load_settings() -> Settings:
         engines=engines,
         default_engine=default_engine,
         cdp_port=int(os.environ.get("CREW_CDP_PORT", "9222")),
+        data_dir=Path(os.path.expanduser(os.environ.get("CREW_DATA_DIR", "~/.crew"))),
+        max_upload_mb=int(os.environ.get("CREW_MAX_UPLOAD_MB", "1024")),
     )
 
 

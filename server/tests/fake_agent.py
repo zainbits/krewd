@@ -89,6 +89,10 @@ async def prompt(request_id: int, params: dict) -> None:
         await asyncio.sleep(0.01)
     model = config.get(sid, {}).get("model", "small")
     update(sid, {"sessionUpdate": "usage_update", "used": 10, "size": 100, "_meta": {"_fake/model": f"fake-{model}-1"}})
+    links = [b.get("name") for b in params["prompt"] if b.get("type") == "resource_link"]
+    if links:
+        update(sid, {"sessionUpdate": "agent_message_chunk", "messageId": "m3",
+                     "content": {"type": "text", "text": " links=" + ",".join(links)}})
     if "calls" in text:
         update(sid, {"sessionUpdate": "agent_message_chunk", "messageId": "m2",
                      "content": {"type": "text", "text": " calls=" + ",".join(f"{c[1]}:{c[2]}" for c in config_calls if c[0] == sid)}})

@@ -32,6 +32,8 @@ doctor() {
   [[ -n "$(find_uv)" ]] && ok "uv" || bad "uv is missing" "curl -LsSf https://astral.sh/uv/install.sh | sh"
   linux_systemd && ok "systemd user session" || bad "no systemd user session (Crew's services need Linux with systemd)"
   [[ -n "$(find_brave)" ]] && ok "Brave ($(find_brave))" || bad "Brave not found" "install Brave, or set CREW_BROWSER in $ENV_FILE"
+  [[ -f "$(signing_file)" ]] && ok "APK signing key ($(signing_file))" \
+    || warn "no APK signing key: ./master.sh app makes debug-signed APKs" "put a signing properties file at $(signing_file) (AGENTS.md, new machine step 9)"
   has browser-harness && ok "browser-harness" || bad "browser-harness is missing" "uv tool install browser-harness (AGENTS.md, new machine step 5)"
 
   say "${B}Config${N} ($CONFIG_DIR)"
@@ -224,10 +226,20 @@ update() {
   linux_systemd && install_units && restart all
 }
 
+signing_file() { printf '%s' "${ANDROID_SIGNING_PROPERTIES:-$HOME/.android/keystores/release.properties}"; }
+
 app() {
-  (cd "$REPO/android" && ./gradlew --quiet :app:assembleDebug) || return 1
-  local apk="$REPO/android/app/build/outputs/apk/debug/app-debug.apk"
+  local variant=release apk
+  if [[ ! -f "$(signing_file)" ]]; then
+    say "${Y}No signing key at $(signing_file); building a debug APK (Android debug key).${N}"
+    variant=debug
+  fi
+  local task=":app:assembleRelease"; [[ "$variant" == debug ]] && task=":app:assembleDebug"
+  (cd "$REPO/android" && ./gradlew --quiet "$task") || return 1
+  apk="$REPO/android/app/build/outputs/apk/$variant/app-$variant.apk"
   say "Built $apk"
+  local signer; signer="$(ls "${ANDROID_HOME:-$HOME/Android/Sdk}"/build-tools/*/apksigner 2>/dev/null | sort -V | tail -n 1)"
+  [[ -n "$signer" ]] && "$signer" verify --print-certs "$apk" 2>/dev/null | grep -m1 "SHA-256" | sed 's/^/Signed: /'
   if has adb && adb get-state >/dev/null 2>&1; then
     ask "Install on the connected phone ($(adb get-serialno))?" && adb install -r "$apk"
   else
