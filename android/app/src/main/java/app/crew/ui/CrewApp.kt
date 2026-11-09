@@ -149,6 +149,16 @@ fun CrewApp(viewModel: CrewViewModel) {
             }
         }
     }
+    state.pendingDelete?.let { deleted ->
+        UndoPill(
+            text = "Deleted \u201c${deleted.title}\u201d",
+            onUndo = viewModel::undoDelete,
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .windowInsetsPadding(WindowInsets.navigationBars)
+                .padding(bottom = LiquidNavDimensions.BOTTOM_GAP + LiquidNavDimensions.BAR_HEIGHT + 12.dp, start = 16.dp, end = 16.dp),
+        )
+    }
     if (state.restarting) {
         RestartingPill(
             Modifier
@@ -157,6 +167,27 @@ fun CrewApp(viewModel: CrewViewModel) {
                 .padding(top = ShellDimensions.TITLE_PILL_TOP_GAP + ShellDimensions.TITLE_PILL_HEIGHT + 8.dp),
         )
     }
+    }
+}
+
+/** "Deleted" with Undo, for the 3 seconds before a delete reaches the server. */
+@Composable
+private fun UndoPill(text: String, onUndo: () -> Unit, modifier: Modifier = Modifier) {
+    FloatingPill(modifier) {
+        Row(
+            Modifier.padding(start = 20.dp, end = 6.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text,
+                style = MaterialTheme.typography.labelLarge,
+                maxLines = 1,
+                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f, fill = false),
+            )
+            TextButton(onClick = onUndo) { Text("Undo") }
+        }
     }
 }
 

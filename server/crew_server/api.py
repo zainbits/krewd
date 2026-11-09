@@ -174,6 +174,11 @@ def create_app(hub: Hub, token: str, lifespan_hub: bool = True) -> FastAPI:
     async def change_session(session_id: uuid.UUID, body: SessionChanges) -> dict[str, Any]:
         return await hub.update_session(session_id, body.model_dump(exclude_none=True))
 
+    @app.delete("/api/sessions/{session_id}", dependencies=auth)
+    async def delete_session(session_id: uuid.UUID) -> dict[str, Any]:
+        await hub.delete_session(session_id)
+        return {"ok": True}
+
     @app.post("/api/sessions/{session_id}/messages", dependencies=auth, status_code=202)
     async def message(session_id: uuid.UUID, body: Message) -> dict[str, Any]:
         await hub.get_session(session_id)

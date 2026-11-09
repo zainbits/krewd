@@ -424,6 +424,32 @@ class Hub:
         await self.emit_session(session_id)
         return await self.get_session(session_id)
 
+    async def delete_session(self, session_id: uuid.UUID) -> None:
+        """Delete a task for good: stop its turn, forget its agent session, drop its history and messages."""
+        await self.get_session(session_id)
+        rt = self.runtimes.pop(session_id, None)
+        if rt:
+            await self._stop_turn(rt)
+            if rt.worker:
+                rt.worker.cancel()
+                await asyncio.gather(rt.worker, return_exceptions=True)
+            if rt.agent_session:
+                self.by_agent_session.pop((rt.engine, rt.agent_session), None)
+                proc = self.procs.get(rt.engine)
+                caps = (proc.capabilities.get("sessionCapabilities") or {}) if proc and proc.alive else {}
+                for method in ("delete", "close"):
+                    if method in caps:
+                        try:
+                            await proc.request(f"session/{method}", {"sessionId": rt.agent_session}, timeout=30)
+                            break
+                        except AcpError:
+                            continue
+        for tab, owner in list(self.tab_owner.items()):
+            if owner == session_id:
+                del self.tab_owner[tab]
+        # Events, approvals and messages go with it (on delete cascade).
+        await self.pool.execute("delete from sessions where id = $1", session_id)
+
     async def send(
         self,
         session_id: uuid.UUID,

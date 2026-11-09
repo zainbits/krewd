@@ -47,6 +47,11 @@ class Prefs(context: Context) {
         prefs.edit().putString("engine_$id", change(engine(id)).toJson()).apply()
     }
 
+    /** The agent picked last on the new-task card. */
+    fun lastEngine(): String? = prefs.getString("last_engine", null)
+
+    fun setLastEngine(id: String) = prefs.edit().putString("last_engine", id).apply()
+
     fun vertical(): Boolean = prefs.getBoolean("browser_vertical", false)
 
     fun setVertical(on: Boolean) = prefs.edit().putBoolean("browser_vertical", on).apply()
@@ -161,6 +166,10 @@ class CrewApi(val baseUrl: String, private val token: String, val route: Route) 
     /** Emergency restart of the server and its agents; it is back after about 10 to 15 seconds. */
     fun restartServer() {
         obj("POST", "/api/admin/restart", JSONObject())
+    }
+
+    fun deleteSession(id: String) {
+        obj("DELETE", "/api/sessions/$id")
     }
 
     fun cancel(id: String) {

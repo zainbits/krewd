@@ -10,6 +10,7 @@ Every route except `/api/health` needs `Authorization: Bearer <token>`.
 | `GET /api/sessions?archived=false` | | sessions, pinned first, newest first |
 | `POST /api/sessions` | `{text, engine?, mode?, auto_approve?, config?: {config_id: value}, attachments?: [upload_id], tabs?: [{id, title, url}], client_id?}` | the new session; its first turn starts at once |
 | `GET /api/sessions/{id}` | | session |
+| `DELETE /api/sessions/{id}` | | `{ok}`; stops the task's turn, closes its agent session where the agent supports it, and deletes its history, approvals and messages (the app waits 3 s for Undo before calling this) |
 | `PATCH /api/sessions/{id}` | `{title?, auto_approve?, pinned?, archived?, mode?, config?: {config_id: value}}` | session |
 | `POST /api/sessions/{id}/messages` | `{text, attachments?, tabs?, delivery?: steer\|queue\|interrupt, client_id?}` | `{ok, message}` (see Messages below) |
 | `POST /api/sessions/{id}/cancel` | | `{ok}`; stops the turn, answers its open approvals with "cancelled" and drops the messages queued behind it |

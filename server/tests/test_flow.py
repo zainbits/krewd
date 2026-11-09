@@ -17,7 +17,7 @@ import pytest
 from crew_server import db
 from crew_server.api import create_app
 from crew_server.config import Engine, Settings, load_env_file
-from crew_server.hub import Hub
+from crew_server.hub import Hub, NotFound
 
 load_env_file()
 DATABASE_URL = os.environ.get("CREW_TEST_DATABASE_URL")
@@ -334,3 +334,22 @@ async def test_queued_messages_survive_a_restart(hub):
     finally:
         await second.close()
         hub.closing = True
+
+
+async def test_delete_stops_the_turn_and_removes_the_task(hub):
+    session = await hub.create_session("slow")
+    sid = uuid.UUID(session["id"])
+    await wait_for(hub, sid, "text", lambda p: p["role"] == "thought")
+    await hub.send(sid, "later", delivery="queue")
+    await hub.delete_session(sid)
+    assert sid not in hub.runtimes
+    assert await hub.pool.fetchval("select count(*) from events where session_id = $1", sid) == 0
+    assert await hub.pool.fetchval("select count(*) from messages where session_id = $1", sid) == 0
+    assert all(s["id"] != str(sid) for s in await hub.list_sessions())
+    try:
+        await hub.get_session(sid)
+        raise AssertionError("still there")
+    except NotFound:
+        pass
+    other = await hub.create_session("Say hello")  # the engine keeps working for other tasks
+    await wait_for(hub, uuid.UUID(other["id"]), "turn_end")

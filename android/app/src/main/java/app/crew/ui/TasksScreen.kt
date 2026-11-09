@@ -1,6 +1,15 @@
 package app.crew.ui
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.draggable
+import androidx.compose.foundation.gestures.rememberDraggableState
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
+import kotlin.math.roundToInt
+import kotlinx.coroutines.launch
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -15,6 +24,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -65,7 +75,25 @@ fun TasksScreen(state: UiState, viewModel: CrewViewModel, padding: PaddingValues
             }
         }
         items(state.sessions, key = { it.id }) { session ->
-            SessionRow(session, onClick = { viewModel.openSession(session.id) })
+            var confirm by remember { mutableStateOf(false) }
+            var close by remember { mutableStateOf<() -> Unit>({}) }
+            SwipeToReveal(onDelete = { closeReveal -> close = closeReveal; confirm = true }) {
+                SessionRow(session, onClick = { viewModel.openSession(session.id) })
+            }
+            if (confirm) {
+                AlertDialog(
+                    onDismissRequest = { confirm = false; close() },
+                    title = { Text("Delete this task?") },
+                    text = { Text("\u201c${session.title}\u201d and its chat are deleted from the server. You can undo for 3 seconds.") },
+                    confirmButton = {
+                        TextButton(onClick = {
+                            confirm = false
+                            viewModel.deleteSession(session.id)
+                        }) { Text("Delete", color = MaterialTheme.colorScheme.error) }
+                    },
+                    dismissButton = { TextButton(onClick = { confirm = false; close() }) { Text("Cancel") } },
+                )
+            }
         }
     }
 }
@@ -73,8 +101,9 @@ fun TasksScreen(state: UiState, viewModel: CrewViewModel, padding: PaddingValues
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun NewTaskCard(state: UiState, viewModel: CrewViewModel, onOpenSettings: () -> Unit) {
-    var text by rememberSaveable { mutableStateOf("") }
-    var engineId by rememberSaveable { mutableStateOf<String?>(null) }
+    val text = state.newTaskText
+    // The last agent picked here, then the server's default.
+    var engineId by remember { mutableStateOf(viewModel.lastEngine()) }
     val online = state.connection is Connection.Online
     val files = state.draft(NEW_DRAFT)
     val pick = rememberFilePicker { viewModel.attach(NEW_DRAFT, it) }
@@ -109,7 +138,7 @@ private fun NewTaskCard(state: UiState, viewModel: CrewViewModel, onOpenSettings
         }
         OutlinedTextField(
             value = text,
-            onValueChange = { text = it },
+            onValueChange = viewModel::setNewTaskText,
             modifier = Modifier.fillMaxWidth(),
             placeholder = { Text("What should Crew do?") },
             minLines = 2,
@@ -124,7 +153,10 @@ private fun NewTaskCard(state: UiState, viewModel: CrewViewModel, onOpenSettings
                     details = listOfNotNull(engine.agent?.let { "Harness: ${it.name}" }, "Engine: ${engine.name}"),
                     choices = state.engines.map { it.id to it.name },
                     selected = engine.id,
-                    onPick = { engineId = it },
+                    onPick = {
+                        engineId = it
+                        viewModel.setNewTaskEngine(it)
+                    },
                 )
                 options.forEach { option ->
                     ConfigChip(
@@ -133,13 +165,17 @@ private fun NewTaskCard(state: UiState, viewModel: CrewViewModel, onOpenSettings
                         enabled = online,
                         onPick = { value ->
                             picks = if (value == option.current) picks - option.id else picks + (option.id to value)
+                            viewModel.rememberPick(engine.id, option.id, value)
                         },
                     )
                 }
             }
         }
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Switch(checked = autoApprove, onCheckedChange = { autoApprove = it })
+            Switch(checked = autoApprove, onCheckedChange = { on ->
+                autoApprove = on
+                engine?.let { viewModel.rememberAutoApprove(it.id, on) }
+            })
             Spacer(Modifier.width(10.dp))
             Column(Modifier.weight(1f)) {
                 Text("Auto-approve", style = MaterialTheme.typography.labelLarge)
@@ -155,8 +191,7 @@ private fun NewTaskCard(state: UiState, viewModel: CrewViewModel, onOpenSettings
             FilledIconButton(
                 onClick = {
                     viewModel.newTask(text.trim(), autoApprove, engine?.id, picks)
-                    text = ""
-                    picks = emptyMap()
+                    viewModel.setNewTaskText("")
                 },
                 enabled = online && (text.isNotBlank() || files.any { it.uploadId != null }) && files.none { it.uploading },
             ) {
@@ -203,5 +238,53 @@ private fun SessionRow(session: SessionInfo, onClick: () -> Unit) {
                 }
             }
         }
+    }
+}
+
+
+private val DELETE_WIDTH = 96.dp
+
+/**
+ * Slide a row left to reveal its Delete button. Releasing past half the button keeps it open; a tap on
+ * the button calls [onDelete] with a function that slides the row back (for Cancel).
+ */
+@Composable
+private fun SwipeToReveal(onDelete: (close: () -> Unit) -> Unit, content: @Composable () -> Unit) {
+    val revealPx = with(androidx.compose.ui.platform.LocalDensity.current) { DELETE_WIDTH.toPx() }
+    val offset = remember { androidx.compose.animation.core.Animatable(0f) }
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
+    val close: () -> Unit = { scope.launch { offset.animateTo(0f) } }
+    androidx.compose.foundation.layout.Box(Modifier.fillMaxWidth().height(androidx.compose.foundation.layout.IntrinsicSize.Min)) {
+        androidx.compose.foundation.layout.Box(
+            Modifier
+                .matchParentSize()
+                .background(MaterialTheme.colorScheme.errorContainer, RoundedCornerShape(ShellDimensions.CARD_CORNER)),
+            contentAlignment = Alignment.CenterEnd,
+        ) {
+            Column(
+                Modifier
+                    .width(DELETE_WIDTH)
+                    .fillMaxHeight()
+                    .clickable(enabled = offset.value < -revealPx / 2) { onDelete(close) },
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center,
+            ) {
+                Icon(painterResource(R.drawable.ic_delete_24), contentDescription = null, tint = MaterialTheme.colorScheme.onErrorContainer)
+                Text("Delete", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onErrorContainer)
+            }
+        }
+        androidx.compose.foundation.layout.Box(
+            Modifier
+                .offset { androidx.compose.ui.unit.IntOffset(offset.value.roundToInt(), 0) }
+                .draggable(
+                    orientation = Orientation.Horizontal,
+                    state = rememberDraggableState { delta ->
+                        scope.launch { offset.snapTo((offset.value + delta).coerceIn(-revealPx * 1.3f, 0f)) }
+                    },
+                    onDragStopped = { velocity ->
+                        offset.animateTo(if (offset.value < -revealPx / 2 || velocity < -1500f) -revealPx else 0f)
+                    },
+                ),
+        ) { content() }
     }
 }

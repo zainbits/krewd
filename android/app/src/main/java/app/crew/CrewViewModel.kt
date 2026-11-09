@@ -97,6 +97,10 @@ data class UiState(
     val vertical: Boolean = false,
     val restarting: Boolean = false,
     val confirmStop: String? = null,
+    /** The new-task card's text, kept while you look at other screens. */
+    val newTaskText: String = "",
+    /** A task deleted in the last 3 seconds: hidden, and only deleted on the server once Undo has passed. */
+    val pendingDelete: SessionInfo? = null,
 ) {
     fun draft(key: String): List<PendingFile> = drafts[key].orEmpty()
     val browserTab: BrowserTab? get() = browser?.tabs?.firstOrNull { it.id == browserTabId }
@@ -112,6 +116,7 @@ data class UiState(
 }
 
 const val NEW_DRAFT = "new"
+const val UNDO_MS = 3_000L
 
 /**
  * The app's state and its one connection to the server. It lives as long as the process (see
@@ -175,7 +180,7 @@ class CrewViewModel(private val app: Application) {
                 val version = client.health().optString("version")
                 val server = client.state()
                 api = client
-                val sessions = client.sessions()
+                val sessions = client.sessions().filterNot { it.id == _state.value.pendingDelete?.id }
                 val approvals = client.approvals()
                 val wasRestarting = _state.value.restarting && sawDown
                 _state.update {
@@ -318,6 +323,7 @@ class CrewViewModel(private val app: Application) {
 
     private fun upsert(list: List<SessionInfo>, session: SessionInfo): List<SessionInfo> {
         val rest = list.filterNot { it.id == session.id }
+        if (session.id == _state.value.pendingDelete?.id) return rest
         val merged = if (session.archived) rest else rest + session
         return merged.sortedWith(compareByDescending<SessionInfo> { it.pinned }.thenByDescending { it.updatedAt })
     }
@@ -385,6 +391,19 @@ class CrewViewModel(private val app: Application) {
 
     /** What a new task on [engineId] starts with: the owner's last picks for that agent. */
     fun engineDefaults(engineId: String?): EngineDefaults = engineId?.let(prefs::engine) ?: EngineDefaults()
+
+    // The new-task card saves each pick at once, so leaving the screen or switching agents loses nothing.
+
+    fun lastEngine(): String? = prefs.lastEngine()
+
+    fun setNewTaskEngine(id: String) = prefs.setLastEngine(id)
+
+    fun rememberPick(engineId: String, configId: String, value: String) =
+        prefs.updateEngine(engineId) { it.copy(config = it.config + (configId to value)) }
+
+    fun rememberAutoApprove(engineId: String, on: Boolean) = prefs.updateEngine(engineId) { it.copy(autoApprove = on) }
+
+    fun setNewTaskText(text: String) = _state.update { it.copy(newTaskText = text) }
 
     /**
      * Sends a message to the open task. [delivery]: steer, queue or interrupt while a turn runs, or null
@@ -551,6 +570,37 @@ class CrewViewModel(private val app: Application) {
         client.updateSession(id, JSONObject().put("archived", true))
         _state.update { s -> s.copy(sessions = s.sessions.filterNot { it.id == id }) }
         launchMain { if (_state.value.openSessionId == id) closeSession() }
+    }
+
+    // delete, with 3 seconds to undo
+
+    private var deleteJob: Job? = null
+
+    /** Hides the task now and deletes it on the server after [UNDO_MS], unless [undoDelete] comes first. */
+    fun deleteSession(id: String) {
+        commitDelete() // a previous delete goes through at once
+        val session = _state.value.sessions.firstOrNull { it.id == id } ?: return
+        _state.update { s -> s.copy(sessions = s.sessions.filterNot { it.id == id }, pendingDelete = session) }
+        deleteJob = scope.launch {
+            delay(UNDO_MS)
+            commitDelete()
+        }
+    }
+
+    fun undoDelete() {
+        deleteJob?.cancel()
+        val session = _state.value.pendingDelete ?: return
+        _state.update { s -> s.copy(pendingDelete = null, sessions = upsert(s.sessions, session)) }
+    }
+
+    private fun commitDelete() {
+        deleteJob?.cancel()
+        val session = _state.value.pendingDelete ?: return
+        _state.update { it.copy(pendingDelete = null) }
+        live.remove(session.id)
+        pushLive()
+        notifier.clear(session.id)
+        act { it.deleteSession(session.id) }
     }
 
     fun dismissMessage() = _state.update { it.copy(message = null) }
