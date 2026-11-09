@@ -500,7 +500,12 @@ private fun RoutineRunRow(item: UserItem) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                 Icon(painterResource(R.drawable.ic_schedule_24), contentDescription = null, tint = MaterialTheme.colorScheme.onSecondaryContainer, modifier = Modifier.size(18.dp))
                 Text(
-                    (if (item.trigger == "manual") "Run now" else "Scheduled run") + (item.version?.let { " · instructions v$it" } ?: ""),
+                    listOfNotNull(
+                        if (item.trigger == "manual") "Run now" else if (item.attempt > 1) "Retry" else "Scheduled run",
+                        item.triggers.filter { it != "main" }.takeIf { it.isNotEmpty() }?.joinToString(", "),
+                        if (item.maxAttempts > 1) "attempt ${item.attempt} of ${item.maxAttempts}" else null,
+                        item.version?.let { "v$it" },
+                    ).joinToString(" · "),
                     style = MaterialTheme.typography.labelLarge,
                     color = MaterialTheme.colorScheme.onSecondaryContainer,
                     modifier = Modifier.weight(1f),

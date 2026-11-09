@@ -26,6 +26,10 @@ data class UserItem(
     val routineTitle: String? = null,
     val trigger: String? = null,
     val version: Int? = null,
+    /** For a routine run: the triggers that fired and the attempt (2 of 3 for a follow-up). */
+    val triggers: List<String> = emptyList(),
+    val attempt: Int = 1,
+    val maxAttempts: Int = 1,
 ) : ChatItem
 
 data class TextItem(override val key: String, val role: String, val text: String) : ChatItem {
@@ -89,6 +93,9 @@ class Timeline {
                     routineTitle = p.optJSONObject("meta")?.optStringOrNull("title"),
                     trigger = p.optJSONObject("meta")?.optStringOrNull("trigger"),
                     version = p.optJSONObject("meta")?.optInt("version"),
+                    triggers = p.optJSONObject("meta")?.optJSONArray("triggers")?.let { a -> (0 until a.length()).map { a.optString(it) } } ?: emptyList(),
+                    attempt = p.optJSONObject("meta")?.optInt("attempt", 1) ?: 1,
+                    maxAttempts = p.optJSONObject("meta")?.optInt("max_attempts", 1) ?: 1,
                 )
                 add(item)
                 if (messageId != null) messages[messageId] = item.key

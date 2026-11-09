@@ -31,7 +31,7 @@ TOKEN = "test-token"
 async def hub(tmp_path):
     pool = await db.connect(DATABASE_URL)
     await pool.execute(
-        "drop table if exists routine_runs, routine_versions, routines, messages, events, approvals, sessions,"
+        "drop table if exists routine_triggers, routine_runs, routine_versions, routines, messages, events, approvals, sessions,"
         " engines, schema_version cascade"
     )
     settings = Settings(
@@ -463,10 +463,10 @@ async def test_scheduler_runs_due_routines_once_and_skips_stale_ones(hub):
     routine = await hub.create_routine("Daily", "Check out.", "*/5 * * * *", timezone="UTC")
     rid = uuid.UUID(routine["id"])
     now = datetime.now(UTC)
-    await hub.pool.execute("update routines set next_run_at = $2 where id = $1", rid, now - timedelta(minutes=1))
+    await hub.pool.execute("update routine_triggers set next_run_at = $2 where routine_id = $1", rid, now - timedelta(minutes=1))
     assert await hub.run_due(now) == 1
     assert await hub.run_due(now) == 0  # claimed: next_run_at moved on
-    nxt = await hub.pool.fetchval("select next_run_at from routines where id = $1", rid)
+    nxt = await hub.pool.fetchval("select next_run_at from routine_triggers where routine_id = $1", rid)
     assert nxt > now
     await wait_run(hub, rid, "done")
 
@@ -474,7 +474,7 @@ async def test_scheduler_runs_due_routines_once_and_skips_stale_ones(hub):
     # (A yearly schedule, so no later slot falls inside the window either.)
     yearly = await hub.create_routine("Yearly", "Renew.", "0 0 1 1 *", timezone="UTC")
     yid = uuid.UUID(yearly["id"])
-    await hub.pool.execute("update routines set next_run_at = $2 where id = $1", yid, now - timedelta(hours=9))
+    await hub.pool.execute("update routine_triggers set next_run_at = $2 where routine_id = $1", yid, now - timedelta(hours=9))
     assert await hub.run_due(now) == 0
     runs = await hub.routine_runs(yid)
     assert runs[0]["status"] == "skipped" and "not running" in runs[0]["summary"]
@@ -579,3 +579,133 @@ async def test_pin_puts_a_chat_first(hub):
     await hub.update_session(uuid.UUID(a["id"]), {"pinned": True})
     listing = await hub.list_sessions()
     assert listing[0]["id"] == a["id"] and listing[0]["pinned"]
+
+
+# triggers, follow-ups and notes
+
+
+async def test_one_routine_with_several_triggers(hub):
+    routine = await hub.create_routine(
+        "Attendance", "On check-in: check in. On check-out: check out.", timezone="Asia/Kolkata",
+        triggers=[{"name": "check-in", "schedule": "55 9 * * 1-5"},
+                  {"name": "check-out", "schedule": "0 19 * * 1-5", "max_attempts": 3}],
+        notes="Counter is top right.",
+    )
+    rid = uuid.UUID(routine["id"])
+    assert [t["name"] for t in routine["triggers"]] == ["check-in", "check-out"]
+    assert routine["schedule_text"] == "check-in: Weekdays at 09:55 · check-out: Weekdays at 19:00"
+    assert routine["upcoming"][0]["trigger"] in ("check-in", "check-out") and len(routine["next_runs"]) == 3
+    now = datetime.now(UTC)
+    await hub.pool.execute(
+        "update routine_triggers set next_run_at = $2 where routine_id = $1 and name = 'check-out'",
+        rid, now - timedelta(seconds=30),
+    )
+    assert await hub.run_due(now) == 1
+    run = await wait_run(hub, rid, "done")
+    assert run["triggers"] == ["check-out"] and run["attempt"] == 1 and run["max_attempts"] == 3
+    user = [e for e in await hub.events(0, uuid.UUID(routine["session_id"])) if e["kind"] == "user"][-1]["payload"]
+    assert "Trigger: check-out (Weekdays at 19:00). Attempt 1 of 3." in user["text"]
+    assert "Counter is top right." in user["text"] and "crew routines later" in user["text"]
+    # Both due at once: one run that names both.
+    await hub.pool.execute("update routine_triggers set next_run_at = $2 where routine_id = $1", rid, now)
+    assert await hub.run_due(now + timedelta(seconds=1)) == 1
+    run = await wait_run(hub, rid, "done")
+    assert sorted(run["triggers"]) == ["check-in", "check-out"]
+    # Changing one trigger by name keeps the other; a new version records the triggers.
+    edited = await hub.update_routine(rid, {"triggers": [
+        {"name": "check-in", "schedule": "50 9 * * 1-5"}, {"name": "check-out", "schedule": "0 19 * * 1-5", "max_attempts": 3}]})
+    assert edited["version"] == 2 and edited["triggers"][0]["schedule"] == "50 9 * * 1-5"
+    assert (await hub.routine_versions(rid))[0]["triggers"][0]["schedule"] == "50 9 * * 1-5"
+    runs = await hub.run_routine(rid, "check-in")
+    assert runs["triggers"] == ["check-in"]
+    await wait_run(hub, rid, "done")
+    with pytest.raises(NotFound):
+        await hub.run_routine(rid, "lunch")
+
+
+async def test_follow_ups_are_bounded_by_the_triggers_attempts(hub):
+    routine = await hub.create_routine(
+        "Out", "slow task", timezone="UTC", triggers=[{"name": "check-out", "schedule": "0 19 * * *", "max_attempts": 2}],
+    )
+    rid = uuid.UUID(routine["id"])
+    with pytest.raises(Exception, match="only be set during a run"):
+        await hub.follow_up(rid, minutes=5, reason="x")
+    await hub.run_routine(rid, "check-out")
+    await wait_run(hub, rid, "running")
+    later = await hub.follow_up(rid, minutes=5, reason="counter 8:56")
+    assert later["kind"] == "once" and later["attempt"] == 2 and later["parent"] == "check-out"
+    sid = uuid.UUID(routine["session_id"])
+    await hub.cancel(sid)
+    await wait_run(hub, rid, "cancelled")
+    # The follow-up fires as attempt 2 of 2, with the reason; then no attempts are left.
+    await hub.pool.execute("update routine_triggers set next_run_at = now() - interval '1 second' where kind = 'once'")
+    assert await hub.run_due() == 1
+    await wait_run(hub, rid, "running")
+    runs = await hub.routine_runs(rid)
+    assert runs[0]["attempt"] == 2 and runs[0]["max_attempts"] == 2
+    user = [e for e in await hub.events(0, sid) if e["kind"] == "user"][-1]["payload"]["text"]
+    assert "Attempt 2 of 2" in user and "counter 8:56" in user and "No attempts are left" in user
+    with pytest.raises(Exception, match="no attempts left"):
+        await hub.follow_up(rid, minutes=5, reason="again")
+    await hub.cancel(sid)
+    assert not await hub.pool.fetchval("select count(*) from routine_triggers where kind = 'once'")
+
+
+async def test_follow_up_waits_while_the_last_run_goes_and_pause_drops_it(hub):
+    routine = await hub.create_routine("W", "slow task", timezone="UTC",
+                                       triggers=[{"name": "a", "schedule": "0 19 * * *", "max_attempts": 3}])
+    rid = uuid.UUID(routine["id"])
+    await hub.run_routine(rid)
+    await wait_run(hub, rid, "running")
+    await hub.follow_up(rid, minutes=1, reason="not yet")
+    await hub.pool.execute("update routine_triggers set next_run_at = now() - interval '1 second' where kind = 'once'")
+    assert await hub.run_due() == 0  # still running: it waits a minute instead of being lost
+    assert await hub.pool.fetchval("select next_run_at > now() from routine_triggers where kind = 'once'")
+    await hub.update_routine(rid, {"enabled": False})
+    assert not await hub.pool.fetchval("select count(*) from routine_triggers where kind = 'once'")
+    await hub.cancel(uuid.UUID(routine["session_id"]))
+
+
+async def test_notes_and_the_month_end_trigger(hub):
+    routine = await hub.create_routine("T", "Fill.", timezone="Asia/Kolkata",
+                                       triggers=[{"name": "weekly", "schedule": "0 18 * * 5"},
+                                                 {"name": "month-end", "schedule": "0 18 LW * *"}])
+    rid = uuid.UUID(routine["id"])
+    assert "month-end: 0 18 LW * *" in routine["schedule_text"] or "month-end:" in routine["schedule_text"]
+    r = await hub.set_routine_notes(rid, "MK entry is 'MK-Delivery'.")
+    r = await hub.set_routine_notes(rid, "Week 46 filled.", append=True)
+    assert r["notes"] == "MK entry is 'MK-Delivery'.\nWeek 46 filled."
+    from crew_server.routines import Invalid
+    with pytest.raises(Invalid):
+        await hub.update_routine(rid, {"schedule": "0 9 * * *"})  # several triggers: use triggers
+    with pytest.raises(Invalid):
+        await hub.update_routine(rid, {"triggers": [{"name": "a", "schedule": "0 9 * * *"}, {"name": "a", "schedule": "0 9 * * *"}]})
+
+
+async def test_existing_routines_become_a_main_trigger(hub):
+    routine = await hub.create_routine("Old", "x", "0 9 * * *", timezone="UTC")
+    assert [(t["name"], t["schedule"]) for t in routine["triggers"]] == [("main", "0 9 * * *")]
+    edited = await hub.update_routine(uuid.UUID(routine["id"]), {"schedule": "0 10 * * *"})
+    assert edited["triggers"][0]["schedule"] == "0 10 * * *" and edited["schedule"] == "0 10 * * *"
+
+
+async def test_trigger_api_later_and_notes(hub):
+    app = create_app(hub, TOKEN, lifespan_hub=False)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        h = {"Authorization": f"Bearer {TOKEN}"}
+        r = await client.post("/api/routines", headers=h, json={
+            "title": "API", "instructions": "slow task", "timezone": "UTC",
+            "triggers": [{"name": "in", "schedule": "55 9 * * 1-5"}, {"name": "out", "schedule": "0 19 * * 1-5", "max_attempts": 3}]})
+        assert r.status_code == 201, r.text
+        rid = r.json()["id"]
+        assert (await client.post(f"/api/routines/{rid}/run", headers=h, json={"trigger": "out"})).status_code == 202
+        await wait_run(hub, uuid.UUID(rid), "running")
+        r = await client.post(f"/api/routines/{rid}/later", headers=h, json={"minutes": 5, "reason": "8:56"})
+        assert r.status_code == 201 and r.json()["attempt"] == 2
+        tid = r.json()["id"]
+        detail = (await client.get(f"/api/routines/{rid}", headers=h)).json()
+        assert any(t["kind"] == "once" for t in detail["triggers"])
+        assert (await client.delete(f"/api/routines/{rid}/later/{tid}", headers=h)).status_code == 200
+        r = await client.put(f"/api/routines/{rid}/notes", headers=h, json={"notes": "learned"})
+        assert r.json()["notes"] == "learned"
+        await hub.cancel(uuid.UUID(detail["session_id"]))

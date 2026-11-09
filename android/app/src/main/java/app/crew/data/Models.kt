@@ -142,12 +142,52 @@ data class SessionInfo(
     }
 }
 
+/**
+ * When a routine runs: a named cron trigger ("check-in", 5-field cron), or a follow-up ("once") that a run
+ * asked for as the next attempt of its [parent] trigger.
+ */
+data class RoutineTrigger(
+    val id: String,
+    val name: String,
+    val kind: String,
+    val schedule: String?,
+    val scheduleText: String?,
+    val enabled: Boolean,
+    val maxAttempts: Int,
+    val nextRunAt: String?,
+    val attempt: Int?,
+    val reason: String?,
+    val parent: String?,
+) {
+    val isFollowUp: Boolean get() = kind == "once"
+
+    companion object {
+        fun from(o: JSONObject) = RoutineTrigger(
+            id = o.optString("id"),
+            name = o.optString("name"),
+            kind = o.optString("kind", "cron"),
+            schedule = o.optStringOrNull("schedule"),
+            scheduleText = o.optStringOrNull("schedule_text"),
+            enabled = o.optBoolean("enabled", true),
+            maxAttempts = o.optInt("max_attempts", 1),
+            nextRunAt = o.optStringOrNull("next_run_at"),
+            attempt = if (o.isNull("attempt")) null else o.optInt("attempt"),
+            reason = o.optStringOrNull("reason"),
+            parent = o.optStringOrNull("parent"),
+        )
+    }
+}
+
 /** One run of a routine: it went into the routine's chat as the message at [seq]. */
 data class RoutineRun(
     val id: String,
     val sessionId: String?,
     val seq: Long?,
     val trigger: String,
+    /** The triggers that fired for this run ("check-out"); "main" for a routine with one schedule. */
+    val triggers: List<String> = emptyList(),
+    val attempt: Int = 1,
+    val maxAttempts: Int = 1,
     val version: Int,
     val status: String,
     val summary: String?,
@@ -164,6 +204,9 @@ data class RoutineRun(
             sessionId = o.optStringOrNull("session_id"),
             seq = o.optLongOrNull("seq"),
             trigger = o.optString("trigger"),
+            triggers = o.optJSONArray("triggers")?.let { a -> (0 until a.length()).map { a.optString(it) } } ?: emptyList(),
+            attempt = o.optInt("attempt", 1),
+            maxAttempts = o.optInt("max_attempts", 1),
             version = o.optInt("version"),
             status = o.optString("status"),
             summary = o.optStringOrNull("summary"),
@@ -195,7 +238,13 @@ data class Routine(
     val sessionStatus: String?,
     /** Only filled when one routine is loaded with its history. */
     val runs: List<RoutineRun>? = null,
+    val triggers: List<RoutineTrigger> = emptyList(),
+    /** What the routine's agent learned and keeps between runs. */
+    val notes: String = "",
 ) {
+    val cronTriggers: List<RoutineTrigger> get() = triggers.filterNot { it.isFollowUp }
+    val followUps: List<RoutineTrigger> get() = triggers.filter { it.isFollowUp }
+
     companion object {
         fun from(o: JSONObject) = Routine(
             id = o.getString("id"),
@@ -215,6 +264,8 @@ data class Routine(
             lastRun = o.optJSONObject("last_run")?.let(RoutineRun::from),
             sessionStatus = o.optStringOrNull("session_status"),
             runs = if (o.has("runs")) o.optJSONArray("runs").objects().map(RoutineRun::from) else null,
+            triggers = o.optJSONArray("triggers").objects().map(RoutineTrigger::from),
+            notes = o.optString("notes"),
         )
     }
 }

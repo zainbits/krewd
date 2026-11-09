@@ -146,9 +146,19 @@ def _days(field: str) -> str | None:
 
 
 def run_prompt(
-    routine: dict, run_id: str, trigger: str, now: datetime, first_run: bool
+    routine: dict,
+    run_id: str,
+    trigger: str,
+    now: datetime,
+    first_run: bool,
+    triggers: list[tuple[str, str | None]] | None = None,
+    attempt: int = 1,
+    max_attempts: int = 1,
+    reason: str | None = None,
+    notes: str = "",
+    several: bool = False,
 ) -> str:
-    """The message a run puts into the routine's chat: what this is, today's date facts, the instructions."""
+    """The message a run puts into the routine's chat: what fired, today's date facts, notes, the instructions."""
     tz = zone(routine["timezone"])
     local = now.astimezone(tz)
     last_day = calendar.monthrange(local.year, local.month)[1]
@@ -161,18 +171,42 @@ def run_prompt(
         f"{local:%H:%M} {local.tzname()} ({routine['timezone']}). This month ends on "
         f"{DAYS[(month_end.weekday() + 1) % 7]} {last_day} {calendar.month_name[local.month]}.",
     ]
+    named = [t for t in (triggers or []) if t[0] != "main" or several]
+    if named:
+        fired = " and ".join(f"{name} ({text})" if text else name for name, text in named)
+        lines.append(f"Trigger: {fired}. Attempt {attempt} of {max_attempts}.")
+    elif max_attempts > 1:
+        lines.append(f"Attempt {attempt} of {max_attempts}.")
+    if reason:
+        lines.append(f"This is the follow-up you asked for in the last attempt: {reason}")
     if first_run:
         lines.append("This is the routine's own chat: every run comes here, so later runs see this one.")
     else:
         lines.append("This is the routine's own chat: earlier runs and the owner's replies are above.")
+    rid = routine["id"][:8]
     lines += [
+        "",
+        "Notes kept for this routine (what earlier runs learned):",
+        notes.strip() or "(none yet)",
         "",
         "Instructions:",
         routine["instructions"].strip(),
         "",
-        "Follow the instructions above for today. Start your reply with the result in a line or two. "
-        "Ask in this chat before anything consequential the instructions do not clearly allow, and wait "
-        "for the owner's answer. To change this routine (only when the owner asks), use the `crew routines` "
-        "command.",
+        ("Do only the part of the instructions for this trigger. " if named else "Follow the instructions above for today. ")
+        + "Start your reply with the result in a line or two.",
     ]
+    if attempt < max_attempts:
+        lines.append(
+            f"If it cannot be done yet (for example a counter or time is not there yet), ask Crew to try again later: "
+            f"`crew routines later {rid} --in 5m --reason \"...\"` makes attempt {attempt + 1} of {max_attempts}. "
+            "On a real failure (signed out, a missing button, an error page), do not retry: stop and tell the owner."
+        )
+    else:
+        lines.append("No attempts are left after this one: if it cannot be done, stop and tell the owner it could not be done.")
+    lines.append(
+        f"When you learn something lasting about doing this (where a button is, a code's exact name), update the notes "
+        f"with `crew routines notes {rid} --append \"...\"`. Ask in this chat before anything consequential the "
+        "instructions do not clearly allow, and wait for the owner's answer. Change the routine itself only when the "
+        "owner asks (`crew routines --help`)."
+    )
     return "\n".join(lines)

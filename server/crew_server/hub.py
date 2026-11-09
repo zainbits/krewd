@@ -15,7 +15,7 @@ import re
 import signal
 import uuid
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from functools import partial
 from typing import Any
 
@@ -36,6 +36,8 @@ TITLE_MAX = 80
 PREVIEW_MAX = 280
 SCHEDULER_TICK = 15  # seconds between looks for due routines
 RUN_SUMMARY_MAX = 2000
+NOTES_MAX = 8000
+TRIGGER_NAME = re.compile(r"^[a-z0-9][a-z0-9 _-]{0,39}$")
 HANDOVER_PROMPT = (
     "Crew is compacting this chat: the owner asked to start a fresh agent session that keeps only what "
     "matters. Write a handover for that next session, and nothing else: the goal, the decisions and facts "
@@ -1202,15 +1204,90 @@ class Hub:
             raise NotFound("routine not found")
         return row
 
+    async def _triggers(self, routine_id: uuid.UUID) -> list[asyncpg.Record]:
+        return await self.pool.fetch(
+            """select * from routine_triggers where routine_id = $1
+               order by kind, position, created_at""",
+            routine_id,
+        )
+
+    def _norm_triggers(self, triggers: list[dict[str, Any]], timezone: str) -> list[dict[str, Any]]:
+        """Checked cron triggers: unique lower-case names, valid schedules, 1 to 10 attempts."""
+        found: list[dict[str, Any]] = []
+        for t in triggers:
+            name = str(t.get("name") or "main").strip().lower()
+            if not TRIGGER_NAME.match(name):
+                raise rtn.Invalid(f"trigger name {name!r}: use 1 to 40 letters, digits, spaces, - or _")
+            if any(f["name"] == name for f in found):
+                raise rtn.Invalid(f"two triggers are called {name!r}")
+            attempts = int(t.get("max_attempts") or 1)
+            if not 1 <= attempts <= 10:
+                raise rtn.Invalid(f"trigger {name!r}: attempts must be 1 to 10")
+            found.append({
+                "name": name,
+                "schedule": rtn.check(str(t.get("schedule") or ""), timezone),
+                "max_attempts": attempts,
+                "enabled": t.get("enabled") is not False,
+            })
+        if not found:
+            raise rtn.Invalid("a routine needs at least one trigger")
+        if len(found) > 10:
+            raise rtn.Invalid("at most 10 triggers per routine")
+        return found
+
+    async def _sync_routine(self, routine_id: uuid.UUID) -> None:
+        """Keep routines.next_run_at (the soonest trigger) and routines.schedule (the first one) current."""
+        await self.pool.execute(
+            """update routines r set
+                   next_run_at = case when r.enabled then (select min(t.next_run_at) from routine_triggers t
+                                  where t.routine_id = r.id and t.enabled) end,
+                   schedule = coalesce((select t.schedule from routine_triggers t where t.routine_id = r.id
+                                        and t.kind = 'cron' order by t.position, t.created_at limit 1), r.schedule)
+               where r.id = $1""",
+            routine_id,
+        )
+
+    @staticmethod
+    def _trigger_json(t: asyncpg.Record, parent_name: str | None = None) -> dict[str, Any]:
+        return {
+            "id": str(t["id"]),
+            "name": t["name"],
+            "kind": t["kind"],
+            "schedule": t["schedule"],
+            "schedule_text": rtn.describe(t["schedule"]) if t["schedule"] else None,
+            "enabled": t["enabled"],
+            "max_attempts": t["max_attempts"],
+            "next_run_at": t["next_run_at"].isoformat() if t["next_run_at"] else None,
+            "attempt": t["attempt"],
+            "reason": t["reason"],
+            "parent": parent_name,
+        }
+
     async def _routine_full(self, row: asyncpg.Record, runs: int = 0) -> dict[str, Any]:
         routine = db.routine_json(row)
-        routine["schedule_text"] = rtn.describe(row["schedule"])
-        if row["enabled"]:
-            routine["next_runs"] = [
-                t.isoformat() for t in rtn.next_runs(row["schedule"], row["timezone"], datetime.now(UTC), 3)
-            ]
+        triggers = await self._triggers(row["id"])
+        names = {t["id"]: t["name"] for t in triggers}
+        routine["triggers"] = [self._trigger_json(t, names.get(t["parent_id"])) for t in triggers]
+        cron = [t for t in triggers if t["kind"] == "cron"]
+        if len(cron) == 1 and cron[0]["name"] == "main":
+            routine["schedule_text"] = rtn.describe(cron[0]["schedule"])
         else:
-            routine["next_runs"] = []
+            routine["schedule_text"] = " · ".join(f"{t['name']}: {rtn.describe(t['schedule'])}" for t in cron)
+        upcoming: list[dict[str, Any]] = []
+        if row["enabled"]:
+            now = datetime.now(UTC)
+            for t in triggers:
+                if not t["enabled"]:
+                    continue
+                if t["kind"] == "once":
+                    if t["next_run_at"]:
+                        upcoming.append({"at": t["next_run_at"], "trigger": t["name"], "attempt": t["attempt"]})
+                else:
+                    for when in rtn.next_runs(t["schedule"], row["timezone"], now, 3):
+                        upcoming.append({"at": when, "trigger": t["name"], "attempt": None})
+            upcoming.sort(key=lambda u: u["at"])
+        routine["upcoming"] = [{**u, "at": u["at"].isoformat()} for u in upcoming[:5]]
+        routine["next_runs"] = [u["at"] for u in routine["upcoming"][:3]]
         last = await self.pool.fetchrow(
             """select r.*, m.event_seq from routine_runs r left join messages m on m.id = r.message_id
                where r.routine_id = $1 order by r.created_at desc limit 1""",
@@ -1262,7 +1339,7 @@ class Hub:
         self,
         title: str,
         instructions: str,
-        schedule: str,
+        schedule: str | None = None,
         timezone: str | None = None,
         engine: str | None = None,
         mode: str | None = None,
@@ -1271,9 +1348,16 @@ class Hub:
         enabled: bool = True,
         created_by: str = "owner",
         note: str | None = None,
+        triggers: list[dict[str, Any]] | None = None,
+        notes: str = "",
     ) -> dict[str, Any]:
         timezone = timezone or self.default_timezone
-        schedule = rtn.check(schedule, timezone)
+        rtn.zone(timezone)
+        if not triggers:
+            if not schedule:
+                raise rtn.Invalid("give a schedule or triggers")
+            triggers = [{"name": "main", "schedule": schedule}]
+        found = self._norm_triggers(triggers, timezone)
         engine = engine or self.settings.default_engine
         if engine not in self.settings.engines:
             raise NotFound(f"unknown engine {engine}")
@@ -1283,24 +1367,33 @@ class Hub:
         routine_id = uuid.uuid4()
         # The routine's own chat exists from the start, so it can be opened (and pinned) before the first run.
         session_id = await self._insert_session(title, engine, mode, auto_approve, config, title_locked=True)
-        next_run = rtn.next_runs(schedule, timezone, datetime.now(UTC))[0] if enabled else None
+        now = datetime.now(UTC)
         async with self.pool.acquire() as conn, conn.transaction():
             await conn.execute(
                 """insert into routines (id, title, instructions, schedule, timezone, session_id, engine, mode,
-                       config, auto_approve, enabled, next_run_at, created_by)
+                       config, auto_approve, enabled, created_by, notes)
                    values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)""",
-                routine_id, title, instructions, schedule, timezone, session_id, engine, mode, config or {},
-                auto_approve, enabled, next_run, created_by,
+                routine_id, title, instructions, found[0]["schedule"], timezone, session_id, engine, mode,
+                config or {}, auto_approve, enabled, created_by, notes or "",
             )
+            for position, t in enumerate(found):
+                nxt = rtn.next_runs(t["schedule"], timezone, now)[0] if t["enabled"] else None
+                await conn.execute(
+                    """insert into routine_triggers (id, routine_id, name, kind, schedule, enabled, max_attempts,
+                           next_run_at, position) values ($1, $2, $3, 'cron', $4, $5, $6, $7, $8)""",
+                    uuid.uuid4(), routine_id, t["name"], t["schedule"], t["enabled"], t["max_attempts"], nxt, position,
+                )
             await conn.execute(
                 """insert into routine_versions (routine_id, version, title, instructions, schedule, timezone,
-                       changed_by, note) values ($1, 1, $2, $3, $4, $5, $6, $7)""",
-                routine_id, title, instructions, schedule, timezone, created_by, note,
+                       changed_by, note, triggers) values ($1, 1, $2, $3, $4, $5, $6, $7, $8)""",
+                routine_id, title, instructions, found[0]["schedule"], timezone, created_by, note, found,
             )
+        await self._sync_routine(routine_id)
+        row = await self._routine_row(routine_id)
+        text = (await self._routine_full(row))["schedule_text"]
         await self.pool.execute(
             "update sessions set last_text = $2 where id = $1",
-            session_id,
-            f"Routine: {rtn.describe(schedule)}" + ("" if enabled else " (paused)"),
+            session_id, _first_line(f"Routine: {text}" + ("" if enabled else " (paused)"), PREVIEW_MAX),
         )
         return await self._routine_changed(routine_id)
 
@@ -1308,8 +1401,11 @@ class Hub:
         self, routine_id: uuid.UUID, changes: dict[str, Any], changed_by: str = "owner", note: str | None = None
     ) -> dict[str, Any]:
         row = await self._routine_row(routine_id)
-        new = {k: row[k] for k in ("title", "instructions", "schedule", "timezone", "engine", "mode",
-                                   "auto_approve", "enabled")}
+        existing = [t for t in await self._triggers(routine_id) if t["kind"] == "cron"]
+        old_triggers = [{"name": t["name"], "schedule": t["schedule"], "max_attempts": t["max_attempts"],
+                         "enabled": t["enabled"]} for t in existing]
+        new = {k: row[k] for k in ("title", "instructions", "timezone", "engine", "mode", "auto_approve", "enabled",
+                                   "notes")}
         new["config"] = row["config"] or {}
         for key, value in changes.items():
             if key in new and value is not None:
@@ -1317,33 +1413,66 @@ class Hub:
         if not new["title"] or not new["instructions"]:
             raise rtn.Invalid("a routine needs a title and instructions")
         rtn.zone(new["timezone"])
-        new["schedule"] = rtn.check(new["schedule"], new["timezone"])
+        if changes.get("triggers") is not None:
+            wanted = changes["triggers"]
+        elif changes.get("schedule"):
+            if len(existing) != 1:
+                raise rtn.Invalid("this routine has several triggers: change them with triggers, not schedule")
+            wanted = [{**old_triggers[0], "schedule": changes["schedule"]}]
+        else:
+            wanted = old_triggers
+        found = self._norm_triggers(wanted, new["timezone"])
         if new["engine"] not in self.settings.engines:
             raise NotFound(f"unknown engine {new['engine']}")
-        versioned = any(new[k] != row[k] for k in ("title", "instructions", "schedule", "timezone"))
+        versioned = (any(new[k] != row[k] for k in ("title", "instructions", "timezone")) or found != old_triggers)
         version = row["version"] + 1 if versioned else row["version"]
-        timing = any(new[k] != row[k] for k in ("schedule", "timezone", "enabled"))
-        next_run = row["next_run_at"]
-        if timing:
-            next_run = rtn.next_runs(new["schedule"], new["timezone"], datetime.now(UTC))[0] if new["enabled"] else None
         session_id = row["session_id"]
         if new["engine"] != row["engine"]:
             session_id = None  # a chat belongs to one agent: the next run starts a new chat; the old one stays
+        now = datetime.now(UTC)
+        by_name = {t["name"]: t for t in existing}
+        resumed = new["enabled"] and not row["enabled"]
         async with self.pool.acquire() as conn, conn.transaction():
             await conn.execute(
-                """update routines set title = $2, instructions = $3, schedule = $4, timezone = $5, engine = $6,
-                       mode = $7, config = $8, auto_approve = $9, enabled = $10, version = $11, next_run_at = $12,
-                       session_id = $13, updated_at = now() where id = $1""",
-                routine_id, new["title"], new["instructions"], new["schedule"], new["timezone"], new["engine"],
-                new["mode"], new["config"], new["auto_approve"], new["enabled"], version, next_run, session_id,
+                """update routines set title = $2, instructions = $3, timezone = $4, engine = $5, mode = $6,
+                       config = $7, auto_approve = $8, enabled = $9, version = $10, session_id = $11, notes = $12,
+                       updated_at = now() where id = $1""",
+                routine_id, new["title"], new["instructions"], new["timezone"], new["engine"], new["mode"],
+                new["config"], new["auto_approve"], new["enabled"], version, session_id, new["notes"],
             )
+            for position, t in enumerate(found):
+                old = by_name.get(t["name"])
+                retime = (old is None or old["schedule"] != t["schedule"] or old["enabled"] != t["enabled"]
+                          or new["timezone"] != row["timezone"] or resumed or old["next_run_at"] is None)
+                nxt = (rtn.next_runs(t["schedule"], new["timezone"], now)[0] if t["enabled"] else None) if retime \
+                    else old["next_run_at"]
+                if old is None:
+                    await conn.execute(
+                        """insert into routine_triggers (id, routine_id, name, kind, schedule, enabled, max_attempts,
+                               next_run_at, position) values ($1, $2, $3, 'cron', $4, $5, $6, $7, $8)""",
+                        uuid.uuid4(), routine_id, t["name"], t["schedule"], t["enabled"], t["max_attempts"], nxt,
+                        position,
+                    )
+                else:
+                    await conn.execute(
+                        """update routine_triggers set schedule = $2, enabled = $3, max_attempts = $4,
+                               next_run_at = $5, position = $6 where id = $1""",
+                        old["id"], t["schedule"], t["enabled"], t["max_attempts"], nxt, position,
+                    )
+            gone = [t["id"] for t in existing if t["name"] not in {f["name"] for f in found}]
+            if gone:
+                await conn.execute("delete from routine_triggers where id = any($1::uuid[])", gone)
+            if not new["enabled"]:
+                # Paused: pending follow-ups are dropped, so nothing fires late after a resume.
+                await conn.execute("delete from routine_triggers where routine_id = $1 and kind = 'once'", routine_id)
             if versioned:
                 await conn.execute(
                     """insert into routine_versions (routine_id, version, title, instructions, schedule, timezone,
-                           changed_by, note) values ($1, $2, $3, $4, $5, $6, $7, $8)""",
-                    routine_id, version, new["title"], new["instructions"], new["schedule"], new["timezone"],
-                    changed_by, note,
+                           changed_by, note, triggers) values ($1, $2, $3, $4, $5, $6, $7, $8, $9)""",
+                    routine_id, version, new["title"], new["instructions"], found[0]["schedule"], new["timezone"],
+                    changed_by, note, found,
                 )
+        await self._sync_routine(routine_id)
         if session_id:
             chat: dict[str, Any] = {}
             if new["title"] != row["title"]:
@@ -1358,6 +1487,15 @@ class Hub:
                 await self.update_session(session_id, chat)
         return await self._routine_changed(routine_id)
 
+    async def set_routine_notes(self, routine_id: uuid.UUID, notes: str, append: bool = False) -> dict[str, Any]:
+        """The routine's notes: what its agent learned and keeps between runs. Not versioned."""
+        row = await self._routine_row(routine_id)
+        text = ((row["notes"].rstrip() + "\n") if append and row["notes"].strip() else "") + notes.strip()
+        if len(text) > NOTES_MAX:
+            raise rtn.Invalid(f"notes are limited to {NOTES_MAX} characters; tidy them up instead of appending")
+        await self.pool.execute("update routines set notes = $2, updated_at = now() where id = $1", routine_id, text)
+        return await self._routine_changed(routine_id)
+
     async def delete_routine(self, routine_id: uuid.UUID) -> None:
         """Delete a routine and its run history. Its chat stays, as an ordinary task."""
         row = await self._routine_row(routine_id)
@@ -1367,10 +1505,70 @@ class Hub:
             self.last_sent.pop(row["session_id"], None)
             await self.emit_session(row["session_id"])
 
-    async def run_routine(self, routine_id: uuid.UUID) -> dict[str, Any]:
-        """Run now, on top of the schedule (the next scheduled run stays as it is)."""
+    async def run_routine(self, routine_id: uuid.UUID, trigger: str | None = None) -> dict[str, Any]:
+        """Run now, on top of the schedule, as one trigger (the first one by default)."""
         row = await self._routine_row(routine_id)
-        return await self._start_run(row, "manual", None)
+        cron = [t for t in await self._triggers(routine_id) if t["kind"] == "cron"]
+        pick = next((t for t in cron if t["name"] == (trigger or "").strip().lower()), None) if trigger else cron[0]
+        if pick is None:
+            raise NotFound(f"no trigger called {trigger!r}; this routine has: {', '.join(t['name'] for t in cron)}")
+        return await self._start_run(row, "manual", [{"trigger": pick, "attempt": 1, "max": pick["max_attempts"],
+                                                       "reason": None}], None)
+
+    async def follow_up(
+        self, routine_id: uuid.UUID, minutes: float | None = None, at: datetime | None = None, reason: str = ""
+    ) -> dict[str, Any]:
+        """A run asks to be tried again later, as the next attempt of the trigger it runs for.
+
+        Only during a run of the routine. Crew counts the attempts and refuses past the trigger's limit, so an
+        agent cannot keep retrying. A new follow-up replaces a pending one for the same trigger.
+        """
+        await self._routine_row(routine_id)
+        run = await self.pool.fetchrow(
+            "select * from routine_runs where routine_id = $1 and status = 'running' order by created_at desc limit 1",
+            routine_id,
+        )
+        if run is None:
+            raise Conflict("a follow-up can only be set during a run of this routine")
+        names = run["trigger_names"] or []
+        parent = await self.pool.fetchrow(
+            "select * from routine_triggers where routine_id = $1 and kind = 'cron' and name = $2",
+            routine_id, names[0] if names else "",
+        )
+        if parent is None:
+            raise Conflict("this run's trigger no longer exists")
+        attempt, limit = run["attempt"] + 1, run["max_attempts"]
+        if attempt > limit:
+            raise Conflict(f"no attempts left ({run['attempt']} of {limit}): stop and tell the owner it could not be done")
+        now = datetime.now(UTC)
+        if at is None:
+            if minutes is None:
+                raise rtn.Invalid("give minutes or a time")
+            at = now + timedelta(minutes=minutes)
+        if not now + timedelta(seconds=30) <= at <= now + timedelta(hours=12):
+            raise rtn.Invalid("a follow-up must be between 1 minute and 12 hours from now")
+        async with self.pool.acquire() as conn, conn.transaction():
+            await conn.execute("delete from routine_triggers where parent_id = $1 and kind = 'once'", parent["id"])
+            trigger_id = uuid.uuid4()
+            await conn.execute(
+                """insert into routine_triggers (id, routine_id, name, kind, enabled, max_attempts, next_run_at,
+                       parent_id, attempt, reason) values ($1, $2, $3, 'once', true, $4, $5, $6, $7, $8)""",
+                trigger_id, routine_id, parent["name"], limit, at, parent["id"], attempt, reason.strip()[:300] or None,
+            )
+        await self._sync_routine(routine_id)
+        await self._routine_changed(routine_id)
+        t = await self.pool.fetchrow("select * from routine_triggers where id = $1", trigger_id)
+        return self._trigger_json(t, parent["name"])
+
+    async def cancel_follow_up(self, routine_id: uuid.UUID, trigger_id: uuid.UUID) -> None:
+        done = await self.pool.fetchval(
+            "delete from routine_triggers where id = $1 and routine_id = $2 and kind = 'once' returning id",
+            trigger_id, routine_id,
+        )
+        if not done:
+            raise NotFound("no such follow-up")
+        await self._sync_routine(routine_id)
+        await self._routine_changed(routine_id)
 
     async def _routine_changed(self, routine_id: uuid.UUID) -> dict[str, Any]:
         """Tell the apps: a `routine` event on the routine's chat, and the chat's own state."""
@@ -1394,9 +1592,17 @@ class Hub:
         return session_id
 
     async def _start_run(
-        self, row: asyncpg.Record, trigger: str, scheduled_for: datetime | None, skip_reason: str | None = None
+        self,
+        row: asyncpg.Record,
+        trigger: str,
+        fired: list[dict[str, Any]],
+        scheduled_for: datetime | None,
+        skip_reason: str | None = None,
     ) -> dict[str, Any]:
+        """One run for the triggers that fired together: [{trigger, attempt, max, reason}], the first leads."""
         run_id = uuid.uuid4()
+        lead = fired[0]
+        names = list(dict.fromkeys(f["trigger"]["name"] for f in fired))
         busy = await self.pool.fetchval(
             "select 1 from routine_runs where routine_id = $1 and status in ('queued', 'running') limit 1", row["id"]
         )
@@ -1406,27 +1612,38 @@ class Hub:
         if busy or skip_reason:
             await self.pool.execute(
                 """insert into routine_runs (id, routine_id, session_id, trigger, version, scheduled_for, status,
-                       summary, finished_at) values ($1, $2, $3, $4, $5, $6, 'skipped', $7, now())""",
+                       summary, finished_at, trigger_names, attempt, max_attempts)
+                   values ($1, $2, $3, $4, $5, $6, 'skipped', $7, now(), $8, $9, $10)""",
                 run_id, row["id"], session_id, trigger, row["version"], scheduled_for,
-                skip_reason or "Skipped: the previous run had not finished.",
+                skip_reason or "Skipped: the previous run had not finished.", names, lead["attempt"], lead["max"],
             )
             await self._routine_changed(row["id"])
             return await self._run_json(run_id)
         message_id = uuid.uuid4()
         first = not await self.pool.fetchval("select 1 from routine_runs where session_id = $1 limit 1", session_id)
+        all_cron = [t for t in await self._triggers(row["id"]) if t["kind"] == "cron"]
         routine = db.routine_json(row)
-        text = rtn.run_prompt(routine, str(run_id), trigger, datetime.now(UTC), first)
+        text = rtn.run_prompt(
+            routine, str(run_id), trigger, datetime.now(UTC), first,
+            triggers=[(f["trigger"]["name"], rtn.describe(f["trigger"]["schedule"] or "") if f["trigger"]["schedule"]
+                       else None) for f in fired if f["trigger"]["name"] in names],
+            attempt=lead["attempt"], max_attempts=lead["max"], reason=lead["reason"], notes=row["notes"],
+            several=len(all_cron) > 1,
+        )
         await self.pool.execute(
-            """insert into routine_runs (id, routine_id, session_id, message_id, trigger, version, scheduled_for)
-               values ($1, $2, $3, $4, $5, $6, $7)""",
-            run_id, row["id"], session_id, message_id, trigger, row["version"], scheduled_for,
+            """insert into routine_runs (id, routine_id, session_id, message_id, trigger, version, scheduled_for,
+                   trigger_names, attempt, max_attempts) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)""",
+            run_id, row["id"], session_id, message_id, trigger, row["version"], scheduled_for, names,
+            lead["attempt"], lead["max"],
         )
         await self.pool.execute("update routines set last_run_at = now() where id = $1", row["id"])
+        label = ", ".join(names) if names != ["main"] else ""
         await self.send(
             session_id, text, delivery="queue", purpose="routine", message_id=message_id,
             meta={"routine_id": str(row["id"]), "run_id": str(run_id), "title": row["title"], "trigger": trigger,
-                  "version": row["version"]},
-            preview=("Scheduled run" if trigger == "schedule" else "Run now") + f": {row['title']}",
+                  "version": row["version"], "triggers": names, "attempt": lead["attempt"], "max_attempts": lead["max"]},
+            preview=("Scheduled run" if trigger == "schedule" else "Run now") + (f" ({label})" if label else "")
+                    + f": {row['title']}",
         )
         await self._routine_changed(row["id"])
         return await self._run_json(run_id)
@@ -1468,27 +1685,76 @@ class Hub:
             await asyncio.sleep(SCHEDULER_TICK)
 
     async def run_due(self, now: datetime | None = None) -> int:
-        """Start every routine whose time has come. Each one is claimed by moving next_run_at first."""
+        """Start every routine with a due trigger; triggers due together make one run.
+
+        A cron trigger is claimed by moving its next_run_at first, so it fires once. A follow-up (once trigger)
+        is deleted when it fires; while the routine's previous run is still going it waits a minute instead.
+        """
         now = now or datetime.now(UTC)
         started = 0
-        for row in await self.pool.fetch(
-            "select * from routines where enabled and next_run_at <= $1 order by next_run_at", now
-        ):
-            due = rtn.latest_due(row["schedule"], row["timezone"], row["next_run_at"], now)
-            following = rtn.next_runs(row["schedule"], row["timezone"], now)[0]
-            claimed = await self.pool.fetchval(
-                "update routines set next_run_at = $3 where id = $1 and next_run_at = $2 returning id",
-                row["id"], row["next_run_at"], following,
+        rows = await self.pool.fetch(
+            """select t.* from routine_triggers t join routines r on r.id = t.routine_id
+               where r.enabled and t.enabled and t.next_run_at <= $1 order by t.next_run_at""",
+            now,
+        )
+        groups: dict[uuid.UUID, list[asyncpg.Record]] = {}
+        for t in rows:
+            groups.setdefault(t["routine_id"], []).append(t)
+        for routine_id, due_triggers in groups.items():
+            row = await self._routine_row(routine_id)
+            busy = await self.pool.fetchval(
+                "select 1 from routine_runs where routine_id = $1 and status in ('queued', 'running') limit 1",
+                routine_id,
             )
-            if not claimed:
+            fired: list[dict[str, Any]] = []
+            when: datetime | None = None
+            for t in due_triggers:
+                if t["kind"] == "once":
+                    if busy:
+                        await self.pool.execute(
+                            "update routine_triggers set next_run_at = $2 where id = $1",
+                            t["id"], now + timedelta(minutes=1),
+                        )
+                        continue
+                    parent = await self.pool.fetchrow("select * from routine_triggers where id = $1", t["parent_id"])
+                    claimed = await self.pool.fetchval(
+                        "delete from routine_triggers where id = $1 returning id", t["id"]
+                    )
+                    if claimed and parent:
+                        fired.append({"trigger": parent, "attempt": t["attempt"] or 2, "max": t["max_attempts"],
+                                      "reason": t["reason"]})
+                        when = when or t["next_run_at"]
+                    continue
+                due = rtn.latest_due(t["schedule"], row["timezone"], t["next_run_at"], now)
+                following = rtn.next_runs(t["schedule"], row["timezone"], now)[0]
+                claimed = await self.pool.fetchval(
+                    "update routine_triggers set next_run_at = $3 where id = $1 and next_run_at = $2 returning id",
+                    t["id"], t["next_run_at"], following,
+                )
+                if not claimed:
+                    continue
+                if now - due > rtn.CATCH_UP:
+                    local = due.astimezone(rtn.zone(row["timezone"]))
+                    await self._start_run(
+                        row, "schedule", [{"trigger": t, "attempt": 1, "max": t["max_attempts"], "reason": None}], due,
+                        skip_reason=f"Skipped: Crew was not running at {local:%a %d %b %H:%M}.",
+                    )
+                    continue
+                # A new firing of this trigger replaces a follow-up still pending from the last one.
+                await self.pool.execute(
+                    "delete from routine_triggers where parent_id = $1 and kind = 'once'", t["id"]
+                )
+                fired.append({"trigger": t, "attempt": 1, "max": t["max_attempts"], "reason": None})
+                when = when or due
+            await self._sync_routine(routine_id)
+            if not fired:
+                await self._routine_changed(routine_id)
                 continue
-            late = now - due
-            reason = None
-            if late > rtn.CATCH_UP:
-                reason = f"Skipped: Crew was not running at {due.astimezone(rtn.zone(row['timezone'])):%a %d %b %H:%M}."
+            # Follow-ups lead (they carry the attempt count), then cron triggers in their order.
+            fired.sort(key=lambda f: (f["attempt"] == 1, f["trigger"]["position"]))
             try:
-                await self._start_run(row, "schedule", due, skip_reason=reason)
-                started += 0 if reason else 1
+                run = await self._start_run(row, "schedule", fired, when)
+                started += 1 if run["status"] != "skipped" else 0
             except Exception:
-                log.exception("could not start routine %s", row["id"])
+                log.exception("could not start routine %s", routine_id)
         return started

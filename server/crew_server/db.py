@@ -8,8 +8,8 @@ from typing import Any
 
 import asyncpg
 
-SCHEMA_VERSION = 4
-MIGRATIONS = {1: "schema.sql", 2: "schema_v2.sql", 3: "schema_v3.sql", 4: "schema_v4.sql"}
+SCHEMA_VERSION = 5
+MIGRATIONS = {1: "schema.sql", 2: "schema_v2.sql", 3: "schema_v3.sql", 4: "schema_v4.sql", 5: "schema_v5.sql"}
 
 
 async def _init_connection(conn: asyncpg.Connection) -> None:
@@ -133,6 +133,7 @@ def routine_json(row: asyncpg.Record) -> dict[str, Any]:
         "next_run_at": _iso(row["next_run_at"]),
         "last_run_at": _iso(row["last_run_at"]),
         "created_by": row["created_by"],
+        "notes": row["notes"] if "notes" in row.keys() else "",
         "created_at": _iso(row["created_at"]),
         "updated_at": _iso(row["updated_at"]),
     }
@@ -146,6 +147,9 @@ def run_json(row: asyncpg.Record) -> dict[str, Any]:
         "message_id": str(row["message_id"]) if row["message_id"] else None,
         "seq": row["event_seq"] if "event_seq" in row.keys() else None,  # the run's message in the chat timeline
         "trigger": row["trigger"],
+        "triggers": list(row["trigger_names"] or []),
+        "attempt": row["attempt"],
+        "max_attempts": row["max_attempts"],
         "version": row["version"],
         "status": row["status"],
         "summary": row["summary"],
@@ -165,5 +169,6 @@ def version_json(row: asyncpg.Record) -> dict[str, Any]:
         "timezone": row["timezone"],
         "changed_by": row["changed_by"],
         "note": row["note"],
+        "triggers": row["triggers"],
         "created_at": _iso(row["created_at"]),
     }

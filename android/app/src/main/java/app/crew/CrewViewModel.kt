@@ -417,10 +417,22 @@ class CrewViewModel(private val app: Application) {
 
     fun setRoutineEnabled(id: String, on: Boolean) = saveRoutine(id, JSONObject().put("enabled", on))
 
-    fun runRoutine(id: String) = act { client ->
-        client.runRoutine(id)
+    fun runRoutine(id: String, trigger: String? = null) = act { client ->
+        client.runRoutine(id, trigger)
         loadRoutine(client, id)
         _state.update { it.copy(message = "Started: it runs in the routine's chat") }
+    }
+
+    fun saveRoutineNotes(id: String, notes: String) = act { client ->
+        val routine = client.setRoutineNotes(id, notes)
+        _state.update { s -> s.copy(routines = upsertRoutine(s.routines, routine)) }
+        loadRoutine(client, id)
+    }
+
+    /** Drops a follow-up a run asked for ("try again at 19:05"); the trigger's next scheduled time stays. */
+    fun cancelFollowUp(routineId: String, triggerId: String) = act { client ->
+        client.cancelFollowUp(routineId, triggerId)
+        loadRoutine(client, routineId)
     }
 
     fun deleteRoutine(id: String) = act { client ->

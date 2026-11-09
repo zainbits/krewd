@@ -206,7 +206,15 @@ class CrewApi(val baseUrl: String, private val token: String, val route: Route) 
         obj("DELETE", "/api/routines/$id")
     }
 
-    fun runRoutine(id: String): RoutineRun = RoutineRun.from(obj("POST", "/api/routines/$id/run", JSONObject()))
+    fun runRoutine(id: String, trigger: String? = null): RoutineRun =
+        RoutineRun.from(obj("POST", "/api/routines/$id/run", JSONObject().apply { if (trigger != null) put("trigger", trigger) }))
+
+    fun setRoutineNotes(id: String, notes: String): Routine =
+        Routine.from(obj("PUT", "/api/routines/$id/notes", JSONObject().put("notes", notes)))
+
+    fun cancelFollowUp(id: String, triggerId: String) {
+        obj("DELETE", "/api/routines/$id/later/$triggerId")
+    }
 
     fun previewSchedule(schedule: String, timezone: String?): SchedulePreview = try {
         val body = JSONObject().put("schedule", schedule)

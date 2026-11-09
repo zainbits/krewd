@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hmac
 import uuid
+from datetime import datetime
 from contextlib import asynccontextmanager, suppress
 from typing import Any, Literal
 
@@ -63,8 +64,17 @@ class SessionChanges(BaseModel):
     config: dict[str, str] | None = None
 
 
+class TriggerFields(BaseModel):
+    name: str = Field(default="main", min_length=1, max_length=40)
+    schedule: str = Field(min_length=9, max_length=200)  # 5-field cron
+    max_attempts: int = Field(default=1, ge=1, le=10)
+    enabled: bool = True
+
+
 class RoutineFields(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=200)
+    triggers: list[TriggerFields] | None = Field(default=None, max_length=10)  # replaces all triggers, by name
+    notes: str | None = Field(default=None, max_length=8000)
     instructions: str | None = Field(default=None, min_length=1, max_length=20000)
     schedule: str | None = Field(default=None, min_length=9, max_length=200)  # 5-field cron
     timezone: str | None = Field(default=None, max_length=64)
@@ -80,7 +90,21 @@ class RoutineFields(BaseModel):
 class NewRoutine(RoutineFields):
     title: str = Field(min_length=1, max_length=200)
     instructions: str = Field(min_length=1, max_length=20000)
-    schedule: str = Field(min_length=9, max_length=200)
+
+
+class RunRequest(BaseModel):
+    trigger: str | None = Field(default=None, max_length=40)
+
+
+class FollowUp(BaseModel):
+    minutes: float | None = Field(default=None, gt=0, le=720)
+    at: datetime | None = None
+    reason: str = Field(default="", max_length=300)
+
+
+class NotesChange(BaseModel):
+    notes: str = Field(max_length=8000)
+    append: bool = False
 
 
 class SchedulePreview(BaseModel):
@@ -241,6 +265,7 @@ def create_app(hub: Hub, token: str, lifespan_hub: bool = True) -> FastAPI:
         return await hub.create_routine(
             body.title, body.instructions, body.schedule, body.timezone, body.engine, body.mode, body.config,
             bool(body.auto_approve), body.enabled is not False, created_by=body.by, note=body.note,
+            triggers=[t.model_dump() for t in body.triggers] if body.triggers else None, notes=body.notes or "",
         )
 
     @app.post("/api/routines/preview", dependencies=auth)
@@ -256,14 +281,28 @@ def create_app(hub: Hub, token: str, lifespan_hub: bool = True) -> FastAPI:
         changes = body.model_dump(exclude_none=True, exclude={"note", "by"})
         return await hub.update_routine(routine_id, changes, changed_by=body.by, note=body.note)
 
+    @app.put("/api/routines/{routine_id}/notes", dependencies=auth)
+    async def routine_notes(routine_id: uuid.UUID, body: NotesChange) -> dict[str, Any]:
+        return await hub.set_routine_notes(routine_id, body.notes, body.append)
+
+    @app.post("/api/routines/{routine_id}/later", dependencies=auth, status_code=201)
+    async def routine_later(routine_id: uuid.UUID, body: FollowUp) -> dict[str, Any]:
+        """During a run: try this trigger again later, as its next attempt (refused past the trigger's limit)."""
+        return await hub.follow_up(routine_id, body.minutes, body.at, body.reason)
+
+    @app.delete("/api/routines/{routine_id}/later/{trigger_id}", dependencies=auth)
+    async def routine_cancel_later(routine_id: uuid.UUID, trigger_id: uuid.UUID) -> dict[str, Any]:
+        await hub.cancel_follow_up(routine_id, trigger_id)
+        return {"ok": True}
+
     @app.delete("/api/routines/{routine_id}", dependencies=auth)
     async def delete_routine(routine_id: uuid.UUID) -> dict[str, Any]:
         await hub.delete_routine(routine_id)
         return {"ok": True}
 
     @app.post("/api/routines/{routine_id}/run", dependencies=auth, status_code=202)
-    async def run_routine(routine_id: uuid.UUID) -> dict[str, Any]:
-        return await hub.run_routine(routine_id)
+    async def run_routine(routine_id: uuid.UUID, body: RunRequest | None = None) -> dict[str, Any]:
+        return await hub.run_routine(routine_id, body.trigger if body else None)
 
     @app.get("/api/routines/{routine_id}/runs", dependencies=auth)
     async def routine_runs(routine_id: uuid.UUID, limit: int = Query(default=50, le=500)) -> list[dict[str, Any]]:

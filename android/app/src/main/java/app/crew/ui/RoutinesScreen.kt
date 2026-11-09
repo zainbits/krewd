@@ -52,6 +52,8 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -70,6 +72,7 @@ import app.crew.UiState
 import app.crew.constants.ShellDimensions
 import app.crew.data.Routine
 import app.crew.data.RoutineRun
+import app.crew.data.RoutineTrigger
 import app.crew.data.SchedulePreview
 import java.time.Duration
 import java.time.Instant
@@ -79,6 +82,7 @@ import java.time.format.DateTimeFormatter
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
 import org.json.JSONObject
 
 /** The Routines tab: every routine with its schedule, next run and last result. */
@@ -198,6 +202,7 @@ private fun RoutineCard(routine: Routine, chatStatus: String?, engineName: Strin
 fun RoutineScreen(state: UiState, viewModel: CrewViewModel) {
     val routine = state.openRoutine
     var editing by remember { mutableStateOf(false) }
+    var editingNotes by remember { mutableStateOf(false) }
     var confirmDelete by remember { mutableStateOf(false) }
     val bars = WindowInsets.statusBars.union(WindowInsets.displayCutout).asPaddingValues()
     val bottom = WindowInsets.systemBars.asPaddingValues().calculateBottomPadding()
@@ -221,27 +226,39 @@ fun RoutineScreen(state: UiState, viewModel: CrewViewModel) {
                     SectionCard {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                                Text(routine.scheduleText, style = MaterialTheme.typography.titleMedium)
+                                Text(if (routine.enabled) "On" else "Paused", style = MaterialTheme.typography.titleMedium)
                                 Text(
-                                    "${routine.schedule} · ${routine.timezone}",
+                                    routine.timezone + " · " + if (routine.enabled) "next ${whenText(routine.nextRunAt)} (${untilText(routine.nextRunAt)})" else "no scheduled runs until you turn it on",
                                     style = MaterialTheme.typography.labelMedium,
-                                    fontFamily = FontFamily.Monospace,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
                             }
                             Switch(checked = routine.enabled, onCheckedChange = { viewModel.setRoutineEnabled(routine.id, it) }, enabled = online)
                         }
-                        Text(
-                            if (!routine.enabled) "Paused: no scheduled runs until you turn it on."
-                            else "Next: " + routine.nextRuns.take(3).joinToString(" · ") { whenText(it) },
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
+                        Text("Triggers", style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(top = 4.dp))
+                        routine.cronTriggers.forEach { TriggerLine(it, routine.enabled) }
+                        routine.followUps.forEach { follow ->
+                            FollowUpLine(follow, onCancel = { viewModel.cancelFollowUp(routine.id, follow.id) }, enabled = online)
+                        }
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Button(onClick = { viewModel.runRoutine(routine.id) }, enabled = online && !busy) {
-                                Icon(painterResource(R.drawable.ic_play_24), contentDescription = null, modifier = Modifier.size(18.dp))
-                                Spacer(Modifier.width(6.dp))
-                                Text(if (busy) "Running" else "Run now")
+                            var runMenu by remember { mutableStateOf(false) }
+                            Box {
+                                Button(
+                                    onClick = { if (routine.cronTriggers.size > 1) runMenu = true else viewModel.runRoutine(routine.id) },
+                                    enabled = online && !busy,
+                                ) {
+                                    Icon(painterResource(R.drawable.ic_play_24), contentDescription = null, modifier = Modifier.size(18.dp))
+                                    Spacer(Modifier.width(6.dp))
+                                    Text(if (busy) "Running" else "Run now")
+                                }
+                                DropdownMenu(expanded = runMenu, onDismissRequest = { runMenu = false }) {
+                                    routine.cronTriggers.forEach { t ->
+                                        DropdownMenuItem(text = { Text("Run as ${t.name}") }, onClick = {
+                                            runMenu = false
+                                            viewModel.runRoutine(routine.id, t.name)
+                                        })
+                                    }
+                                }
                             }
                             OutlinedButton(onClick = { viewModel.openRoutineChat(routine) }, enabled = routine.sessionId != null) {
                                 Icon(painterResource(R.drawable.ic_chat_24), contentDescription = null, modifier = Modifier.size(18.dp))
@@ -269,6 +286,25 @@ fun RoutineScreen(state: UiState, viewModel: CrewViewModel) {
                             }
                         }
                         SelectionContainer { Text(routine.instructions, style = MaterialTheme.typography.bodyMedium) }
+                    }
+                }
+                item(key = "notes") {
+                    SectionCard {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("Notes · what Crew learned", style = MaterialTheme.typography.labelLarge, modifier = Modifier.weight(1f))
+                            IconButton(onClick = { editingNotes = true }, enabled = online) {
+                                Icon(painterResource(R.drawable.ic_edit_24), contentDescription = "Edit notes")
+                            }
+                        }
+                        if (routine.notes.isBlank()) {
+                            Text(
+                                "Nothing yet. Each run reads these, and Crew adds what it learns (links, where buttons are, exact names). You can edit them too.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        } else {
+                            SelectionContainer { Text(routine.notes, style = MaterialTheme.typography.bodyMedium) }
+                        }
                     }
                 }
                 item(key = "runs-title") {
@@ -306,6 +342,12 @@ fun RoutineScreen(state: UiState, viewModel: CrewViewModel) {
     }
     if (editing && routine != null) {
         RoutineEditor(state, viewModel, existing = routine, onDismiss = { editing = false }, onSaved = { editing = false })
+    }
+    if (editingNotes && routine != null) {
+        NotesEditor(routine.notes, onDismiss = { editingNotes = false }, onSave = {
+            editingNotes = false
+            viewModel.saveRoutineNotes(routine.id, it)
+        })
     }
     if (confirmDelete && routine != null) {
         AlertDialog(
@@ -373,7 +415,12 @@ private fun RunRow(run: RoutineRun, onClick: () -> Unit) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text(whenText(run.scheduledFor ?: run.createdAt), style = MaterialTheme.typography.labelLarge, modifier = Modifier.weight(1f))
                 Text(
-                    (if (run.trigger == "schedule") "Scheduled" else "Run now") + " · v${run.version}",
+                    listOfNotNull(
+                        if (run.trigger == "manual") "Run now" else if (run.attempt > 1) "Retry" else "Scheduled",
+                        run.triggers.filter { it != "main" }.takeIf { it.isNotEmpty() }?.joinToString(", "),
+                        if (run.maxAttempts > 1) "${run.attempt}/${run.maxAttempts}" else null,
+                        "v${run.version}",
+                    ).joinToString(" · "),
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -402,11 +449,148 @@ fun RunChip(status: String) {
     }
 }
 
+@Composable
+private fun TriggerLine(t: RoutineTrigger, routineOn: Boolean) {
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        Icon(
+            painterResource(R.drawable.ic_schedule_24),
+            contentDescription = null,
+            tint = if (t.enabled && routineOn) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline,
+            modifier = Modifier.size(18.dp),
+        )
+        Column(Modifier.weight(1f)) {
+            Text(
+                (if (t.name == "main") "" else "${t.name} · ") + (t.scheduleText ?: t.schedule ?: ""),
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            Text(
+                listOfNotNull(
+                    t.schedule,
+                    if (t.maxAttempts > 1) "up to ${t.maxAttempts} tries" else "1 try",
+                    if (!t.enabled) "off" else if (routineOn) "next ${whenText(t.nextRunAt)}" else null,
+                ).joinToString(" · "),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+/** A retry a run asked for ("try again at 19:05"), with Cancel. */
+@Composable
+private fun FollowUpLine(f: RoutineTrigger, onCancel: () -> Unit, enabled: Boolean) {
+    Surface(shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.tertiaryContainer) {
+        Row(Modifier.padding(start = 12.dp, end = 4.dp, top = 6.dp, bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(
+                    "Retry of ${f.parent ?: f.name} at ${whenText(f.nextRunAt)} · attempt ${f.attempt ?: 2} of ${f.maxAttempts}",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.onTertiaryContainer,
+                )
+                f.reason?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onTertiaryContainer) }
+            }
+            IconButton(onClick = onCancel, enabled = enabled) {
+                Icon(painterResource(R.drawable.ic_close_24), contentDescription = "Cancel retry", tint = MaterialTheme.colorScheme.onTertiaryContainer)
+            }
+        }
+    }
+}
+
+@Composable
+private fun NotesEditor(initial: String, onDismiss: () -> Unit, onSave: (String) -> Unit) {
+    var text by remember { mutableStateOf(initial) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Routine notes") },
+        text = {
+            OutlinedTextField(
+                value = text, onValueChange = { text = it.take(8000) }, minLines = 6, maxLines = 14,
+                modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp),
+                placeholder = { Text("Links, where things are, exact names: anything each run should know.") },
+            )
+        },
+        confirmButton = { TextButton(onClick = { onSave(text) }) { Text("Save") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
+/** A trigger being edited: [key] keeps rows apart while names change. */
+private data class TriggerDraft(val key: Long, val name: String, val schedule: String, val attempts: Int, val enabled: Boolean)
+
+private var nextDraftKey = 1L
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun TriggerDraftCard(
+    draft: TriggerDraft,
+    timezone: String?,
+    viewModel: CrewViewModel,
+    canRemove: Boolean,
+    duplicate: Boolean,
+    onChange: (TriggerDraft) -> Unit,
+    onRemove: () -> Unit,
+    onValidity: (Boolean) -> Unit,
+) {
+    var preview by remember { mutableStateOf<SchedulePreview?>(null) }
+    var presets by remember { mutableStateOf(false) }
+    LaunchedEffect(draft.schedule) {
+        delay(350)
+        preview = withContext(Dispatchers.IO) { runCatching { viewModel.previewSchedule(draft.schedule.trim(), timezone) }.getOrNull() }
+        onValidity(preview?.error != null)
+    }
+    Surface(shape = RoundedCornerShape(16.dp), color = MaterialTheme.colorScheme.surfaceContainer) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(
+                    value = draft.name, onValueChange = { onChange(draft.copy(name = it.take(40))) },
+                    label = { Text("Name") }, singleLine = true, isError = duplicate || draft.name.isBlank(),
+                    modifier = Modifier.weight(1f), shape = RoundedCornerShape(12.dp),
+                    supportingText = if (duplicate) ({ Text("Two triggers have this name") }) else null,
+                )
+                Switch(checked = draft.enabled, onCheckedChange = { onChange(draft.copy(enabled = it)) })
+                if (canRemove) IconButton(onClick = onRemove) { Icon(painterResource(R.drawable.ic_delete_24), contentDescription = "Remove trigger") }
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                OutlinedTextField(
+                    value = draft.schedule, onValueChange = { onChange(draft.copy(schedule = it)) },
+                    label = { Text("minute hour day month weekday") },
+                    singleLine = true, modifier = Modifier.weight(1f), shape = RoundedCornerShape(12.dp),
+                    textStyle = MaterialTheme.typography.bodyLarge.copy(fontFamily = FontFamily.Monospace),
+                    isError = preview?.error != null,
+                    supportingText = {
+                        val p = preview
+                        when {
+                            p == null -> Text("Checking…")
+                            p.error != null -> Text(p.error, color = MaterialTheme.colorScheme.error)
+                            else -> Text("${p.text}. Next: " + p.nextRuns.take(2).joinToString(" · ") { whenText(it) })
+                        }
+                    },
+                )
+                Box {
+                    TextButton(onClick = { presets = true }) { Text("Presets") }
+                    DropdownMenu(expanded = presets, onDismissRequest = { presets = false }) {
+                        PRESETS.forEach { (label, cron) ->
+                            DropdownMenuItem(text = { Text(label) }, onClick = { presets = false; onChange(draft.copy(schedule = cron)) })
+                        }
+                    }
+                }
+            }
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text("Tries per firing", style = MaterialTheme.typography.labelLarge, modifier = Modifier.weight(1f))
+                TextButton(onClick = { onChange(draft.copy(attempts = (draft.attempts - 1).coerceAtLeast(1))) }, enabled = draft.attempts > 1) { Text("−") }
+                Text("${draft.attempts}", style = MaterialTheme.typography.titleMedium)
+                TextButton(onClick = { onChange(draft.copy(attempts = (draft.attempts + 1).coerceAtMost(10))) }, enabled = draft.attempts < 10) { Text("+") }
+            }
+        }
+    }
+}
+
 private val PRESETS = listOf(
     "Weekdays 19:00" to "0 19 * * 1-5",
     "Every day 09:00" to "0 9 * * *",
     "Fridays 18:00" to "0 18 * * 5",
     "Month's last day 19:00" to "0 19 L * *",
+    "Month's last weekday 18:00" to "0 18 LW * *",
     "Every hour" to "0 * * * *",
 )
 
@@ -415,20 +599,25 @@ private val PRESETS = listOf(
 @Composable
 private fun RoutineEditor(state: UiState, viewModel: CrewViewModel, existing: Routine?, onDismiss: () -> Unit, onSaved: (Routine) -> Unit) {
     var title by remember { mutableStateOf(existing?.title ?: "") }
-    var schedule by remember { mutableStateOf(existing?.schedule ?: "0 19 * * 1-5") }
+    val drafts = remember {
+        mutableStateListOf<TriggerDraft>().apply {
+            val start = existing?.cronTriggers.orEmpty()
+            if (start.isEmpty()) add(TriggerDraft(nextDraftKey++, "main", "0 19 * * 1-5", 1, true))
+            else start.forEach { add(TriggerDraft(nextDraftKey++, it.name, it.schedule ?: "", it.maxAttempts, it.enabled)) }
+        }
+    }
+    val badSchedules = remember { mutableStateMapOf<Long, Boolean>() }
     var instructions by remember { mutableStateOf(existing?.instructions ?: "") }
     var engineId by remember { mutableStateOf(existing?.engine ?: state.engines.firstOrNull { it.isDefault }?.id) }
     var autoApprove by remember { mutableStateOf(existing?.autoApprove ?: false) }
     var note by remember { mutableStateOf("") }
-    var preview by remember { mutableStateOf<SchedulePreview?>(null) }
     var saving by remember { mutableStateOf(false) }
     var engineMenu by remember { mutableStateOf(false) }
 
-    LaunchedEffect(schedule) {
-        delay(350)
-        preview = withContext(Dispatchers.IO) { runCatching { viewModel.previewSchedule(schedule.trim(), existing?.timezone) }.getOrNull() }
-    }
-    val valid = title.isNotBlank() && instructions.isNotBlank() && preview?.error == null && schedule.isNotBlank()
+    val names = drafts.map { it.name.trim().lowercase() }
+    val valid = title.isNotBlank() && instructions.isNotBlank() && drafts.isNotEmpty() &&
+        drafts.all { it.schedule.isNotBlank() && it.name.isNotBlank() && badSchedules[it.key] != true } &&
+        names.toSet().size == names.size
 
     Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)) {
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surface) {
@@ -449,7 +638,10 @@ private fun RoutineEditor(state: UiState, viewModel: CrewViewModel, existing: Ro
                             saving = true
                             val fields = JSONObject()
                                 .put("title", title.trim())
-                                .put("schedule", schedule.trim())
+                                .put("triggers", JSONArray(drafts.map {
+                                    JSONObject().put("name", it.name.trim().lowercase()).put("schedule", it.schedule.trim())
+                                        .put("max_attempts", it.attempts).put("enabled", it.enabled)
+                                }))
                                 .put("instructions", instructions.trim())
                                 .put("auto_approve", autoApprove)
                             engineId?.let { fields.put("engine", it) }
@@ -463,29 +655,31 @@ private fun RoutineEditor(state: UiState, viewModel: CrewViewModel, existing: Ro
                     value = title, onValueChange = { title = it }, label = { Text("Title") },
                     singleLine = true, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp),
                 )
-                Text("When", style = MaterialTheme.typography.labelLarge)
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    PRESETS.forEach { (label, cron) ->
-                        FilterChip(selected = schedule.trim() == cron, onClick = { schedule = cron }, label = { Text(label) })
+                Text("Triggers: when it runs", style = MaterialTheme.typography.labelLarge)
+                drafts.forEachIndexed { index, draft ->
+                    TriggerDraftCard(
+                        draft = draft,
+                        timezone = existing?.timezone,
+                        viewModel = viewModel,
+                        canRemove = drafts.size > 1,
+                        duplicate = names.count { it == draft.name.trim().lowercase() } > 1,
+                        onChange = { drafts[index] = it },
+                        onRemove = { badSchedules.remove(draft.key); drafts.removeAt(index) },
+                        onValidity = { bad -> badSchedules[draft.key] = bad },
+                    )
+                }
+                if (drafts.size < 10) {
+                    TextButton(onClick = {
+                        val name = if (drafts.size == 1 && drafts[0].name == "main") "second" else "trigger ${drafts.size + 1}"
+                        drafts.add(TriggerDraft(nextDraftKey++, name, "0 9 * * 1-5", 1, true))
+                    }) {
+                        Icon(painterResource(R.drawable.ic_add_24), contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Add trigger")
                     }
                 }
-                OutlinedTextField(
-                    value = schedule, onValueChange = { schedule = it },
-                    label = { Text("Schedule (minute hour day month weekday)") },
-                    singleLine = true, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp),
-                    textStyle = MaterialTheme.typography.bodyLarge.copy(fontFamily = FontFamily.Monospace),
-                    isError = preview?.error != null,
-                    supportingText = {
-                        val p = preview
-                        when {
-                            p == null -> Text("Checking…")
-                            p.error != null -> Text(p.error, color = MaterialTheme.colorScheme.error)
-                            else -> Text("${p.text}. Next: " + p.nextRuns.take(3).joinToString(" · ") { whenText(it) })
-                        }
-                    },
-                )
                 Text(
-                    "Keep calendar rules in the instructions (“on Fridays fill the week”, “if the month ends mid-week, fill up to the last day”) and run it daily or on weekdays. Each run is told today's date, weekday and the month's last day.",
+                    "Several triggers make one routine with one chat (check-in and check-out). Each run is told which trigger fired, today's date and the month's last day; write a part per trigger in the instructions. More than 1 try lets a run ask Crew to retry later (\u201cthe counter is not at 9 h yet\u201d), never more than that.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

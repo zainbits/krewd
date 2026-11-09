@@ -57,25 +57,32 @@ Where the agent advertises a `compact` slash command (Claude Code and Codex do),
 
 ## Routines
 
-A routine is owner instructions that Crew runs on a schedule. Every run goes into the routine's own chat (made with the routine, made again if deleted), so later runs see earlier ones and the owner's replies, and the chat can be compacted or pinned like any task. The schedule is a 5-field cron expression (`minute hour day-of-month month day-of-week`; `L` for the month's last day) read in the routine's timezone (default `CREW_TIMEZONE`, else the machine's). Calendar rules belong in the instructions: each run's prompt gives the date, weekday and the month's last day.
+A routine is owner instructions that Crew runs on a schedule of one or more named triggers. Every run goes into the routine's own chat (made with the routine, made again if deleted), so later runs see earlier ones and the owner's replies, and the chat can be compacted or pinned like any task. The schedule is a 5-field cron expression (`minute hour day-of-month month day-of-week`; `L` for the month's last day) read in the routine's timezone (default `CREW_TIMEZONE`, else the machine's). Calendar rules belong in the instructions: each run's prompt gives the date, weekday and the month's last day.
 
-The scheduler looks every 15 s. A due routine is claimed by moving `next_run_at` first, so it runs once. A run missed while Crew was down runs once if Crew is back within 6 hours, else it is recorded as `skipped`. A run while the routine's previous run is still queued or running is `skipped` (scheduled) or refused with 409 (run now). Changing the title, instructions or schedule makes a new version; every version is kept.
+Triggers: each has a `name`, a cron `schedule`, `max_attempts` (1 to 10) and `enabled`; related jobs at different times (check-in at 09:55, check-out at 19:00) are one routine with one chat. Triggers due at the same time make one run that names them all. Each run's prompt says which trigger fired and the attempt ("Attempt 1 of 3"), and shows the routine's `notes` (what earlier runs learned; agents add to them with `crew routines notes`).
+
+Follow-ups: during a run, `POST /api/routines/{id}/later` asks Crew to fire the same trigger again later as its next attempt (a `once` trigger with `parent`, `attempt` and `reason`). Crew refuses past the trigger's `max_attempts`, so retries stay bounded; a new follow-up replaces a pending one, the next scheduled firing drops a pending one, and pausing the routine drops them all. While the previous run is still going, a due follow-up waits a minute instead of being skipped.
+
+The scheduler looks every 15 s. A due trigger is claimed by moving its `next_run_at` first, so it fires once. A run missed while Crew was down runs once if Crew is back within 6 hours, else it is recorded as `skipped`. A run while the routine's previous run is still queued or running is `skipped` (scheduled) or refused with 409 (run now). Changing the title, instructions or schedule makes a new version; every version is kept.
 
 | Method and path | Body | Returns |
 |---|---|---|
 | `GET /api/routines` | | routines, enabled first, by next run |
-| `POST /api/routines` | `{title, instructions, schedule, timezone?, engine?, mode?, config?, auto_approve?, enabled?, note?, by?: owner\|agent}` | the routine (201); 422 for a bad schedule or timezone |
+| `POST /api/routines` | `{title, instructions, triggers: [{name, schedule, max_attempts?, enabled?}] (or schedule for one trigger "main"), timezone?, engine?, mode?, config?, auto_approve?, enabled?, notes?, note?, by?: owner\|agent}` | the routine (201); 422 for a bad schedule, timezone or trigger name |
 | `POST /api/routines/preview` | `{schedule, timezone?}` | `{schedule, timezone, schedule_text, next_runs}`; 422 with the reason when it is not valid |
 | `GET /api/routines/{id}` | | the routine with `runs` (last 50) |
-| `PATCH /api/routines/{id}` | any of the create fields | the routine. A new `engine` starts a new chat on the next run (a chat belongs to one agent); the old chat stays. |
+| `PATCH /api/routines/{id}` | any of the create fields; `triggers` replaces the list, matched by name (a trigger whose schedule is unchanged keeps its next time) | the routine. A new `engine` starts a new chat on the next run (a chat belongs to one agent); the old chat stays. |
+| `PUT /api/routines/{id}/notes` | `{notes, append?}` | the routine; notes are at most 8000 characters and not versioned |
+| `POST /api/routines/{id}/later` | `{minutes? \| at?, reason}` | the follow-up trigger (201); 409 outside a run or with no attempts left; 1 minute to 12 hours ahead |
+| `DELETE /api/routines/{id}/later/{trigger_id}` | | `{ok}`: cancels a follow-up |
 | `DELETE /api/routines/{id}` | | `{ok}`; the routine and its runs go, its chat stays as an ordinary task |
-| `POST /api/routines/{id}/run` | | the run (202), on top of the schedule |
+| `POST /api/routines/{id}/run` | `{trigger?}` | the run (202) as that trigger (default: the first), on top of the schedule |
 | `GET /api/routines/{id}/runs?limit=50` | | runs, newest first |
 | `GET /api/routines/{id}/versions` | | versions, newest first: `{version, title, instructions, schedule, timezone, changed_by, note, created_at}` |
 
-Routine: `{id, title, instructions, schedule, schedule_text, timezone, session_id, engine, mode, config, auto_approve, enabled, version, next_run_at, next_runs (next 3), last_run, session_status, created_by, created_at, updated_at}`. Run: `{id, routine_id, session_id, message_id, seq, trigger: schedule|manual, version, status: queued|running|done|error|cancelled|skipped, summary, scheduled_for, started_at, finished_at, created_at}`. `seq` is the run's message in the chat timeline, so the app can scroll to it; `summary` is the agent's last reply (clipped).
+Routine: `{id, title, instructions, triggers: [{id, name, kind: cron|once, schedule, schedule_text, enabled, max_attempts, next_run_at, attempt, reason, parent}], notes, schedule (the first trigger's), schedule_text, timezone, session_id, engine, mode, config, auto_approve, enabled, version, next_run_at (soonest trigger), next_runs (next 3), upcoming: [{at, trigger, attempt}], last_run, session_status, created_by, created_at, updated_at}`. Run: `{id, routine_id, session_id, message_id, seq, trigger: schedule|manual, triggers (names that fired), attempt, max_attempts, version, status: queued|running|done|error|cancelled|skipped, summary, scheduled_for, started_at, finished_at, created_at}`. `seq` is the run's message in the chat timeline, so the app can scroll to it; `summary` is the agent's last reply (clipped).
 
-Agents manage routines with the `crew` command on the Crew machine (`deploy/crew-cli.sh`, linked as `~/.local/bin/crew` by `master.sh setup`): `crew routines list|show|create|update|pause|resume|run|delete|versions` and `crew schedule '<cron>'`. It uses this API with the token in `~/.config/crew/token`. Its help text carries the agents' rules (ask before creating a routine when an existing one may be the one to update).
+Agents manage routines with the `crew` command on the Crew machine (`deploy/crew-cli.sh`, linked as `~/.local/bin/crew` by `master.sh setup`): `crew routines list|show|create|update|pause|resume|run|later|notes|delete|versions` and `crew schedule '<cron>'`. It uses this API with the token in `~/.config/crew/token`. Its help text carries the agents' rules (ask before creating a routine when an existing one may be the one to update).
 
 ## The agents' browser
 
