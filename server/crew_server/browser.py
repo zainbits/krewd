@@ -30,12 +30,14 @@ import websockets
 
 log = logging.getLogger("crew.browser")
 
-# Full 1080p in both, so text stays sharp when the phone zooms in. Standard: 30 fps (every other frame of
-# Brave's 60) and lighter JPEG; high: every frame and near-lossless JPEG, for when detail matters.
+# Full 1080p in both, so text stays sharp when the phone zooms in. Standard: lighter JPEG, at most 30 fps
+# per viewer; high: near-lossless JPEG at Brave's full 60. Brave always sends every frame (everyNthFrame 2
+# would drop the only frame a still page paints); the cap is applied per viewer, newest frame first.
 SCREENCAST = {
-    "standard": {"format": "jpeg", "quality": 50, "maxWidth": 1920, "maxHeight": 1920, "everyNthFrame": 2},
+    "standard": {"format": "jpeg", "quality": 50, "maxWidth": 1920, "maxHeight": 1920, "everyNthFrame": 1},
     "high": {"format": "jpeg", "quality": 85, "maxWidth": 1920, "maxHeight": 1920, "everyNthFrame": 1},
 }
+MAX_FPS = {"standard": 30, "high": 60}
 KEEPALIVE_SECONDS = 10  # resend the last frame so idle streams stay open and dead ones are noticed
 IDLE_CLOSE_SECONDS = 30
 OWNER_GRACE_SECONDS = 4  # a tab the owner just used is not taken for an agent's
@@ -326,7 +328,10 @@ class Browser:
                     break
                 if link.frame:
                     last = link.frame.number
+                    sent = time.monotonic()
                     yield link.frame
+                    # The cap: wait out the rest of the frame interval; the newest frame goes next.
+                    await asyncio.sleep(max(0.0, 1 / MAX_FPS[quality] - (time.monotonic() - sent)))
         finally:
             link.viewers -= 1
             if link.viewers == 0 and not link.closed:
