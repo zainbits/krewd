@@ -1,6 +1,7 @@
 package app.crew.ui
 
 import androidx.compose.animation.animateContentSize
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -13,9 +14,11 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.asPaddingValues
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.only
@@ -23,39 +26,43 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.union
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.InputChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
 import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.AnnotatedString
@@ -68,7 +75,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.material3.InputChip
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.crew.Connection
 import app.crew.CrewViewModel
 import app.crew.R
@@ -476,7 +483,7 @@ private fun ChatRow(item: ChatItem, viewModel: CrewViewModel, busy: Boolean) {
             else -> UserRow(item, busy, onResend = { item.clientId?.let(viewModel::resend) })
         }
         is TextItem -> if (item.isThought) ThoughtRow(item.text) else SelectionContainer { Markdown(item.text) }
-        is ToolItem -> ToolRow(item)
+        is ToolItem -> ToolRow(item, viewModel::toolImage)
         is PlanItem -> SectionCard {
             Text("Plan", style = MaterialTheme.typography.labelLarge)
             item.entries.forEach { entry ->
@@ -676,7 +683,7 @@ private fun ThoughtRow(text: String) {
 }
 
 @Composable
-private fun ToolRow(item: ToolItem) {
+private fun ToolRow(item: ToolItem, loadImage: suspend (String) -> ImageBitmap?) {
     var open by remember { mutableStateOf(false) }
     Surface(
         shape = RoundedCornerShape(14.dp),
@@ -698,6 +705,45 @@ private fun ToolRow(item: ToolItem) {
             if (open) {
                 item.input?.let { MonoBlock(it, maxLines = 30) }
                 item.output?.let { MonoBlock(it, maxLines = 60) }
+                item.images.forEach { ToolImage(it, loadImage) }
+            }
+        }
+    }
+}
+
+/** A picture from a tool result, full card width. */
+@Composable
+private fun ToolImage(name: String, load: suspend (String) -> ImageBitmap?) {
+    var failed by remember(name) { mutableStateOf<String?>(null) }
+    val bitmap by produceState<ImageBitmap?>(null, name) {
+        value = try {
+            load(name) ?: run { failed = "Not connected to Crew"; null }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            failed = e.message ?: "Could not load the image"
+            null
+        }
+    }
+    val shape = RoundedCornerShape(10.dp)
+    val image = bitmap
+    if (image != null) {
+        Image(
+            image,
+            contentDescription = "Image from the tool result",
+            contentScale = ContentScale.FillWidth,
+            modifier = Modifier.fillMaxWidth().aspectRatio(image.width.toFloat() / image.height.coerceAtLeast(1)).clip(shape),
+        )
+    } else {
+        Box(
+            Modifier.fillMaxWidth().height(96.dp).clip(shape).background(MaterialTheme.colorScheme.surfaceContainerHigh),
+            contentAlignment = Alignment.Center,
+        ) {
+            val error = failed
+            if (error != null) {
+                Text(error, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            } else {
+                CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
             }
         }
     }

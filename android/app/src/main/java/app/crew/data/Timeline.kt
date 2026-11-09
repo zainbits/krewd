@@ -48,6 +48,8 @@ data class ToolItem(
     val status: String?,
     val input: String?,
     val output: String?,
+    /** Images in the tool result (a screenshot the agent read), as names for GET /api/tool-images. */
+    val images: List<String> = emptyList(),
 ) : ChatItem
 
 data class PlanEntry(val content: String, val status: String)
@@ -132,6 +134,7 @@ class Timeline {
                         status = p.optStringOrNull("status"),
                         input = p.optStringOrNull("input"),
                         output = p.optStringOrNull("output"),
+                        images = p.optJSONArray("images").strings(),
                     ),
                 )
             }

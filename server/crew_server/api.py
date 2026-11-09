@@ -356,6 +356,14 @@ def create_app(hub: Hub, token: str, lifespan_hub: bool = True) -> FastAPI:
         info = shared_files.describe(real)
         return FileResponse(real, media_type=info["mime"], filename=info["name"])
 
+    @app.get("/api/tool-images/{name}", dependencies=auth)
+    async def tool_image(name: str) -> FileResponse:
+        """An image from a tool result (a screenshot the agent read), saved by Crew when it arrived."""
+        path = hub.tool_images.path(name)
+        if path is None:
+            raise HTTPException(404, "no such image")
+        return FileResponse(path, media_type=hub.tool_images.mime(name), headers={"Cache-Control": "private, max-age=31536000, immutable"})
+
     @app.get("/api/approvals", dependencies=auth)
     async def approvals(status: str | None = "pending") -> list[dict[str, Any]]:
         return await hub.approvals(status or None)

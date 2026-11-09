@@ -36,7 +36,7 @@ Event: `{seq, session_id, kind, payload, created_at}`. Kinds:
 - `message` message object, whenever its state changes (delivered or cancelled)
 - `browser` `{id, url, title}`: the agent started using a tab
 - `text` `{message_id, role: assistant|thought, text}`: append to the row with the same `message_id`
-- `tool` `{tool_call_id, title, kind, status, input, output, paths}`: replace the row with the same id
+- `tool` `{tool_call_id, title, kind, status, input, output, paths, images}`: replace the row with the same id
 - `plan` `{entries: [{content, status}]}`
 - `approval` approval object (pending, then again when decided)
 - `turn_start` `{message_id}`, `turn_end` `{stop_reason, usage, preview, files?}` (`preview`: first line of the reply; `files`: see Files from the agent), `error` `{message}`
@@ -123,3 +123,7 @@ Files are saved as `~/.crew/common/attachments/<first 8 characters of the sessio
 An agent hands a file back by saving it in a shared folder (`CREW_SHARE_DIRS`, colon-separated; default `$CREW_WORKDIR/outputs`) and writing its path in the reply. At the end of the turn, every absolute or `~` path in the reply that names a regular file inside a shared folder is listed on `turn_end` as `files: [{path, name, size, mime}]` (at most 10).
 
 `GET /api/files?path=<path>` returns the file as a download. Only regular files inside the shared folders are served, after resolving symlinks and `..`; anything else is 404.
+
+## Images in tool results
+
+When a tool result carries an image (an ACP image content block, or an `image` block with base64 `source` in the raw output, as Claude Code's Read returns for a screenshot), Crew saves it once as `~/.crew/common/tool-images/<first 8 characters of the session id>-<content hash>.<png|jpg|gif|webp>` and lists the names on the `tool` event as `images: [name, ...]`. The base64 never appears in `output`. `GET /api/tool-images/{name}` returns the image; any other name is 404.

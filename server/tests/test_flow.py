@@ -394,6 +394,29 @@ async def test_files_the_agent_names_are_handed_back(hub):
             assert (await client.get("/api/files", params={"path": outside}, headers=headers)).status_code == 404
 
 
+async def test_images_in_tool_results_become_files_not_text(hub):
+    session = await hub.create_session("screenshot please")
+    sid = uuid.UUID(session["id"])
+    await wait_for(hub, sid, "turn_end")
+    tools = [e["payload"] for e in await hub.events(0, sid) if e["kind"] == "tool"]
+    final = tools[-1]
+    assert final["status"] == "completed"
+    assert len(final["images"]) == 1  # the same picture from raw output and content is kept once
+    assert all("iVBOR" not in (t.get("output") or "") for t in tools)
+    name = final["images"][0]
+    assert name.startswith(str(sid)[:8]) and name.endswith(".png")
+    app = create_app(hub, TOKEN, lifespan_hub=False)
+    transport = httpx.ASGITransport(app=app)
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        assert (await client.get(f"/api/tool-images/{name}")).status_code == 401
+        got = await client.get(f"/api/tool-images/{name}", headers=headers)
+        assert got.status_code == 200 and got.headers["content-type"] == "image/png"
+        assert got.content.startswith(b"\x89PNG")
+        for bad in ("../token", "x.png", name.replace(".png", ".txt")):
+            assert (await client.get(f"/api/tool-images/{bad}", headers=headers)).status_code == 404
+
+
 async def test_a_message_to_an_idle_task_is_queued_not_steered(hub):
     session = await hub.create_session("hi")
     sid = uuid.UUID(session["id"])

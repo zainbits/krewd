@@ -106,6 +106,14 @@ async def run_prompt(request_id: int, sid: str, text: str, params: dict) -> None
                 "content": [{"type": "content", "content": {"type": "text", "text": "hi" if allowed else "denied"}}],
             },
         )
+    if "screenshot" in text:  # a Read of an image file: base64 in raw output (Claude) and in content (ACP)
+        png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+        update(sid, {"sessionUpdate": "tool_call", "toolCallId": "r1", "title": "Read /tmp/shot.png", "kind": "read",
+                     "status": "pending", "rawInput": {"file_path": "/tmp/shot.png"}})
+        update(sid, {"sessionUpdate": "tool_call_update", "toolCallId": "r1", "status": "completed",
+                     "rawOutput": [{"type": "image", "source": {"type": "base64", "data": png, "media_type": "image/png"}}]})
+        update(sid, {"sessionUpdate": "tool_call_update", "toolCallId": "r1",
+                     "content": [{"type": "content", "content": {"type": "image", "data": png, "mimeType": "image/png"}}]})
     if "slow" in text:
         for _ in range(200):
             if sid in cancelled:

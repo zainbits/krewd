@@ -25,6 +25,7 @@ from . import db
 from . import files as shared_files
 from . import routines as rtn
 from .acp import AcpError, AcpProcess, MethodNotFound
+from .tool_images import ToolImages, is_empty, split as split_images
 from .attachments import Attachments, UnknownUpload, prompt_blocks
 from .config import Settings
 
@@ -182,6 +183,7 @@ class Hub:
         self.closing = False
         self.engine_info: dict[str, dict[str, Any]] = {}
         self.attachments = Attachments(settings.data_dir / "common" / "attachments", settings.max_upload_mb * 1024 * 1024)
+        self.tool_images = ToolImages(settings.data_dir / "common" / "tool-images")
         self.probing: set[str] = set()
         self.tab_owner: dict[str, uuid.UUID] = {}  # browser tab id -> session that last used it
         self.last_sent: dict[uuid.UUID, dict[str, Any]] = {}  # last session state emitted, to skip repeats
@@ -193,6 +195,7 @@ class Hub:
     async def start(self) -> None:
         await db.migrate(self.pool)
         self.attachments.prepare()
+        self.tool_images.prepare()
         self.last_seq = await self.pool.fetchval("select coalesce(max(seq), 0) from events")
         for row in await self.pool.fetch("select * from engines"):
             self.engine_info[row["id"]] = {
@@ -1143,13 +1146,19 @@ class Hub:
                 tool[key] = update[key]
         if update.get("rawInput"):
             tool["input"] = _clip(update["rawInput"])
-        text, paths = _content_text(update.get("content"))
+        content, images = split_images(update.get("content"))
+        raw, raw_images = split_images(update.get("rawOutput"))
+        text, paths = _content_text(content)
         if text:
             tool["output"] = _clip(text)
-        elif update.get("rawOutput") and "output" not in tool:
-            tool["output"] = _clip(update["rawOutput"])
+        elif not is_empty(raw) and "output" not in tool:
+            tool["output"] = _clip(raw)
         if paths:
             tool["paths"] = paths
+        # Images come back as base64 (content blocks, or raw output): saved as files, never shown as text.
+        names = self.tool_images.save(rt.id, images or raw_images)
+        if names:
+            tool["images"] = list(dict.fromkeys(tool.get("images", []) + names))
         if tool != before:
             await self.emit(rt.id, "tool", dict(tool))
 

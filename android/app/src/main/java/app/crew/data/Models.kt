@@ -337,6 +337,9 @@ data class ServerState(val lastSeq: Long, val engines: List<EngineInfo>, val wor
 fun JSONArray?.objects(): List<JSONObject> =
     if (this == null) emptyList() else (0 until length()).mapNotNull { optJSONObject(it) }
 
+fun JSONArray?.strings(): List<String> =
+    if (this == null) emptyList() else (0 until length()).mapNotNull { optString(it).takeIf { s -> s.isNotEmpty() } }
+
 fun JSONObject.optStringOrNull(name: String): String? =
     if (isNull(name) || !has(name)) null else optString(name).takeIf { it.isNotEmpty() }
 

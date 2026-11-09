@@ -293,6 +293,21 @@ class CrewApi(val baseUrl: String, private val token: String, val route: Route) 
         }
     }
 
+    /** An image from a tool result (GET /api/tool-images/{name}). */
+    fun toolImage(name: String): ByteArray {
+        val conn = URL("$baseUrl/api/tool-images/" + java.net.URLEncoder.encode(name, "UTF-8")).openConnection() as HttpURLConnection
+        try {
+            conn.connectTimeout = Timing.CONNECT_TIMEOUT_MS
+            conn.readTimeout = 60_000
+            conn.setRequestProperty("Authorization", "Bearer $token")
+            val code = conn.responseCode
+            if (code !in 200..299) throw ApiException(code, if (code == 404) "The image is no longer there" else "Image failed (HTTP $code)")
+            return conn.inputStream.use { it.readBytes() }
+        } finally {
+            conn.disconnect()
+        }
+    }
+
     internal fun rawCall(method: String, path: String, body: JSONObject? = null): String = call(method, path, body)
 
     private fun obj(method: String, path: String, body: JSONObject? = null) =

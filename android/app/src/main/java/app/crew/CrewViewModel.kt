@@ -5,10 +5,11 @@ import android.content.ContentValues
 import android.content.Intent
 import android.net.Uri
 import android.provider.MediaStore
-import app.crew.data.Attachment
+import androidx.compose.ui.graphics.asImageBitmap
 import app.crew.constants.Timing
 import app.crew.data.ApiException
 import app.crew.data.Approval
+import app.crew.data.Attachment
 import app.crew.data.BrowserFrame
 import app.crew.data.BrowserTab
 import app.crew.data.BrowserTabs
@@ -745,6 +746,28 @@ class CrewViewModel(private val app: Application) {
         pushLive()
         notifier.clear(session.id)
         act { it.deleteSession(session.id) }
+    }
+
+    // Tool-result images, decoded at most about phone width; a handful stay in memory.
+    private val toolImages = object : android.util.LruCache<String, androidx.compose.ui.graphics.ImageBitmap>(24 * 1024 * 1024) {
+        override fun sizeOf(key: String, value: androidx.compose.ui.graphics.ImageBitmap) = value.width * value.height * 4
+    }
+
+    /** An image from a tool result, or null when not connected. Throws if the server cannot give it. */
+    suspend fun toolImage(name: String): androidx.compose.ui.graphics.ImageBitmap? {
+        toolImages.get(name)?.let { return it }
+        val client = api ?: return null
+        val bitmap = withContext(Dispatchers.IO) {
+            val bytes = client.toolImage(name)
+            val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+            var sample = 1
+            while (bounds.outWidth / (sample * 2) >= 1600) sample *= 2
+            val opts = android.graphics.BitmapFactory.Options().apply { inSampleSize = sample }
+            android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)?.asImageBitmap() ?: error("Not an image")
+        }
+        toolImages.put(name, bitmap)
+        return bitmap
     }
 
     private val _downloading = MutableStateFlow<Set<String>>(emptySet())
