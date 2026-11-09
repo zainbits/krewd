@@ -14,6 +14,7 @@ import app.crew.data.browserTabs
 import app.crew.data.Approval
 import app.crew.data.ChatItem
 import app.crew.data.ConfigOption
+import app.crew.data.PendingFile
 import app.crew.data.ConnectionSettings
 import app.crew.data.CrewApi
 import app.crew.data.EngineInfo
@@ -54,7 +55,10 @@ data class UiState(
     val browser: BrowserTabs? = null,
     val openTabId: String? = null,
     val streamError: String? = null,
+    /** Files picked for the next message, per draft: "new" for the new-task card, else a session id. */
+    val drafts: Map<String, List<PendingFile>> = emptyMap(),
 ) {
+    fun draft(key: String): List<PendingFile> = drafts[key].orEmpty()
     val openTab: BrowserTab? get() = browser?.tabs?.firstOrNull { it.id == openTabId }
     val openSession: SessionInfo? get() = sessions.firstOrNull { it.id == openSessionId }
 }
@@ -63,6 +67,8 @@ data class UiState(
  * One long-poll loop keeps sessions, approvals and the open task's chat in sync with the server.
  * Every change on the server is a durable event, so reconnecting just continues from the last seq.
  */
+const val NEW_DRAFT = "new"
+
 class CrewViewModel(application: Application) : AndroidViewModel(application) {
     private val prefs = Prefs(application)
     private val notifier = Notifier(application)
@@ -227,15 +233,62 @@ class CrewViewModel(application: Application) : AndroidViewModel(application) {
     // actions
 
     fun newTask(text: String, autoApprove: Boolean, engine: String?, config: Map<String, String>) = act { client ->
-        val session = client.createSession(text, autoApprove, engine, config)
+        val files = readyUploads(NEW_DRAFT)
+        val session = client.createSession(text, autoApprove, engine, config, files)
+        clearDraft(NEW_DRAFT)
         _state.update { it.copy(sessions = upsert(it.sessions, session)) }
         launchMain { openSession(session.id) }
     }
 
     fun send(text: String) {
         val id = _state.value.openSessionId ?: return
-        act { it.send(id, text) }
+        act { client ->
+            client.send(id, text, readyUploads(id))
+            clearDraft(id)
+        }
     }
+
+    // attachments: each picked file uploads at once; the message carries the upload ids
+
+    private var nextLocalId = 1L
+
+    fun attach(draft: String, uris: List<android.net.Uri>) {
+        val client = api ?: run { _state.update { it.copy(message = "Not connected to Crew") }; return }
+        val resolver = getApplication<Application>().contentResolver
+        uris.forEach { uri ->
+            val localId = synchronized(this) { nextLocalId++ }
+            var name = "file"
+            var size: Long? = null
+            resolver.query(uri, null, null, null, null)?.use { c ->
+                if (c.moveToFirst()) {
+                    c.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME).takeIf { it >= 0 }?.let { c.getString(it) }?.let { name = it }
+                    c.getColumnIndex(android.provider.OpenableColumns.SIZE).takeIf { it >= 0 && !c.isNull(it) }?.let { size = c.getLong(it) }
+                }
+            }
+            updateDraft(draft) { it + PendingFile(localId, name, size) }
+            viewModelScope.launch(Dispatchers.IO) {
+                val result = runCatching {
+                    val input = resolver.openInputStream(uri) ?: error("Cannot read $name")
+                    client.upload(name, resolver.getType(uri), input)
+                }
+                updateDraft(draft) { list ->
+                    list.map { f ->
+                        if (f.localId != localId) f
+                        else result.fold({ id -> f.copy(uploadId = id) }, { e -> f.copy(error = e.message ?: "Upload failed") })
+                    }
+                }
+            }
+        }
+    }
+
+    fun removeAttachment(draft: String, localId: Long) = updateDraft(draft) { list -> list.filterNot { it.localId == localId } }
+
+    private fun readyUploads(draft: String) = _state.value.draft(draft).mapNotNull { it.uploadId }
+
+    private fun clearDraft(draft: String) = updateDraft(draft) { emptyList() }
+
+    private fun updateDraft(draft: String, change: (List<PendingFile>) -> List<PendingFile>) =
+        _state.update { s -> s.copy(drafts = s.drafts + (draft to change(s.draft(draft)))) }
 
     fun stop() {
         val id = _state.value.openSessionId ?: return

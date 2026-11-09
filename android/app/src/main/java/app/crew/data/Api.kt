@@ -73,8 +73,9 @@ class CrewApi(val baseUrl: String, private val token: String, val route: Route) 
 
     fun sessions(): List<SessionInfo> = arr("GET", "/api/sessions").objects().map(SessionInfo::from)
 
-    fun createSession(text: String, autoApprove: Boolean, engine: String?, config: Map<String, String>): SessionInfo {
+    fun createSession(text: String, autoApprove: Boolean, engine: String?, config: Map<String, String>, attachments: List<String> = emptyList()): SessionInfo {
         val body = JSONObject().put("text", text).put("auto_approve", autoApprove)
+        if (attachments.isNotEmpty()) body.put("attachments", JSONArray(attachments))
         if (engine != null) body.put("engine", engine)
         if (config.isNotEmpty()) body.put("config", JSONObject(config))
         return SessionInfo.from(obj("POST", "/api/sessions", body))
@@ -83,8 +84,10 @@ class CrewApi(val baseUrl: String, private val token: String, val route: Route) 
     fun updateSession(id: String, changes: JSONObject): SessionInfo =
         SessionInfo.from(obj("PATCH", "/api/sessions/$id", changes))
 
-    fun send(id: String, text: String) {
-        obj("POST", "/api/sessions/$id/messages", JSONObject().put("text", text))
+    fun send(id: String, text: String, attachments: List<String> = emptyList()) {
+        val body = JSONObject().put("text", text)
+        if (attachments.isNotEmpty()) body.put("attachments", JSONArray(attachments))
+        obj("POST", "/api/sessions/$id/messages", body)
     }
 
     fun cancel(id: String) {
@@ -114,6 +117,31 @@ class CrewApi(val baseUrl: String, private val token: String, val route: Route) 
         conn.setRequestProperty("Authorization", "Bearer $token")
         conn.setRequestProperty("Accept", "multipart/x-mixed-replace")
         return FrameStream(conn)
+    }
+
+    /** Streams a file to the server (no size limit in memory). Returns the upload id. */
+    fun upload(name: String, mime: String?, input: java.io.InputStream): String {
+        val conn = URL("$baseUrl/api/uploads?name=" + java.net.URLEncoder.encode(name, "UTF-8").replace("+", "%20"))
+            .openConnection() as HttpURLConnection
+        try {
+            conn.requestMethod = "POST"
+            conn.connectTimeout = Timing.CONNECT_TIMEOUT_MS
+            conn.readTimeout = 120_000
+            conn.doOutput = true
+            conn.setChunkedStreamingMode(64 * 1024)
+            conn.setRequestProperty("Authorization", "Bearer $token")
+            conn.setRequestProperty("Content-Type", mime ?: "application/octet-stream")
+            conn.outputStream.use { out -> input.use { it.copyTo(out, 64 * 1024) } }
+            val code = conn.responseCode
+            val text = (if (code in 200..299) conn.inputStream else conn.errorStream)?.bufferedReader()?.use { it.readText() }.orEmpty()
+            if (code !in 200..299) {
+                val detail = runCatching { JSONObject(text).optString("detail") }.getOrNull()
+                throw ApiException(code, detail?.takeIf { it.isNotBlank() } ?: "Upload failed (HTTP $code)")
+            }
+            return JSONObject(text).getString("id")
+        } finally {
+            conn.disconnect()
+        }
     }
 
     internal fun rawCall(method: String, path: String, body: JSONObject? = null): String = call(method, path, body)

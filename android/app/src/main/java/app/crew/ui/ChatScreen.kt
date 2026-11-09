@@ -70,6 +70,7 @@ import app.crew.constants.ShellDimensions
 import app.crew.data.ApprovalItem
 import app.crew.data.ChatItem
 import app.crew.data.NoticeItem
+import app.crew.data.PendingFile
 import app.crew.data.PlanItem
 import app.crew.data.TextItem
 import app.crew.data.ToolItem
@@ -137,7 +138,12 @@ fun ChatScreen(state: UiState, viewModel: CrewViewModel) {
                     modifier = Modifier.padding(start = 4.dp, bottom = 4.dp),
                 )
             }
-            Composer(busy = busy, onSend = viewModel::send, onStop = viewModel::stop)
+            if (session != null) {
+                val files = state.draft(session.id)
+                PendingFiles(files, onRemove = { viewModel.removeAttachment(session.id, it) }, modifier = Modifier.padding(start = 4.dp, bottom = 4.dp))
+                val pick = rememberFilePicker { viewModel.attach(session.id, it) }
+                Composer(busy = busy, files = files, onSend = viewModel::send, onStop = viewModel::stop, onAttach = pick)
+            }
         }
     }
 }
@@ -210,8 +216,17 @@ private fun ChatTopBar(state: UiState, viewModel: CrewViewModel) {
 }
 
 @Composable
-private fun Composer(busy: Boolean, onSend: (String) -> Unit, onStop: () -> Unit, modifier: Modifier = Modifier) {
+private fun Composer(
+    busy: Boolean,
+    files: List<PendingFile>,
+    onSend: (String) -> Unit,
+    onStop: () -> Unit,
+    onAttach: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
     var text by rememberSaveable { mutableStateOf("") }
+    val uploading = files.any { it.uploading }
+    val ready = files.any { it.uploadId != null }
     Surface(
         modifier = modifier.fillMaxWidth(),
         shape = RoundedCornerShape(28.dp),
@@ -220,6 +235,9 @@ private fun Composer(busy: Boolean, onSend: (String) -> Unit, onStop: () -> Unit
         shadowElevation = 2.dp,
     ) {
         Row(verticalAlignment = Alignment.Bottom, modifier = Modifier.padding(start = 4.dp, end = 6.dp, top = 4.dp, bottom = 4.dp)) {
+            IconButton(onClick = onAttach) {
+                Icon(painterResource(R.drawable.ic_attach_24), contentDescription = "Attach files")
+            }
             TextField(
                 value = text,
                 onValueChange = { text = it },
@@ -233,7 +251,7 @@ private fun Composer(busy: Boolean, onSend: (String) -> Unit, onStop: () -> Unit
                     unfocusedIndicatorColor = Color.Transparent,
                 ),
             )
-            if (busy && text.isBlank()) {
+            if (busy && text.isBlank() && files.isEmpty()) {
                 IconButton(onClick = onStop) {
                     Icon(painterResource(R.drawable.ic_stop_24), contentDescription = "Stop")
                 }
@@ -243,9 +261,9 @@ private fun Composer(busy: Boolean, onSend: (String) -> Unit, onStop: () -> Unit
                         onSend(text.trim())
                         text = ""
                     },
-                    enabled = text.isNotBlank(),
+                    enabled = (text.isNotBlank() || ready) && !uploading,
                 ) {
-                    Icon(painterResource(R.drawable.ic_send_24), contentDescription = "Send")
+                    Icon(painterResource(R.drawable.ic_send_24), contentDescription = if (uploading) "Uploading" else "Send")
                 }
             }
         }
@@ -261,8 +279,11 @@ private fun ChatRow(item: ChatItem, viewModel: CrewViewModel) {
                 color = MaterialTheme.colorScheme.primaryContainer,
                 modifier = Modifier.widthIn(max = 320.dp),
             ) {
-                SelectionContainer {
-                    Text(item.text, modifier = Modifier.padding(12.dp), color = MaterialTheme.colorScheme.onPrimaryContainer)
+                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    if (item.text.isNotBlank()) {
+                        SelectionContainer { Text(item.text, color = MaterialTheme.colorScheme.onPrimaryContainer) }
+                    }
+                    if (item.attachments.isNotEmpty()) SentFiles(item.attachments, MaterialTheme.colorScheme.onPrimaryContainer)
                 }
             }
         }

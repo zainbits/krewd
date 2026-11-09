@@ -5,6 +5,28 @@ import org.json.JSONObject
 
 data class ModeInfo(val id: String, val name: String, val description: String)
 
+/** A file attached to a message, as stored on the server. */
+data class Attachment(val name: String, val path: String, val size: Long, val mime: String) {
+    companion object {
+        fun list(a: JSONArray?): List<Attachment> = a.objects().map {
+            Attachment(it.optString("name"), it.optString("path"), it.optLong("size"), it.optString("mime"))
+        }
+    }
+}
+
+/** A file picked on the phone for the next message: uploading, ready (has an upload id) or failed. */
+data class PendingFile(val localId: Long, val name: String, val size: Long?, val uploadId: String? = null, val error: String? = null) {
+    val uploading: Boolean get() = uploadId == null && error == null
+}
+
+fun humanSize(bytes: Long?): String = when {
+    bytes == null -> ""
+    bytes < 1024 -> "$bytes B"
+    bytes < 1024 * 1024 -> "${bytes / 1024} KB"
+    bytes < 1024L * 1024 * 1024 -> "%.1f MB".format(bytes / (1024.0 * 1024))
+    else -> "%.1f GB".format(bytes / (1024.0 * 1024 * 1024))
+}
+
 /** The agent's own name and version, from ACP agentInfo. */
 data class AgentInfo(val name: String, val title: String?, val version: String?) {
     val label: String get() = listOfNotNull(title ?: name, version).joinToString(" ")

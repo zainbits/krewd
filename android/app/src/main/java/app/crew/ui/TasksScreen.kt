@@ -17,6 +17,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
@@ -37,6 +38,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import app.crew.Connection
 import app.crew.CrewViewModel
+import app.crew.NEW_DRAFT
 import app.crew.R
 import app.crew.UiState
 import app.crew.constants.ShellDimensions
@@ -77,6 +79,8 @@ private fun NewTaskCard(state: UiState, viewModel: CrewViewModel, onOpenSettings
     // Picks that differ from the engine's defaults; only these are sent.
     var picks by remember(engineId) { mutableStateOf(mapOf<String, String>()) }
     val online = state.connection is Connection.Online
+    val files = state.draft(NEW_DRAFT)
+    val pick = rememberFilePicker { viewModel.attach(NEW_DRAFT, it) }
     val engine = state.engines.firstOrNull { it.id == engineId } ?: state.engines.firstOrNull { it.isDefault } ?: state.engines.firstOrNull()
     val options = ConfigOption.ordered(viewModel.engineConfig(engine?.id))
     LaunchedEffect(online, engine?.id, options.isEmpty()) {
@@ -103,6 +107,7 @@ private fun NewTaskCard(state: UiState, viewModel: CrewViewModel, onOpenSettings
             maxLines = 8,
             shape = RoundedCornerShape(16.dp),
         )
+        PendingFiles(files, onRemove = { viewModel.removeAttachment(NEW_DRAFT, it) })
         if (engine != null) {
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 InfoChip(
@@ -135,13 +140,16 @@ private fun NewTaskCard(state: UiState, viewModel: CrewViewModel, onOpenSettings
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
+            IconButton(onClick = pick, enabled = online) {
+                Icon(painterResource(R.drawable.ic_attach_24), contentDescription = "Attach files")
+            }
             FilledIconButton(
                 onClick = {
                     viewModel.newTask(text.trim(), autoApprove, engine?.id, picks)
                     text = ""
                     picks = emptyMap()
                 },
-                enabled = online && text.isNotBlank(),
+                enabled = online && (text.isNotBlank() || files.any { it.uploadId != null }) && files.none { it.uploading },
             ) {
                 Icon(painterResource(R.drawable.ic_send_24), contentDescription = "Start task")
             }

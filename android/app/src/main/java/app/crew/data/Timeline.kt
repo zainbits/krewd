@@ -5,7 +5,7 @@ sealed interface ChatItem {
     val key: String
 }
 
-data class UserItem(override val key: String, val text: String) : ChatItem
+data class UserItem(override val key: String, val text: String, val attachments: List<Attachment> = emptyList()) : ChatItem
 
 data class TextItem(override val key: String, val role: String, val text: String) : ChatItem {
     val isThought: Boolean get() = role == "thought"
@@ -46,7 +46,7 @@ class Timeline {
         lastSeq = event.seq
         val p = event.payload
         when (event.kind) {
-            "user" -> add(UserItem("user-${event.seq}", p.optString("text")))
+            "user" -> add(UserItem("user-${event.seq}", p.optString("text"), Attachment.list(p.optJSONArray("attachments"))))
             "text" -> {
                 val key = "text-" + p.optString("message_id", event.seq.toString())
                 val existing = index[key]?.let { items[it] as? TextItem }

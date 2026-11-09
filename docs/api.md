@@ -8,7 +8,7 @@ Every route except `/api/health` needs `Authorization: Bearer <token>`.
 | `GET /api/health` | | `{ok, version}` |
 | `GET /api/state` | | `{last_seq, engines: [{id, name, default, agent, config_options, modes}], workdir}`. An engine never seen yet is probed in the background (a throwaway session), so its `config_options` fill in a few seconds later. |
 | `GET /api/sessions?archived=false` | | sessions, pinned first, newest first |
-| `POST /api/sessions` | `{text, engine?, mode?, auto_approve?, config?: {config_id: value}}` | the new session; its first turn starts at once |
+| `POST /api/sessions` | `{text, engine?, mode?, auto_approve?, config?: {config_id: value}, attachments?: [upload_id]}` | the new session; its first turn starts at once |
 | `GET /api/sessions/{id}` | | session |
 | `PATCH /api/sessions/{id}` | `{title?, auto_approve?, pinned?, archived?, mode?, config?: {config_id: value}}` | session |
 | `POST /api/sessions/{id}/messages` | `{text}` | `{ok}`; queued if a turn is running |
@@ -46,3 +46,11 @@ Browser use only (no desktop control). Crew talks DevTools to the agents' Brave 
 | `POST /api/browser/tabs/{id}/input` | `{type: tap, x, y}`, `{type: scroll, x, y, dx, dy}` (all 0..1 of the frame), `{type: text, text}`, `{type: key, key}` (`Enter`, `Backspace`, `Tab`, `Escape`, arrows, `PageUp`, `PageDown`), `{type: navigate, action: back or forward or reload}` or `{type: navigate, url}` | `{ok: true}` |
 
 Typed text is passed to `Input.insertText` and nowhere else: not logged, not stored, not added to the task's events.
+
+
+## Attachments
+
+1. `POST /api/uploads?name=<file name>` with the raw file as the body (any `Content-Type`; streamed to disk, at most `CREW_MAX_UPLOAD_MB`, default 1024) returns `{id, name, size, mime}`. Uploads not used within 24 hours are deleted.
+2. Send the ids with a message: `POST /api/sessions` or `POST /api/sessions/{id}/messages` with `{text?, attachments: [id, ...]}` (text may be empty when files are attached). Each id works once.
+
+Files are saved as `~/.crew/common/attachments/<first 8 characters of the session id>-<file name>` (`CREW_DATA_DIR` changes `~/.crew`), with `-2`, `-3` added on name clashes. The `user` event lists them as `attachments: [{name, path, size, mime}]`, and the agent's prompt gets the paths as text plus one ACP `resource_link` per file.

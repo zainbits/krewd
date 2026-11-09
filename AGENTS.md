@@ -18,6 +18,7 @@ Crew is a self-hosted, agent-agnostic agent team. The owner asks for a task in t
   - `acp.py`: JSON-RPC over stdio to one agent process per engine.
   - `hub.py`: sessions, turns, approvals, config options.
   - `api.py`: HTTP API (see `docs/api.md`).
+  - `attachments.py`: uploads from the phone, saved as `~/.crew/common/attachments/<session id prefix>-<name>` and passed to the agent as paths and ACP resource links.
   - `browser.py`: the agents' Brave over DevTools: tab list, live JPEG screencast of a tab, taps, scrolls, keys and typed text. Typed text goes straight to the page and is never logged or stored.
   - `schema*.sql`: migrations, applied in order by `db.migrate`.
   - `tests/`: end-to-end tests against a fake ACP agent and a real PostgreSQL.
