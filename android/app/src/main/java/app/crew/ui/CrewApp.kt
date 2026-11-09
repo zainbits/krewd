@@ -57,6 +57,7 @@ import app.crew.liquidnav.LiquidNavItem
 
 private enum class Tab(val title: String, val label: String, val icon: Int) {
     Tasks("Crew", "Tasks", R.drawable.ic_chat_24),
+    Routines("Routines", "Routines", R.drawable.ic_schedule_24),
     Browser("Browser", "Browser", R.drawable.ic_web_24),
     Approvals("Approvals", "Approvals", R.drawable.ic_approval_24),
     Settings("Settings", "Settings", R.drawable.ic_tune_24),
@@ -80,8 +81,9 @@ fun CrewApp(viewModel: CrewViewModel) {
     LaunchedEffect(state.connection) {
         if (state.connection == Connection.NotSetUp) viewModel.navigate(NavTab.SETTINGS)
     }
+    BackHandler(enabled = state.openSessionId == null && state.openRoutineId == null && tabIndex != NavTab.TASKS) { viewModel.navigate(NavTab.TASKS) }
+    BackHandler(enabled = state.openSessionId == null && state.openRoutineId != null) { viewModel.closeRoutine() }
     BackHandler(enabled = state.openSessionId != null) { viewModel.closeSession() }
-    BackHandler(enabled = state.openSessionId == null && tabIndex != NavTab.TASKS) { viewModel.navigate(NavTab.TASKS) }
 
     state.confirmStop?.let { id ->
         AlertDialog(
@@ -93,8 +95,12 @@ fun CrewApp(viewModel: CrewViewModel) {
         )
     }
 
-    // Depth: 0 tabs, 1 a task's chat.
-    val depth = if (state.openSessionId != null) 1 else 0
+    // Depth: 0 tabs, 1 a routine's page, 2 a task's chat (from a routine's page, back returns to it).
+    val depth = when {
+        state.openSessionId != null -> 2
+        state.openRoutineId != null -> 1
+        else -> 0
+    }
     Box(Modifier.fillMaxSize()) {
     AnimatedContent(
         targetState = depth,
@@ -107,14 +113,17 @@ fun CrewApp(viewModel: CrewViewModel) {
         },
         label = "chat",
     ) { level ->
-        if (level == 1) {
+        if (level == 2) {
             ChatScreen(state, viewModel)
+        } else if (level == 1) {
+            RoutineScreen(state, viewModel)
         } else {
             val tab = Tab.entries[tabIndex]
             Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surface)) {
                 val padding = shellContentPadding()
                 when (tab) {
                     Tab.Tasks -> TasksScreen(state, viewModel, padding, onOpenSettings = { viewModel.navigate(NavTab.SETTINGS) })
+                    Tab.Routines -> RoutinesScreen(state, viewModel, padding)
                     Tab.Browser -> BrowserScreen(state, viewModel, landscape)
                     Tab.Approvals -> ApprovalsScreen(state, viewModel, padding)
                     Tab.Settings -> SettingsScreen(state, viewModel, padding)

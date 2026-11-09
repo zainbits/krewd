@@ -119,6 +119,10 @@ PY
   local workdir; workdir="$(conf CREW_WORKDIR "$HOME")"
   grep -qs "Crew" "$workdir/AGENTS.md" && ok "$workdir/AGENTS.md has Crew's instructions" \
     || warn "$workdir/AGENTS.md has no Crew section" "copy deploy/agents-section.md into it"
+  grep -qs "crew routines" "$workdir/AGENTS.md" && ok "Crew's agent instructions cover routines" \
+    || warn "$workdir/AGENTS.md has an older Crew section (no routines)" "replace it with deploy/agents-section.md"
+  [[ "$(readlink -f "$HOME/.local/bin/crew" 2>/dev/null)" == "$(readlink -f "$REPO/deploy/crew-cli.sh")" ]] && ok "crew command (~/.local/bin/crew)" \
+    || warn "the crew command is not installed" "./master.sh setup (links ~/.local/bin/crew to deploy/crew-cli.sh)"
   [[ -e "$HOME/.claude/skills/browser-harness" || -e "$HOME/.agents/skills/browser-harness" ]] && ok "browser-harness skill is installed" \
     || warn "browser-harness skill not found in ~/.agents/skills or ~/.claude/skills" "AGENTS.md, new machine step 5"
 
@@ -163,6 +167,7 @@ PY
   [[ -f "$CONFIG_DIR/engines.toml" ]] || { cp "$REPO/deploy/engines.example.toml" "$CONFIG_DIR/engines.toml"; say "Created engines.toml (Claude Code)."; }
   if [[ -n "$(find_uv)" ]]; then (cd "$REPO/server" && "$(find_uv)" sync --frozen --quiet) && say "Server environment ready."; else say "Install uv first, then run setup again."; fi
   mkdir -p "$(conf CREW_BROWSER_PROFILE "$HOME/.local/share/crew/agent-brave")"
+  mkdir -p "$HOME/.local/bin" && ln -sfn "$REPO/deploy/crew-cli.sh" "$HOME/.local/bin/crew" && say "Linked the crew command: ~/.local/bin/crew."
   if linux_systemd; then
     install_units
     [[ "$(loginctl show-user "$USER" -p Linger --value 2>/dev/null)" == yes ]] \

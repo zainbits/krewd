@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 import sys
 import uuid
 
@@ -14,6 +15,14 @@ config: dict[str, dict[str, str]] = {}
 deleted: set[str] = set()
 # Messages steered into a running prompt, per session.
 running: dict[str, list[str]] = {}
+# Slash commands this fake advertises after session/new (FAKE_COMMANDS="compact,review").
+COMMANDS = [c for c in os.environ.get("FAKE_COMMANDS", "").split(",") if c]
+
+
+async def advertise(sid: str) -> None:
+    await asyncio.sleep(0.05)  # after the session/new answer, as real agents do
+    update(sid, {"sessionUpdate": "available_commands_update",
+                 "availableCommands": [{"name": c, "description": c} for c in COMMANDS]})
 
 
 def config_options(sid: str) -> list[dict]:
@@ -59,6 +68,16 @@ async def prompt(request_id: int, params: dict) -> None:
 async def run_prompt(request_id: int, sid: str, text: str, params: dict) -> None:
     if "crash" in text:
         sys.exit(1)
+    if text == "/compact":
+        update(sid, {"sessionUpdate": "agent_message_chunk", "messageId": "c1",
+                     "content": {"type": "text", "text": "Compacted."}})
+        send({"jsonrpc": "2.0", "id": request_id, "result": {"stopReason": "end_turn"}})
+        return
+    if text.startswith("Crew is compacting this chat"):
+        update(sid, {"sessionUpdate": "agent_message_chunk", "messageId": "h1",
+                     "content": {"type": "text", "text": "## Handover\nGoal: timesheets. Code MK-42."}})
+        send({"jsonrpc": "2.0", "id": request_id, "result": {"stopReason": "end_turn"}})
+        return
     update(sid, {"sessionUpdate": "agent_thought_chunk", "content": {"type": "text", "text": "thinking"}})
     update(sid, {"sessionUpdate": "session_info_update", "title": "Fake title"})
     if "perm" in text:
@@ -109,6 +128,12 @@ async def run_prompt(request_id: int, sid: str, text: str, params: dict) -> None
     if text.startswith("hand "):  # reply with the paths that follow, the way an agent names a file it made
         update(sid, {"sessionUpdate": "agent_message_chunk", "messageId": "m1",
                      "content": {"type": "text", "text": " Saved it at `" + text.split(" ", 1)[1] + "`."}})
+    if "Handover from the earlier part" in text and "MK-42" in text:
+        update(sid, {"sessionUpdate": "agent_message_chunk", "messageId": "m5",
+                     "content": {"type": "text", "text": " carried=MK-42"}})
+    if "Scheduled run of the Crew routine" in text or "Run started by the owner" in text:
+        update(sid, {"sessionUpdate": "agent_message_chunk", "messageId": "m6",
+                     "content": {"type": "text", "text": " routine-ran"}})
     if "calls" in text:
         update(sid, {"sessionUpdate": "agent_message_chunk", "messageId": "m2",
                      "content": {"type": "text", "text": " calls=" + ",".join(f"{c[1]}:{c[2]}" for c in config_calls if c[0] == sid)}})
@@ -144,6 +169,10 @@ async def main() -> None:
                 "modes": {"currentModeId": "default", "availableModes": [
                     {"id": "default", "name": "Manual"}, {"id": "auto", "name": "Auto"}]},
             }})
+            if COMMANDS:
+                task = asyncio.ensure_future(advertise(new_sid))
+                tasks.add(task)
+                task.add_done_callback(tasks.discard)
         elif method == "session/set_config_option":
             sid, key, value = params["sessionId"], params["configId"], params["value"]
             config_calls.append((sid, key, value))

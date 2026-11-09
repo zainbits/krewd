@@ -20,6 +20,12 @@ data class UserItem(
     val delivery: String? = null,
     val state: String? = null,
     val how: String? = null,
+    /** Set when Crew sent it, not the owner: "routine" (a run of a routine) or "compact". */
+    val purpose: String? = null,
+    /** For a routine run: its title, trigger (schedule or manual) and instructions version. */
+    val routineTitle: String? = null,
+    val trigger: String? = null,
+    val version: Int? = null,
 ) : ChatItem
 
 data class TextItem(override val key: String, val role: String, val text: String) : ChatItem {
@@ -79,6 +85,10 @@ class Timeline {
                     delivery = p.optStringOrNull("delivery"),
                     // Messages from before delivery tracking: treat as delivered.
                     state = if (messageId == null) "delivered" else "queued",
+                    purpose = p.optStringOrNull("purpose"),
+                    routineTitle = p.optJSONObject("meta")?.optStringOrNull("title"),
+                    trigger = p.optJSONObject("meta")?.optStringOrNull("trigger"),
+                    version = p.optJSONObject("meta")?.optInt("version"),
                 )
                 add(item)
                 if (messageId != null) messages[messageId] = item.key
@@ -125,6 +135,13 @@ class Timeline {
                 put("approval-${approval.id}", ApprovalItem("approval-${approval.id}", approval))
             }
             "error" -> add(NoticeItem("error-${event.seq}", p.optString("message", "Something went wrong"), isError = true))
+            "compact" -> add(
+                when {
+                    !p.optBoolean("ok") -> NoticeItem("compact-${event.seq}", "Compacting did not finish; the context is unchanged", isError = true)
+                    p.optString("how") == "native" -> NoticeItem("compact-${event.seq}", "Context compacted by the agent", isError = false)
+                    else -> NoticeItem("compact-${event.seq}", "Context compacted: a fresh agent session continues from the handover above", isError = false)
+                },
+            )
             "turn_end" -> {
                 closePlan()
                 Attachment.list(p.optJSONArray("files")).takeIf { it.isNotEmpty() }?.let { add(FilesItem("files-${event.seq}", it)) }

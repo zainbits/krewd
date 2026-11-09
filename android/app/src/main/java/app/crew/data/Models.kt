@@ -99,7 +99,13 @@ data class SessionInfo(
     val modelUsed: String?,
     /** The browser tab the agent last used, seen from the browser side. */
     val browserTab: BrowserTab? = null,
+    /** Set when this chat is a routine's own chat (every run of the routine comes here). */
+    val routineId: String? = null,
+    /** How Compact works here: "native" (the agent's own /compact) or "handover" (a fresh agent session). */
+    val compact: String = "handover",
 ) {
+    val contextPercent: Int? get() = if (contextUsed != null && contextSize != null && contextSize > 0) (contextUsed * 100 / contextSize).toInt() else null
+
     val isBusy: Boolean get() = status == "running" || status == "waiting"
 
     companion object {
@@ -129,10 +135,92 @@ data class SessionInfo(
                 browserTab = o.optJSONObject("browser_tab")?.let {
                     BrowserTab(it.optString("id"), it.optString("title"), it.optString("url"))
                 },
+                routineId = o.optStringOrNull("routine_id"),
+                compact = o.optString("compact", "handover"),
             )
         }
     }
 }
+
+/** One run of a routine: it went into the routine's chat as the message at [seq]. */
+data class RoutineRun(
+    val id: String,
+    val sessionId: String?,
+    val seq: Long?,
+    val trigger: String,
+    val version: Int,
+    val status: String,
+    val summary: String?,
+    val scheduledFor: String?,
+    val startedAt: String?,
+    val finishedAt: String?,
+    val createdAt: String,
+) {
+    val active: Boolean get() = status == "queued" || status == "running"
+
+    companion object {
+        fun from(o: JSONObject) = RoutineRun(
+            id = o.getString("id"),
+            sessionId = o.optStringOrNull("session_id"),
+            seq = o.optLongOrNull("seq"),
+            trigger = o.optString("trigger"),
+            version = o.optInt("version"),
+            status = o.optString("status"),
+            summary = o.optStringOrNull("summary"),
+            scheduledFor = o.optStringOrNull("scheduled_for"),
+            startedAt = o.optStringOrNull("started_at"),
+            finishedAt = o.optStringOrNull("finished_at"),
+            createdAt = o.optString("created_at"),
+        )
+    }
+}
+
+/** Instructions Crew runs on a schedule, every run in the routine's own chat. */
+data class Routine(
+    val id: String,
+    val title: String,
+    val instructions: String,
+    val schedule: String,
+    val scheduleText: String,
+    val timezone: String,
+    val sessionId: String?,
+    val engine: String,
+    val autoApprove: Boolean,
+    val enabled: Boolean,
+    val version: Int,
+    val nextRunAt: String?,
+    val nextRuns: List<String>,
+    val createdBy: String,
+    val lastRun: RoutineRun?,
+    val sessionStatus: String?,
+    /** Only filled when one routine is loaded with its history. */
+    val runs: List<RoutineRun>? = null,
+) {
+    companion object {
+        fun from(o: JSONObject) = Routine(
+            id = o.getString("id"),
+            title = o.optString("title"),
+            instructions = o.optString("instructions"),
+            schedule = o.optString("schedule"),
+            scheduleText = o.optString("schedule_text", o.optString("schedule")),
+            timezone = o.optString("timezone"),
+            sessionId = o.optStringOrNull("session_id"),
+            engine = o.optString("engine"),
+            autoApprove = o.optBoolean("auto_approve"),
+            enabled = o.optBoolean("enabled", true),
+            version = o.optInt("version", 1),
+            nextRunAt = o.optStringOrNull("next_run_at"),
+            nextRuns = o.optJSONArray("next_runs")?.let { a -> (0 until a.length()).map { a.optString(it) } } ?: emptyList(),
+            createdBy = o.optString("created_by", "owner"),
+            lastRun = o.optJSONObject("last_run")?.let(RoutineRun::from),
+            sessionStatus = o.optStringOrNull("session_status"),
+            runs = if (o.has("runs")) o.optJSONArray("runs").objects().map(RoutineRun::from) else null,
+        )
+    }
+}
+
+/** What a schedule means, checked by the server: its reading in words and next times, or the error. */
+data class SchedulePreview(val text: String?, val nextRuns: List<String>, val error: String?)
 
 data class ApprovalOption(val id: String, val name: String, val kind: String) {
     val allows: Boolean get() = kind.startsWith("allow")

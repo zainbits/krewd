@@ -15,6 +15,7 @@ import re
 import signal
 import uuid
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from functools import partial
 from typing import Any
 
@@ -22,6 +23,7 @@ import asyncpg
 
 from . import db
 from . import files as shared_files
+from . import routines as rtn
 from .acp import AcpError, AcpProcess, MethodNotFound
 from .attachments import Attachments, UnknownUpload, prompt_blocks
 from .config import Settings
@@ -32,6 +34,15 @@ TEXT_FLUSH_SECONDS = 0.3
 CLIP = 4000
 TITLE_MAX = 80
 PREVIEW_MAX = 280
+SCHEDULER_TICK = 15  # seconds between looks for due routines
+RUN_SUMMARY_MAX = 2000
+HANDOVER_PROMPT = (
+    "Crew is compacting this chat: the owner asked to start a fresh agent session that keeps only what "
+    "matters. Write a handover for that next session, and nothing else: the goal, the decisions and facts "
+    "established so far (with exact names, paths, ids and numbers), the owner's preferences and rules from "
+    "this chat, what was done and its result, and what is still open or next. Be complete but brief; use "
+    "short Markdown sections. Do not run tools for this."
+)
 
 
 class NotFound(Exception):
@@ -166,6 +177,8 @@ class Hub:
         self.probing: set[str] = set()
         self.tab_owner: dict[str, uuid.UUID] = {}  # browser tab id -> session that last used it
         self.last_sent: dict[uuid.UUID, dict[str, Any]] = {}  # last session state emitted, to skip repeats
+        self.default_timezone = rtn.local_timezone()
+        self.scheduler: asyncio.Task | None = None
 
     # lifecycle
 
@@ -176,7 +189,7 @@ class Hub:
         for row in await self.pool.fetch("select * from engines"):
             self.engine_info[row["id"]] = {
                 "agent": row["agent"], "config_options": row["config_options"] or [], "modes": row["modes"],
-                "steering": row["steering"],
+                "steering": row["steering"], "commands": row["commands"],
             }
         await self._recover()
         # Messages stored before a restart still run, in order.
@@ -186,9 +199,13 @@ class Hub:
             self._kick(await self._runtime(row["session_id"]))
         for row in await self.pool.fetch("select id, browser_tab from sessions where browser_tab is not null"):
             self.tab_owner.setdefault(row["browser_tab"]["id"], row["id"])
+        self.scheduler = asyncio.create_task(self._schedule_loop())
 
     async def close(self) -> None:
         self.closing = True
+        if self.scheduler:
+            self.scheduler.cancel()
+            await asyncio.gather(self.scheduler, return_exceptions=True)
         workers = [rt.worker for rt in self.runtimes.values() if rt.worker]
         for worker in workers:
             worker.cancel()
@@ -203,6 +220,10 @@ class Hub:
         )
         await self.pool.execute(
             "update approvals set status = 'expired', decided_by = 'system', decided_at = now() where status = 'pending'"
+        )
+        await self.pool.execute(
+            """update routine_runs set status = 'error', finished_at = now(),
+                   summary = coalesce(summary, 'Crew restarted during this run.') where status = 'running'"""
         )
         for row in interrupted:
             await self.emit(row["id"], "error", {"message": "Crew restarted during this turn. Send a message to continue."})
@@ -243,14 +264,17 @@ class Hub:
             return
         current.update(changes)
         await self.pool.execute(
-            """insert into engines (id, agent, config_options, modes, steering) values ($1, $2, $3, $4, $5)
+            """insert into engines (id, agent, config_options, modes, steering, commands)
+               values ($1, $2, $3, $4, $5, $6)
                on conflict (id) do update set agent = excluded.agent, config_options = excluded.config_options,
-                   modes = excluded.modes, steering = excluded.steering, updated_at = now()""",
+                   modes = excluded.modes, steering = excluded.steering, commands = excluded.commands,
+                   updated_at = now()""",
             engine_id,
             current.get("agent"),
             current.get("config_options"),
             current.get("modes"),
             current.get("steering"),
+            current.get("commands"),
         )
 
     async def _probe(self, engine_id: str) -> None:
@@ -363,28 +387,40 @@ class Hub:
         tabs: list[dict[str, Any]] | None = None,
         client_id: str | None = None,
     ) -> dict[str, Any]:
-        engine = engine or self.settings.default_engine
-        if engine not in self.settings.engines:
-            raise NotFound(f"unknown engine {engine}")
-        session_id = uuid.uuid4()
         if attachments:
             for upload_id in attachments:
                 if not (self.attachments.incoming / f"{upload_id}.json").is_file():
                     raise NotFound(f"unknown upload {upload_id}")
+        session_id = await self._insert_session(
+            _first_line(text, TITLE_MAX) or self._upload_name(attachments) or "New task", engine, mode, auto_approve, config
+        )
+        await self.send(session_id, text, attachments, tabs=tabs, client_id=client_id)
+        return await self.get_session(session_id)
+
+    async def _insert_session(
+        self, title: str, engine: str | None, mode: str | None, auto_approve: bool, config: dict[str, str] | None,
+        title_locked: bool = False,
+    ) -> uuid.UUID:
+        engine = engine or self.settings.default_engine
+        if engine not in self.settings.engines:
+            raise NotFound(f"unknown engine {engine}")
+        session_id = uuid.uuid4()
         await self.pool.execute(
-            """insert into sessions (id, engine, title, mode, auto_approve, config_wanted, agent, config_options)
-               values ($1, $2, $3, $4, $5, $6, $7, $8)""",
+            """insert into sessions (id, engine, title, title_locked, mode, auto_approve, config_wanted, agent,
+                   config_options, commands)
+               values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)""",
             session_id,
             engine,
-            _first_line(text, TITLE_MAX) or self._upload_name(attachments) or "New task",
+            title,
+            title_locked,
             mode,
             auto_approve,
             config or {},
             (self.engine_info.get(engine) or {}).get("agent"),
             (self.engine_info.get(engine) or {}).get("config_options"),
+            (self.engine_info.get(engine) or {}).get("commands"),
         )
-        await self.send(session_id, text, attachments, tabs=tabs, client_id=client_id)
-        return await self.get_session(session_id)
+        return session_id
 
     def _upload_name(self, upload_ids: list[str] | None) -> str | None:
         for upload_id in upload_ids or []:
@@ -470,6 +506,10 @@ class Hub:
         tabs: list[dict[str, Any]] | None = None,
         delivery: str | None = None,
         client_id: str | None = None,
+        purpose: str | None = None,
+        meta: dict[str, Any] | None = None,
+        message_id: uuid.UUID | None = None,
+        preview: str | None = None,
     ) -> dict[str, Any]:
         """Store a message, then deliver it: steer it into the running turn, queue it, or interrupt and send.
 
@@ -491,12 +531,14 @@ class Hub:
         wanted = delivery or ("steer" if self.can_steer(rt.engine) else "queue")
         if wanted == "steer" and not rt.running:
             wanted = "queue"  # nothing to steer into: it simply starts the next turn
-        message_id = uuid.uuid4()
+        message_id = message_id or uuid.uuid4()
         try:
             await self.pool.execute(
-                """insert into messages (id, session_id, client_id, text, attachments, tabs, delivery, priority)
-                   values ($1, $2, $3, $4, $5, $6, $7, $8)""",
+                """insert into messages (id, session_id, client_id, text, attachments, tabs, delivery, priority,
+                       purpose, meta)
+                   values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)""",
                 message_id, session_id, client_id, text, files, tabs, wanted, 0 if wanted == "interrupt" else 1,
+                purpose, meta,
             )
         except asyncpg.UniqueViolationError:
             row = await self.pool.fetchrow(
@@ -510,9 +552,12 @@ class Hub:
             payload["tabs"] = tabs
         if client_id:
             payload["client_id"] = client_id
+        if purpose:
+            payload["purpose"] = purpose
+            payload["meta"] = meta or {}
         seq = await self.emit(session_id, "user", payload)
         await self.pool.execute("update messages set event_seq = $2 where id = $1", message_id, seq)
-        preview = text or ", ".join(f["name"] for f in files) or ", ".join(t["title"] or t["url"] for t in tabs)
+        preview = preview or text or ", ".join(f["name"] for f in files) or ", ".join(t["title"] or t["url"] for t in tabs)
         await self.pool.execute(
             "update sessions set last_text = $2, updated_at = now(), archived = false where id = $1",
             session_id,
@@ -576,6 +621,7 @@ class Hub:
             "update messages set state = 'cancelled' where session_id = $1 and state = 'queued' returning *", session_id
         ):
             await self.emit(session_id, "message", db.message_json(row))
+            await self._run_finished(row["id"], "cancelled", "Stopped before it started.")
         await self._stop_turn(rt)
 
     async def _stop_turn(self, rt: Runtime) -> None:
@@ -843,7 +889,10 @@ class Hub:
             if message is None:
                 continue
             try:
-                await self._run_turn(rt, message["text"], message["attachments"], message["tabs"], message["id"])
+                await self._run_turn(
+                    rt, message["text"], message["attachments"], message["tabs"], message["id"],
+                    purpose=message["purpose"], meta=message["meta"],
+                )
             except Exception:
                 log.exception("turn failed for %s", rt.id)
 
@@ -858,21 +907,38 @@ class Hub:
         files: list[dict[str, Any]] | None = None,
         tabs: list[dict[str, Any]] | None = None,
         message_id: uuid.UUID | None = None,
+        purpose: str | None = None,
+        meta: dict[str, Any] | None = None,
     ) -> None:
         rt.assistant_run, rt.assistant_text = None, ""
         rt.running, rt.cancel_requested = True, False
         await self._set_status(rt, "running")
         await self.emit(rt.id, "turn_start", {"message_id": str(message_id) if message_id else None})
+        if message_id and purpose == "routine":
+            await self._run_started(message_id)
         stop_reason = "error"
         usage = None
+        carry = None
         try:
             proc = await self._ensure_loaded(rt)
             if rt.cancel_requested:
                 raise _Cancelled()
+            prompt_text = _with_tabs(text, tabs)
+            if purpose == "compact" and (meta or {}).get("how") == "native":
+                prompt_text = "/compact"
+            else:
+                carry = await self.pool.fetchval("select carry from sessions where id = $1", rt.id)
+                if carry:
+                    prompt_text = (
+                        "Handover from the earlier part of this chat, which was compacted (written by the agent "
+                        "before the reset):\n\n" + carry + "\n\n---\n\nThe next message in the chat:\n\n" + prompt_text
+                    )
             result = await proc.request(
                 "session/prompt",
-                {"sessionId": rt.agent_session, "prompt": prompt_blocks(_with_tabs(text, tabs), files or [])},
+                {"sessionId": rt.agent_session, "prompt": prompt_blocks(prompt_text, files or [])},
             )
+            if carry:
+                await self.pool.execute("update sessions set carry = null where id = $1", rt.id)
             stop_reason = result.get("stopReason", "end_turn")
             usage = result.get("usage")
         except _Cancelled:
@@ -897,6 +963,11 @@ class Hub:
         if handed:
             end["files"] = handed
         await self.emit(rt.id, "turn_end", end)
+        if purpose == "compact":
+            await self._compacted(rt, stop_reason, (meta or {}).get("how"))
+        if message_id and purpose == "routine":
+            status = {"end_turn": "done", "cancelled": "cancelled", "error": "error"}.get(stop_reason, "done")
+            await self._run_finished(message_id, status, _clip(rt.assistant_text.strip(), RUN_SUMMARY_MAX) or None)
         await self.emit_session(rt.id)
 
     # agent -> client
@@ -944,6 +1015,16 @@ class Hub:
                 )
                 if changed:
                     await self.emit_session(rt.id)
+        elif kind == "available_commands_update":
+            names = sorted({c.get("name") for c in update.get("availableCommands") or [] if c.get("name")})
+            changed = await self.pool.fetchval(
+                "update sessions set commands = $2 where id = $1 and commands is distinct from $2 returning id",
+                rt.id,
+                names,
+            )
+            await self._remember_engine(engine_id, commands=names)
+            if changed:
+                await self.emit_session(rt.id)
         elif kind == "config_option_update" and update.get("configOptions") is not None:
             options = normalise_config(update["configOptions"])
             await self.pool.execute("update sessions set config_options = $2 where id = $1", rt.id, options)
@@ -1057,3 +1138,357 @@ class Hub:
             tool["paths"] = paths
         if tool != before:
             await self.emit(rt.id, "tool", dict(tool))
+
+    # compaction
+
+    async def compact(self, session_id: uuid.UUID) -> dict[str, Any]:
+        """Compact a chat's agent context, after the running turn if there is one.
+
+        Where the agent advertises a `compact` slash command (Claude Code, Codex) Crew sends it. Otherwise
+        the agent writes a handover, Crew opens a fresh agent session in the same chat and gives it the
+        handover with the next message. The chat history in Crew stays as it is either way.
+        """
+        row = await self.pool.fetchrow("select agent_session, commands from sessions where id = $1", session_id)
+        if row is None:
+            raise NotFound("session not found")
+        if not row["agent_session"]:
+            raise Conflict("Nothing to compact yet: this chat has no agent context")
+        waiting = await self.pool.fetchrow(
+            "select * from messages where session_id = $1 and purpose = 'compact' and state in ('queued', 'steering')",
+            session_id,
+        )
+        if waiting:
+            return db.message_json(waiting)
+        how = "native" if "compact" in (row["commands"] or []) else "handover"
+        text = "/compact" if how == "native" else HANDOVER_PROMPT
+        return await self.send(
+            session_id, text, delivery="queue", purpose="compact", meta={"how": how}, preview="Compacting the context"
+        )
+
+    async def _compacted(self, rt: Runtime, stop_reason: str, how: str | None) -> None:
+        if stop_reason != "end_turn":
+            await self.emit(rt.id, "compact", {"how": how, "ok": False})
+            return
+        if how == "handover":
+            summary = rt.assistant_text.strip()
+            if not summary:
+                await self.emit(rt.id, "compact", {"how": how, "ok": False})
+                return
+            old = rt.agent_session
+            proc = self.procs.get(rt.engine)
+            if old:
+                self.by_agent_session.pop((rt.engine, old), None)
+                caps = (proc.capabilities.get("sessionCapabilities") or {}) if proc and proc.alive else {}
+                for method in ("close", "delete"):
+                    if method in caps:
+                        try:
+                            await proc.request(f"session/{method}", {"sessionId": old}, timeout=30)
+                            break
+                        except AcpError:
+                            continue
+            rt.agent_session = None
+            rt.tools.clear()
+            await self.pool.execute(
+                "update sessions set agent_session = null, carry = $2, usage = null where id = $1", rt.id, summary
+            )
+            rt.usage = None
+        await self.emit(rt.id, "compact", {"how": how, "ok": True})
+
+    # routines
+
+    async def _routine_row(self, routine_id: uuid.UUID) -> asyncpg.Record:
+        row = await self.pool.fetchrow("select * from routines where id = $1", routine_id)
+        if row is None:
+            raise NotFound("routine not found")
+        return row
+
+    async def _routine_full(self, row: asyncpg.Record, runs: int = 0) -> dict[str, Any]:
+        routine = db.routine_json(row)
+        routine["schedule_text"] = rtn.describe(row["schedule"])
+        if row["enabled"]:
+            routine["next_runs"] = [
+                t.isoformat() for t in rtn.next_runs(row["schedule"], row["timezone"], datetime.now(UTC), 3)
+            ]
+        else:
+            routine["next_runs"] = []
+        last = await self.pool.fetchrow(
+            """select r.*, m.event_seq from routine_runs r left join messages m on m.id = r.message_id
+               where r.routine_id = $1 order by r.created_at desc limit 1""",
+            row["id"],
+        )
+        routine["last_run"] = db.run_json(last) if last else None
+        status = None
+        if row["session_id"]:
+            status = await self.pool.fetchval("select status from sessions where id = $1", row["session_id"])
+        routine["session_status"] = status
+        if runs:
+            routine["runs"] = await self.routine_runs(row["id"], runs)
+        return routine
+
+    async def list_routines(self) -> list[dict[str, Any]]:
+        rows = await self.pool.fetch("select * from routines order by enabled desc, next_run_at nulls last, title")
+        return [await self._routine_full(r) for r in rows]
+
+    async def get_routine(self, routine_id: uuid.UUID) -> dict[str, Any]:
+        return await self._routine_full(await self._routine_row(routine_id), runs=50)
+
+    async def routine_runs(self, routine_id: uuid.UUID, limit: int = 50) -> list[dict[str, Any]]:
+        rows = await self.pool.fetch(
+            """select r.*, m.event_seq from routine_runs r left join messages m on m.id = r.message_id
+               where r.routine_id = $1 order by r.created_at desc limit $2""",
+            routine_id,
+            limit,
+        )
+        return [db.run_json(r) for r in rows]
+
+    async def routine_versions(self, routine_id: uuid.UUID) -> list[dict[str, Any]]:
+        await self._routine_row(routine_id)
+        rows = await self.pool.fetch(
+            "select * from routine_versions where routine_id = $1 order by version desc", routine_id
+        )
+        return [db.version_json(r) for r in rows]
+
+    def preview_schedule(self, schedule: str, timezone: str | None = None) -> dict[str, Any]:
+        timezone = timezone or self.default_timezone
+        expr = rtn.check(schedule, timezone)
+        return {
+            "schedule": expr,
+            "timezone": timezone,
+            "schedule_text": rtn.describe(expr),
+            "next_runs": [t.isoformat() for t in rtn.next_runs(expr, timezone, datetime.now(UTC), 5)],
+        }
+
+    async def create_routine(
+        self,
+        title: str,
+        instructions: str,
+        schedule: str,
+        timezone: str | None = None,
+        engine: str | None = None,
+        mode: str | None = None,
+        config: dict[str, str] | None = None,
+        auto_approve: bool = False,
+        enabled: bool = True,
+        created_by: str = "owner",
+        note: str | None = None,
+    ) -> dict[str, Any]:
+        timezone = timezone or self.default_timezone
+        schedule = rtn.check(schedule, timezone)
+        engine = engine or self.settings.default_engine
+        if engine not in self.settings.engines:
+            raise NotFound(f"unknown engine {engine}")
+        title, instructions = title.strip(), instructions.strip()
+        if not title or not instructions:
+            raise rtn.Invalid("a routine needs a title and instructions")
+        routine_id = uuid.uuid4()
+        # The routine's own chat exists from the start, so it can be opened (and pinned) before the first run.
+        session_id = await self._insert_session(title, engine, mode, auto_approve, config, title_locked=True)
+        next_run = rtn.next_runs(schedule, timezone, datetime.now(UTC))[0] if enabled else None
+        async with self.pool.acquire() as conn, conn.transaction():
+            await conn.execute(
+                """insert into routines (id, title, instructions, schedule, timezone, session_id, engine, mode,
+                       config, auto_approve, enabled, next_run_at, created_by)
+                   values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)""",
+                routine_id, title, instructions, schedule, timezone, session_id, engine, mode, config or {},
+                auto_approve, enabled, next_run, created_by,
+            )
+            await conn.execute(
+                """insert into routine_versions (routine_id, version, title, instructions, schedule, timezone,
+                       changed_by, note) values ($1, 1, $2, $3, $4, $5, $6, $7)""",
+                routine_id, title, instructions, schedule, timezone, created_by, note,
+            )
+        await self.pool.execute(
+            "update sessions set last_text = $2 where id = $1",
+            session_id,
+            f"Routine: {rtn.describe(schedule)}" + ("" if enabled else " (paused)"),
+        )
+        return await self._routine_changed(routine_id)
+
+    async def update_routine(
+        self, routine_id: uuid.UUID, changes: dict[str, Any], changed_by: str = "owner", note: str | None = None
+    ) -> dict[str, Any]:
+        row = await self._routine_row(routine_id)
+        new = {k: row[k] for k in ("title", "instructions", "schedule", "timezone", "engine", "mode",
+                                   "auto_approve", "enabled")}
+        new["config"] = row["config"] or {}
+        for key, value in changes.items():
+            if key in new and value is not None:
+                new[key] = value.strip() if isinstance(value, str) and key in ("title", "instructions") else value
+        if not new["title"] or not new["instructions"]:
+            raise rtn.Invalid("a routine needs a title and instructions")
+        rtn.zone(new["timezone"])
+        new["schedule"] = rtn.check(new["schedule"], new["timezone"])
+        if new["engine"] not in self.settings.engines:
+            raise NotFound(f"unknown engine {new['engine']}")
+        versioned = any(new[k] != row[k] for k in ("title", "instructions", "schedule", "timezone"))
+        version = row["version"] + 1 if versioned else row["version"]
+        timing = any(new[k] != row[k] for k in ("schedule", "timezone", "enabled"))
+        next_run = row["next_run_at"]
+        if timing:
+            next_run = rtn.next_runs(new["schedule"], new["timezone"], datetime.now(UTC))[0] if new["enabled"] else None
+        session_id = row["session_id"]
+        if new["engine"] != row["engine"]:
+            session_id = None  # a chat belongs to one agent: the next run starts a new chat; the old one stays
+        async with self.pool.acquire() as conn, conn.transaction():
+            await conn.execute(
+                """update routines set title = $2, instructions = $3, schedule = $4, timezone = $5, engine = $6,
+                       mode = $7, config = $8, auto_approve = $9, enabled = $10, version = $11, next_run_at = $12,
+                       session_id = $13, updated_at = now() where id = $1""",
+                routine_id, new["title"], new["instructions"], new["schedule"], new["timezone"], new["engine"],
+                new["mode"], new["config"], new["auto_approve"], new["enabled"], version, next_run, session_id,
+            )
+            if versioned:
+                await conn.execute(
+                    """insert into routine_versions (routine_id, version, title, instructions, schedule, timezone,
+                           changed_by, note) values ($1, $2, $3, $4, $5, $6, $7, $8)""",
+                    routine_id, version, new["title"], new["instructions"], new["schedule"], new["timezone"],
+                    changed_by, note,
+                )
+        if session_id:
+            chat: dict[str, Any] = {}
+            if new["title"] != row["title"]:
+                chat["title"] = new["title"]
+            if new["auto_approve"] != row["auto_approve"]:
+                chat["auto_approve"] = new["auto_approve"]
+            if new["mode"] != row["mode"] and new["mode"]:
+                chat["mode"] = new["mode"]
+            if new["config"] != (row["config"] or {}):
+                chat["config"] = new["config"]
+            if chat:
+                await self.update_session(session_id, chat)
+        return await self._routine_changed(routine_id)
+
+    async def delete_routine(self, routine_id: uuid.UUID) -> None:
+        """Delete a routine and its run history. Its chat stays, as an ordinary task."""
+        row = await self._routine_row(routine_id)
+        await self.pool.execute("delete from routines where id = $1", routine_id)
+        if row["session_id"]:
+            await self.emit(row["session_id"], "routine", {"id": str(routine_id), "deleted": True})
+            self.last_sent.pop(row["session_id"], None)
+            await self.emit_session(row["session_id"])
+
+    async def run_routine(self, routine_id: uuid.UUID) -> dict[str, Any]:
+        """Run now, on top of the schedule (the next scheduled run stays as it is)."""
+        row = await self._routine_row(routine_id)
+        return await self._start_run(row, "manual", None)
+
+    async def _routine_changed(self, routine_id: uuid.UUID) -> dict[str, Any]:
+        """Tell the apps: a `routine` event on the routine's chat, and the chat's own state."""
+        routine = await self._routine_full(await self._routine_row(routine_id))
+        if routine["session_id"]:
+            sid = uuid.UUID(routine["session_id"])
+            await self.emit(sid, "routine", routine)
+            await self.emit_session(sid)
+        return routine
+
+    async def _routine_chat(self, row: asyncpg.Record) -> uuid.UUID:
+        """The routine's chat, made again if it was deleted (or the routine moved to another agent)."""
+        if row["session_id"]:
+            exists = await self.pool.fetchval("select 1 from sessions where id = $1", row["session_id"])
+            if exists:
+                return row["session_id"]
+        session_id = await self._insert_session(
+            row["title"], row["engine"], row["mode"], row["auto_approve"], row["config"], title_locked=True
+        )
+        await self.pool.execute("update routines set session_id = $2 where id = $1", row["id"], session_id)
+        return session_id
+
+    async def _start_run(
+        self, row: asyncpg.Record, trigger: str, scheduled_for: datetime | None, skip_reason: str | None = None
+    ) -> dict[str, Any]:
+        run_id = uuid.uuid4()
+        busy = await self.pool.fetchval(
+            "select 1 from routine_runs where routine_id = $1 and status in ('queued', 'running') limit 1", row["id"]
+        )
+        if busy and trigger == "manual":
+            raise Conflict("This routine's last run has not finished yet")
+        session_id = await self._routine_chat(row)
+        if busy or skip_reason:
+            await self.pool.execute(
+                """insert into routine_runs (id, routine_id, session_id, trigger, version, scheduled_for, status,
+                       summary, finished_at) values ($1, $2, $3, $4, $5, $6, 'skipped', $7, now())""",
+                run_id, row["id"], session_id, trigger, row["version"], scheduled_for,
+                skip_reason or "Skipped: the previous run had not finished.",
+            )
+            await self._routine_changed(row["id"])
+            return await self._run_json(run_id)
+        message_id = uuid.uuid4()
+        first = not await self.pool.fetchval("select 1 from routine_runs where session_id = $1 limit 1", session_id)
+        routine = db.routine_json(row)
+        text = rtn.run_prompt(routine, str(run_id), trigger, datetime.now(UTC), first)
+        await self.pool.execute(
+            """insert into routine_runs (id, routine_id, session_id, message_id, trigger, version, scheduled_for)
+               values ($1, $2, $3, $4, $5, $6, $7)""",
+            run_id, row["id"], session_id, message_id, trigger, row["version"], scheduled_for,
+        )
+        await self.pool.execute("update routines set last_run_at = now() where id = $1", row["id"])
+        await self.send(
+            session_id, text, delivery="queue", purpose="routine", message_id=message_id,
+            meta={"routine_id": str(row["id"]), "run_id": str(run_id), "title": row["title"], "trigger": trigger,
+                  "version": row["version"]},
+            preview=("Scheduled run" if trigger == "schedule" else "Run now") + f": {row['title']}",
+        )
+        await self._routine_changed(row["id"])
+        return await self._run_json(run_id)
+
+    async def _run_json(self, run_id: uuid.UUID) -> dict[str, Any]:
+        row = await self.pool.fetchrow(
+            """select r.*, m.event_seq from routine_runs r left join messages m on m.id = r.message_id
+               where r.id = $1""",
+            run_id,
+        )
+        return db.run_json(row)
+
+    async def _run_started(self, message_id: uuid.UUID) -> None:
+        routine_id = await self.pool.fetchval(
+            """update routine_runs set status = 'running', started_at = now()
+               where message_id = $1 and status = 'queued' returning routine_id""",
+            message_id,
+        )
+        if routine_id:
+            await self._routine_changed(routine_id)
+
+    async def _run_finished(self, message_id: uuid.UUID, status: str, summary: str | None) -> None:
+        routine_id = await self.pool.fetchval(
+            """update routine_runs set status = $2, summary = coalesce($3, summary), finished_at = now()
+               where message_id = $1 and status in ('queued', 'running') returning routine_id""",
+            message_id,
+            status,
+            summary,
+        )
+        if routine_id:
+            await self._routine_changed(routine_id)
+
+    async def _schedule_loop(self) -> None:
+        while not self.closing:
+            try:
+                await self.run_due()
+            except Exception:
+                log.exception("scheduler pass failed")
+            await asyncio.sleep(SCHEDULER_TICK)
+
+    async def run_due(self, now: datetime | None = None) -> int:
+        """Start every routine whose time has come. Each one is claimed by moving next_run_at first."""
+        now = now or datetime.now(UTC)
+        started = 0
+        for row in await self.pool.fetch(
+            "select * from routines where enabled and next_run_at <= $1 order by next_run_at", now
+        ):
+            due = rtn.latest_due(row["schedule"], row["timezone"], row["next_run_at"], now)
+            following = rtn.next_runs(row["schedule"], row["timezone"], now)[0]
+            claimed = await self.pool.fetchval(
+                "update routines set next_run_at = $3 where id = $1 and next_run_at = $2 returning id",
+                row["id"], row["next_run_at"], following,
+            )
+            if not claimed:
+                continue
+            late = now - due
+            reason = None
+            if late > rtn.CATCH_UP:
+                reason = f"Skipped: Crew was not running at {due.astimezone(rtn.zone(row['timezone'])):%a %d %b %H:%M}."
+            try:
+                await self._start_run(row, "schedule", due, skip_reason=reason)
+                started += 0 if reason else 1
+            except Exception:
+                log.exception("could not start routine %s", row["id"])
+        return started

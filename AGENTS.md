@@ -8,6 +8,8 @@ Crew is a self-hosted, agent-agnostic agent team. The owner asks for a task in t
 
 `master.sh` is the one command to remember. Run it with no arguments for a menu, or name an action: `setup`, `doctor`, `status`, `start`, `stop`, `restart`, `logs`, `attach`, `token`, `test`, `update`, `app`, `agent-prompt`.
 
+`setup` also links the `crew` command (`deploy/crew-cli.sh`) as `~/.local/bin/crew`: the command line the agents use to manage routines.
+
 - Setting up, moving or fixing a machine: run `./master.sh doctor` first. Fix what it reports, then run it again. Every FAIL line comes with a fix.
 - When you add a setup step, a dependency, a service or a check, add it to `master.sh` (`setup` and `doctor`) and to this file in the same change. A manual step that only lives in chat is lost.
 - `agent-prompt` only copies a ready-made prompt for the owner to paste into an agent session. Keep it that way. It never starts an agent.
@@ -16,7 +18,9 @@ Crew is a self-hosted, agent-agnostic agent team. The owner asks for a task in t
 
 - `server/`: the Crew server, `crew_server` (Python 3.12, FastAPI, asyncpg, managed with uv).
   - `acp.py`: JSON-RPC over stdio to one agent process per engine.
-  - `hub.py`: sessions, turns, approvals, config options, and messages: stored first, then steered into the running turn (ACP `_session/steering`, only where the agent advertises it), queued, or sent after an interrupt; queued messages survive a restart. It also links a browser tab to the session whose agent is using it, and has the emergency restart.
+  - `hub.py`: sessions, turns, approvals, config options, and messages: stored first, then steered into the running turn (ACP `_session/steering`, only where the agent advertises it), queued, or sent after an interrupt; queued messages survive a restart. It also links a browser tab to the session whose agent is using it, has the emergency restart, compacts a chat (the agent's own `/compact` where it advertises one, else a handover to a fresh agent session), and runs routines: a scheduler loop starts due routines as messages in each routine's own chat and tracks every run.
+  - `routines.py`: cron schedules (cronsim) in a timezone, their reading in words, catch-up after downtime, and the prompt each run sends (date facts plus the instructions).
+  - `cli.py`: the `crew` command for agents and the owner (`crew routines ...`, `crew schedule ...`), over the local HTTP API.
   - `api.py`: HTTP API (see `docs/api.md`).
   - `attachments.py`: uploads from the phone, saved as `~/.crew/common/attachments/<session id prefix>-<name>` and passed to the agent as paths and ACP resource links.
   - `files.py`: files the agents hand back: paths in a reply that name a file in a shared folder (`CREW_SHARE_DIRS`, default `$CREW_WORKDIR/outputs`) are listed on `turn_end`, and `GET /api/files` serves only those folders. The app saves them to Downloads/Crew.
@@ -29,7 +33,8 @@ Crew is a self-hosted, agent-agnostic agent team. The owner asks for a task in t
   - `run-server.sh`, `run-browser.sh`.
   - `systemd/*.service`: templates that `master.sh setup` installs to `~/.config/systemd/user/`.
   - Example config files.
-  - `agents-section.md`: instructions for the agents Crew runs.
+  - `agents-section.md`: instructions for the agents Crew runs, including the routine rules (ask before creating a routine when an existing one may be the one to update).
+  - `crew-cli.sh`: the `crew` command, run with the server's environment.
 - `docs/`: `api.md`.
 
 ## How it runs
@@ -60,6 +65,7 @@ All config is in `~/.config/crew/` (folder mode 700, files 600):
   - `CREW_PORT`: default 8800.
   - `CREW_SHARE_DIRS`: folders the agents hand files back from. Default `$CREW_WORKDIR/outputs`.
   - `CREW_BROWSER_PROFILE` and `CREW_CDP_PORT`.
+  - `CREW_TIMEZONE`: the timezone routine schedules are read in. Default: the machine's own.
   - `CREW_BROWSER_GPU`: default 0. The agents' Brave renders in software, because with the GPU it stops painting (about 1 frame a second, every click waiting a second) once the monitor sleeps, and does not recover. Set 1 only where the display never sleeps.
 - `engines.toml`: start from `deploy/engines.example.toml`. Each engine is an ACP command with optional environment variables.
 - `token`: the phone's bearer token, created on the first start. `./master.sh token` shows it.

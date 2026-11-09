@@ -187,6 +187,40 @@ class CrewApi(val baseUrl: String, private val token: String, val route: Route) 
         return o.optJSONArray("events").objects().map(Event::from) to o.optLong("last_seq", after)
     }
 
+    /** Compact the chat's agent context after the running turn (the agent's own /compact, or a handover). */
+    fun compact(id: String) {
+        obj("POST", "/api/sessions/$id/compact", JSONObject())
+    }
+
+    // routines
+
+    fun routines(): List<Routine> = arr("GET", "/api/routines").objects().map(Routine::from)
+
+    fun routine(id: String): Routine = Routine.from(obj("GET", "/api/routines/$id"))
+
+    fun createRoutine(fields: JSONObject): Routine = Routine.from(obj("POST", "/api/routines", fields))
+
+    fun updateRoutine(id: String, changes: JSONObject): Routine = Routine.from(obj("PATCH", "/api/routines/$id", changes))
+
+    fun deleteRoutine(id: String) {
+        obj("DELETE", "/api/routines/$id")
+    }
+
+    fun runRoutine(id: String): RoutineRun = RoutineRun.from(obj("POST", "/api/routines/$id/run", JSONObject()))
+
+    fun previewSchedule(schedule: String, timezone: String?): SchedulePreview = try {
+        val body = JSONObject().put("schedule", schedule)
+        if (timezone != null) body.put("timezone", timezone)
+        val o = obj("POST", "/api/routines/preview", body)
+        SchedulePreview(
+            o.optString("schedule_text"),
+            o.optJSONArray("next_runs")?.let { a -> (0 until a.length()).map { a.optString(it) } } ?: emptyList(),
+            null,
+        )
+    } catch (e: ApiException) {
+        SchedulePreview(null, emptyList(), e.message)
+    }
+
     fun approvals(): List<Approval> = arr("GET", "/api/approvals").objects().map(Approval::from)
 
     fun decide(id: String, optionId: String): Approval =

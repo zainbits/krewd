@@ -24,6 +24,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -39,6 +40,8 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextField
 import androidx.compose.material3.TextFieldDefaults
@@ -90,9 +93,18 @@ fun ChatScreen(state: UiState, viewModel: CrewViewModel) {
     val rowCount = items.size + if (busy) 1 else 0
     val lastLength = (items.lastOrNull() as? TextItem)?.text?.length ?: 0
 
+    // Opened from a routine's run: scroll to the message that started that run, once it is loaded.
+    val focusIndex = state.chatFocus?.let { key -> items.indexOfFirst { it.key == key }.takeIf { it >= 0 } }
+    LaunchedEffect(focusIndex) {
+        if (focusIndex != null) {
+            listState.scrollToItem(focusIndex + if (state.timelineLoading) 1 else 0)
+            viewModel.focusDone()
+        }
+    }
+
     // Follow the newest output unless the user has scrolled up to read.
     LaunchedEffect(rowCount, lastLength) {
-        if (rowCount == 0) return@LaunchedEffect
+        if (rowCount == 0 || state.chatFocus != null) return@LaunchedEffect
         val info = listState.layoutInfo
         val lastVisible = info.visibleItemsInfo.lastOrNull()?.index ?: 0
         if (info.totalItemsCount == 0 || lastVisible >= info.totalItemsCount - 3) {
@@ -197,6 +209,22 @@ fun ChatScreen(state: UiState, viewModel: CrewViewModel) {
 private fun ChatTopBar(state: UiState, viewModel: CrewViewModel) {
     val session = state.openSession
     var menuOpen by remember { mutableStateOf(false) }
+    var confirmCompact by remember { mutableStateOf(false) }
+    if (confirmCompact && session != null) {
+        AlertDialog(
+            onDismissRequest = { confirmCompact = false },
+            title = { Text("Compact the context?") },
+            text = {
+                Text(
+                    (session.contextPercent?.let { "The agent's context is $it% full. " } ?: "") +
+                        if (session.compact == "native") "The agent summarises the chat so far with its own /compact and carries on with the summary."
+                        else "The agent writes a handover, then a fresh agent session continues from it.\n\nThe chat here stays as it is either way. It runs after the current turn.",
+                )
+            },
+            confirmButton = { TextButton(onClick = { confirmCompact = false; viewModel.compact(session.id) }) { Text("Compact") } },
+            dismissButton = { TextButton(onClick = { confirmCompact = false }) { Text("Cancel") } },
+        )
+    }
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -245,6 +273,33 @@ private fun ChatTopBar(state: UiState, viewModel: CrewViewModel) {
                             menuOpen = false
                         },
                     )
+                    DropdownMenuItem(
+                        text = { Text(if (session.pinned) "Unpin" else "Pin to top") },
+                        leadingIcon = { Icon(painterResource(R.drawable.ic_pin_24), contentDescription = null) },
+                        onClick = {
+                            menuOpen = false
+                            viewModel.setPinned(session.id, !session.pinned)
+                        },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Compact context" + (session.contextPercent?.let { " · $it% used" } ?: "")) },
+                        leadingIcon = { Icon(painterResource(R.drawable.ic_compress_24), contentDescription = null) },
+                        onClick = {
+                            menuOpen = false
+                            confirmCompact = true
+                        },
+                    )
+                    session.routineId?.let { routineId ->
+                        DropdownMenuItem(
+                            text = { Text("Routine: schedule and runs") },
+                            leadingIcon = { Icon(painterResource(R.drawable.ic_schedule_24), contentDescription = null) },
+                            onClick = {
+                                menuOpen = false
+                                viewModel.closeSession()
+                                viewModel.openRoutine(routineId)
+                            },
+                        )
+                    }
                     HorizontalDivider()
                     DropdownMenuItem(text = { Text("Watch the browser") }, onClick = {
                         menuOpen = false
@@ -369,7 +424,11 @@ private fun Composer(
 @Composable
 private fun ChatRow(item: ChatItem, viewModel: CrewViewModel, busy: Boolean) {
     when (item) {
-        is UserItem -> UserRow(item, busy, onResend = { item.clientId?.let(viewModel::resend) })
+        is UserItem -> when (item.purpose) {
+            "routine" -> RoutineRunRow(item)
+            "compact" -> CompactRow(item)
+            else -> UserRow(item, busy, onResend = { item.clientId?.let(viewModel::resend) })
+        }
         is TextItem -> if (item.isThought) ThoughtRow(item.text) else SelectionContainer { Markdown(item.text) }
         is ToolItem -> ToolRow(item)
         is PlanItem -> SectionCard {
@@ -425,6 +484,57 @@ private fun UserRow(item: UserItem, busy: Boolean, onResend: () -> Unit) {
                 DeliveryLine(item, busy, onBubble)
             }
         }
+    }
+}
+
+/** A routine's run, as Crew sent it: a header with the full prompt behind a tap. */
+@Composable
+private fun RoutineRunRow(item: UserItem) {
+    var open by remember { mutableStateOf(false) }
+    Surface(
+        shape = RoundedCornerShape(16.dp),
+        color = MaterialTheme.colorScheme.secondaryContainer,
+        modifier = Modifier.fillMaxWidth().clickable { open = !open },
+    ) {
+        Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Icon(painterResource(R.drawable.ic_schedule_24), contentDescription = null, tint = MaterialTheme.colorScheme.onSecondaryContainer, modifier = Modifier.size(18.dp))
+                Text(
+                    (if (item.trigger == "manual") "Run now" else "Scheduled run") + (item.version?.let { " · instructions v$it" } ?: ""),
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.onSecondaryContainer,
+                    modifier = Modifier.weight(1f),
+                )
+                Text(
+                    when (item.state) {
+                        "queued", "steering" -> "Queued"
+                        "cancelled" -> "Not run"
+                        else -> if (open) "Hide" else "Details"
+                    },
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.75f),
+                )
+            }
+            if (open) SelectionContainer { Text(item.text, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSecondaryContainer) }
+        }
+    }
+}
+
+/** "Compacting the context", sent from the chat menu. */
+@Composable
+private fun CompactRow(item: UserItem) {
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
+        Icon(painterResource(R.drawable.ic_compress_24), contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(14.dp))
+        Spacer(Modifier.width(6.dp))
+        Text(
+            when (item.state) {
+                "queued", "steering" -> "Compact queued: after this turn"
+                "cancelled" -> "Compact not run (stopped)"
+                else -> "Compacting the context"
+            },
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }
 

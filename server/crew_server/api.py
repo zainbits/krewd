@@ -17,6 +17,7 @@ from . import files as shared_files
 from .attachments import TooLarge
 from .browser import Browser, BrowserUnavailable, TabGone
 from .hub import Conflict, Hub, NotFound
+from .routines import Invalid
 
 LONG_POLL_MAX_SECONDS = 30
 
@@ -60,6 +61,31 @@ class SessionChanges(BaseModel):
     archived: bool | None = None
     mode: str | None = None
     config: dict[str, str] | None = None
+
+
+class RoutineFields(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=200)
+    instructions: str | None = Field(default=None, min_length=1, max_length=20000)
+    schedule: str | None = Field(default=None, min_length=9, max_length=200)  # 5-field cron
+    timezone: str | None = Field(default=None, max_length=64)
+    engine: str | None = None
+    mode: str | None = None
+    config: dict[str, str] | None = None
+    auto_approve: bool | None = None
+    enabled: bool | None = None
+    note: str | None = Field(default=None, max_length=500)  # why it changed, kept with the version
+    by: Literal["owner", "agent"] = "owner"
+
+
+class NewRoutine(RoutineFields):
+    title: str = Field(min_length=1, max_length=200)
+    instructions: str = Field(min_length=1, max_length=20000)
+    schedule: str = Field(min_length=9, max_length=200)
+
+
+class SchedulePreview(BaseModel):
+    schedule: str = Field(min_length=1, max_length=200)
+    timezone: str | None = Field(default=None, max_length=64)
 
 
 class Decision(BaseModel):
@@ -139,6 +165,10 @@ def create_app(hub: Hub, token: str, lifespan_hub: bool = True) -> FastAPI:
     async def too_large(_, exc: TooLarge):
         return JSONResponse(status_code=413, content={"detail": str(exc)})
 
+    @app.exception_handler(Invalid)
+    async def invalid(_, exc: Invalid):
+        return JSONResponse(status_code=422, content={"detail": str(exc)})
+
     @app.exception_handler(Conflict)
     async def conflict(_, exc: Conflict):
         return JSONResponse(status_code=409, content={"detail": str(exc)})
@@ -194,6 +224,54 @@ def create_app(hub: Hub, token: str, lifespan_hub: bool = True) -> FastAPI:
     async def cancel(session_id: uuid.UUID) -> dict[str, Any]:
         await hub.cancel(session_id)
         return {"ok": True}
+
+    @app.post("/api/sessions/{session_id}/compact", dependencies=auth, status_code=202)
+    async def compact(session_id: uuid.UUID) -> dict[str, Any]:
+        """Compact the agent's context after the running turn (the agent's own /compact, or a handover)."""
+        return {"ok": True, "message": await hub.compact(session_id)}
+
+    # Routines: instructions that run on a schedule, every run in the routine's own chat.
+
+    @app.get("/api/routines", dependencies=auth)
+    async def routines() -> list[dict[str, Any]]:
+        return await hub.list_routines()
+
+    @app.post("/api/routines", dependencies=auth, status_code=201)
+    async def new_routine(body: NewRoutine) -> dict[str, Any]:
+        return await hub.create_routine(
+            body.title, body.instructions, body.schedule, body.timezone, body.engine, body.mode, body.config,
+            bool(body.auto_approve), body.enabled is not False, created_by=body.by, note=body.note,
+        )
+
+    @app.post("/api/routines/preview", dependencies=auth)
+    async def preview_schedule(body: SchedulePreview) -> dict[str, Any]:
+        return hub.preview_schedule(body.schedule, body.timezone)
+
+    @app.get("/api/routines/{routine_id}", dependencies=auth)
+    async def routine(routine_id: uuid.UUID) -> dict[str, Any]:
+        return await hub.get_routine(routine_id)
+
+    @app.patch("/api/routines/{routine_id}", dependencies=auth)
+    async def change_routine(routine_id: uuid.UUID, body: RoutineFields) -> dict[str, Any]:
+        changes = body.model_dump(exclude_none=True, exclude={"note", "by"})
+        return await hub.update_routine(routine_id, changes, changed_by=body.by, note=body.note)
+
+    @app.delete("/api/routines/{routine_id}", dependencies=auth)
+    async def delete_routine(routine_id: uuid.UUID) -> dict[str, Any]:
+        await hub.delete_routine(routine_id)
+        return {"ok": True}
+
+    @app.post("/api/routines/{routine_id}/run", dependencies=auth, status_code=202)
+    async def run_routine(routine_id: uuid.UUID) -> dict[str, Any]:
+        return await hub.run_routine(routine_id)
+
+    @app.get("/api/routines/{routine_id}/runs", dependencies=auth)
+    async def routine_runs(routine_id: uuid.UUID, limit: int = Query(default=50, le=500)) -> list[dict[str, Any]]:
+        return await hub.routine_runs(routine_id, limit)
+
+    @app.get("/api/routines/{routine_id}/versions", dependencies=auth)
+    async def routine_versions(routine_id: uuid.UUID) -> list[dict[str, Any]]:
+        return await hub.routine_versions(routine_id)
 
     @app.get("/api/sessions/{session_id}/events", dependencies=auth)
     async def session_events(

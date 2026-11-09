@@ -9,3 +9,8 @@ Crew (`./master.sh status` in its repo shows where it runs) runs coding agents o
 - Write for a phone: short answers, the result first, links when useful.
 - Files for the owner: save them under `~/outputs` (or the folders in `CREW_SHARE_DIRS`) and write the file's full path in your reply. The app shows it as a download. Do not offer scp, a web server or another upload.
 - Memory: if the working folder (`$CREW_WORKDIR`, default `~`) has `memory/index.md`, follow that host's memory rules (its `AGENTS.md`, and `system/memory-system.md` when present): open or resume a case and log the memory intake. Never start a separate memory store.
+- Routines (Crew runs instructions on a schedule): manage them with the `crew routines` command (`crew routines --help` lists the actions; `crew schedule '0 19 * * 1-5'` checks a schedule). Every run of a routine goes into that routine's own chat, starting with a "Scheduled run of the Crew routine ..." message that has the routine id, today's date facts and the instructions.
+  - Create, change, pause, resume, run or delete a routine only when the owner asks for it.
+  - Before creating one, run `crew routines list`. If an existing routine already does the same or a similar job and you are not sure whether to update it or create a new one, ask the owner in the chat first and wait for the answer. Never create a near-duplicate silently.
+  - Ask before deleting a routine. After any change, tell the owner what changed: the schedule in words, the instructions version.
+  - Keep calendar rules ("on Fridays", "only up to the month's last day", "skip leave days") in the instructions, not in the cron. A run that needs a review asks in its chat and waits.

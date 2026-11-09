@@ -21,8 +21,8 @@ android {
         applicationId = "app.crew"
         minSdk = 36
         targetSdk = 37
-        versionCode = 9
-        versionName = "0.4.5"
+        versionCode = 10
+        versionName = "0.5.0"
     }
 
     signingConfigs {

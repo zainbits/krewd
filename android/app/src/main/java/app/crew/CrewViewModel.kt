@@ -22,6 +22,9 @@ import app.crew.data.Event
 import app.crew.data.FrameStream
 import app.crew.data.PendingFile
 import app.crew.data.Prefs
+import app.crew.data.Routine
+import app.crew.data.RoutineRun
+import app.crew.data.SchedulePreview
 import app.crew.data.SessionInfo
 import app.crew.data.Timeline
 import app.crew.data.UserItem
@@ -69,9 +72,10 @@ data class OutgoingMessage(
 
 object NavTab {
     const val TASKS = 0
-    const val BROWSER = 1
-    const val APPROVALS = 2
-    const val SETTINGS = 3
+    const val ROUTINES = 1
+    const val BROWSER = 2
+    const val APPROVALS = 3
+    const val SETTINGS = 4
 }
 
 data class UiState(
@@ -107,7 +111,15 @@ data class UiState(
     val newTaskText: String = "",
     /** A task deleted in the last 3 seconds: hidden, and only deleted on the server once Undo has passed. */
     val pendingDelete: SessionInfo? = null,
+    val routines: List<Routine> = emptyList(),
+    /** The routine whose page is open, with its run history once loaded. */
+    val openRoutineId: String? = null,
+    val routineDetail: Routine? = null,
+    /** A chat row to scroll to once it is loaded (a routine run's message), as its timeline key. */
+    val chatFocus: String? = null,
 ) {
+    val openRoutine: Routine? get() = routineDetail?.takeIf { it.id == openRoutineId } ?: routines.firstOrNull { it.id == openRoutineId }
+    fun routine(id: String?): Routine? = routines.firstOrNull { it.id == id }
     fun draft(key: String): List<PendingFile> = drafts[key].orEmpty()
     val browserTab: BrowserTab? get() = browser?.tabs?.firstOrNull { it.id == browserTabId }
     val openSession: SessionInfo? get() = sessions.firstOrNull { it.id == openSessionId }
@@ -188,6 +200,7 @@ class CrewViewModel(private val app: Application) {
                 api = client
                 val sessions = client.sessions().filterNot { it.id == _state.value.pendingDelete?.id }
                 val approvals = client.approvals()
+                val routines = runCatching { client.routines() }.getOrDefault(_state.value.routines)
                 val wasRestarting = _state.value.restarting && sawDown
                 _state.update {
                     it.copy(
@@ -195,6 +208,7 @@ class CrewViewModel(private val app: Application) {
                         engines = server.engines,
                         sessions = sessions,
                         approvals = approvals,
+                        routines = routines,
                         restarting = if (wasRestarting) false else it.restarting,
                         message = if (wasRestarting) "Crew is back" else it.message,
                     )
@@ -202,6 +216,7 @@ class CrewViewModel(private val app: Application) {
                 if (wasRestarting) sawDown = false
                 syncLive(sessions)
                 _state.value.openSessionId?.let { loadTimeline(client, it) }
+                _state.value.openRoutineId?.let { loadRoutine(client, it) }
                 retryOutbox()
                 attempt = 0
                 var after = server.lastSeq
@@ -263,6 +278,7 @@ class CrewViewModel(private val app: Application) {
                 pushLive()
             }
             "error" -> lastError[sid] = event.payload.optString("message", "Something went wrong")
+            "routine" -> routineEvent(event.payload)
             "approval" -> {
                 val approval = Approval.from(event.payload)
                 _state.update { s ->
@@ -304,6 +320,28 @@ class CrewViewModel(private val app: Application) {
         }
     }
 
+    private fun routineEvent(payload: JSONObject) {
+        val id = payload.optString("id")
+        if (payload.optBoolean("deleted")) {
+            _state.update { s ->
+                s.copy(
+                    routines = s.routines.filterNot { it.id == id },
+                    openRoutineId = s.openRoutineId.takeUnless { it == id },
+                    routineDetail = s.routineDetail?.takeUnless { it.id == id },
+                )
+            }
+            return
+        }
+        val routine = runCatching { Routine.from(payload) }.getOrNull() ?: return
+        _state.update { s -> s.copy(routines = upsertRoutine(s.routines, routine)) }
+        // The open page shows the history too: fetch it again (runs change on every run).
+        if (_state.value.openRoutineId == id) api?.let { client -> scope.launch(Dispatchers.IO) { loadRoutine(client, id) } }
+    }
+
+    private fun upsertRoutine(list: List<Routine>, routine: Routine): List<Routine> =
+        (list.filterNot { it.id == routine.id } + routine)
+            .sortedWith(compareByDescending<Routine> { it.enabled }.thenBy { it.nextRunAt ?: "9" }.thenBy { it.title })
+
     // live activity notifications
 
     private fun liveTask(session: SessionInfo): LiveTask = live.getOrPut(session.id) {
@@ -339,6 +377,86 @@ class CrewViewModel(private val app: Application) {
     // navigation
 
     fun navigate(tab: Int) = _state.update { it.copy(navTab = tab) }
+
+    // routines
+
+    fun openRoutine(id: String) {
+        _state.update { it.copy(openRoutineId = id, routineDetail = it.routineDetail?.takeIf { d -> d.id == id }) }
+        val client = api ?: return
+        scope.launch(Dispatchers.IO) { loadRoutine(client, id) }
+    }
+
+    fun closeRoutine() = _state.update { it.copy(openRoutineId = null, routineDetail = null) }
+
+    private fun loadRoutine(client: CrewApi, id: String) {
+        try {
+            val routine = client.routine(id)
+            _state.update { s ->
+                if (s.openRoutineId != id) s
+                else s.copy(routineDetail = routine, routines = upsertRoutine(s.routines, routine.copy(runs = null)))
+            }
+        } catch (e: ApiException) {
+            if (e.code == 404) _state.update { it.copy(openRoutineId = null, routineDetail = null, message = "That routine was deleted") }
+        } catch (e: Exception) {
+            // Offline: the page keeps what it has; the loop reloads it on reconnect.
+        }
+    }
+
+    /** Creates (no [id]) or changes a routine. [done] runs on the main thread with the saved routine. */
+    fun saveRoutine(id: String?, fields: JSONObject, failed: () -> Unit = {}, done: (Routine) -> Unit = {}) = act { client ->
+        val routine = try {
+            if (id == null) client.createRoutine(fields) else client.updateRoutine(id, fields)
+        } catch (e: Exception) {
+            launchMain(failed)
+            throw e
+        }
+        _state.update { s -> s.copy(routines = upsertRoutine(s.routines, routine)) }
+        if (_state.value.openRoutineId == routine.id) loadRoutine(client, routine.id)
+        launchMain { done(routine) }
+    }
+
+    fun setRoutineEnabled(id: String, on: Boolean) = saveRoutine(id, JSONObject().put("enabled", on))
+
+    fun runRoutine(id: String) = act { client ->
+        client.runRoutine(id)
+        loadRoutine(client, id)
+        _state.update { it.copy(message = "Started: it runs in the routine's chat") }
+    }
+
+    fun deleteRoutine(id: String) = act { client ->
+        client.deleteRoutine(id)
+        _state.update { s ->
+            s.copy(
+                routines = s.routines.filterNot { it.id == id },
+                openRoutineId = s.openRoutineId.takeUnless { it == id },
+                routineDetail = s.routineDetail?.takeUnless { it.id == id },
+            )
+        }
+    }
+
+    /** Checks a schedule on the server (blocking; call off the main thread). Null when offline. */
+    fun previewSchedule(schedule: String, timezone: String?): SchedulePreview? = api?.previewSchedule(schedule, timezone)
+
+    /** Opens a routine's chat; with a run, scrolls to the message that started that run. */
+    fun openRoutineChat(routine: Routine, run: RoutineRun? = null) {
+        val sid = run?.sessionId ?: routine.sessionId ?: run { toast("This routine has no chat yet: it gets one on its next run"); return }
+        openSession(sid)
+        run?.seq?.let { seq -> _state.update { it.copy(chatFocus = "user-$seq") } }
+    }
+
+    fun focusDone() = _state.update { it.copy(chatFocus = null) }
+
+    // chats: pin and compact
+
+    fun setPinned(id: String, on: Boolean) = act { client ->
+        val session = client.updateSession(id, JSONObject().put("pinned", on))
+        _state.update { it.copy(sessions = upsert(it.sessions, session)) }
+    }
+
+    fun compact(id: String) = act { client ->
+        client.compact(id)
+        _state.update { it.copy(message = "Compacting after the current turn") }
+    }
 
     fun openSession(id: String) {
         synchronized(pendingLive) {

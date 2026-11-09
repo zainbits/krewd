@@ -30,7 +30,10 @@ TOKEN = "test-token"
 @pytest.fixture
 async def hub(tmp_path):
     pool = await db.connect(DATABASE_URL)
-    await pool.execute("drop table if exists messages, events, approvals, sessions, engines, schema_version cascade")
+    await pool.execute(
+        "drop table if exists routine_runs, routine_versions, routines, messages, events, approvals, sessions,"
+        " engines, schema_version cascade"
+    )
     settings = Settings(
         database_url=DATABASE_URL,
         host="127.0.0.1",
@@ -38,7 +41,11 @@ async def hub(tmp_path):
         workdir=tmp_path,
         token_file=tmp_path / "token",
         state_dir=tmp_path / "state",
-        engines={"fake": Engine(id="fake", name="Fake", command=[sys.executable, str(FAKE)])},
+        engines={
+            "fake": Engine(id="fake", name="Fake", command=[sys.executable, str(FAKE)]),
+            "native": Engine(id="native", name="Fake with /compact", command=[sys.executable, str(FAKE)],
+                             env={"FAKE_COMMANDS": "compact,review"}),
+        },
         default_engine="fake",
         data_dir=tmp_path / "data",
         max_upload_mb=1,
@@ -193,8 +200,8 @@ async def test_engines_are_probed_for_their_options(hub):
         await asyncio.sleep(0.05)
     assert [o["id"] for o in listing[0]["config_options"]] == ["model", "effort"]
     assert listing[0]["agent"]["title"] == "Fake Agent"
-    rows = await hub.pool.fetch("select * from engines")
-    assert rows[0]["id"] == "fake" and rows[0]["config_options"]
+    rows = {r["id"]: r for r in await hub.pool.fetch("select * from engines")}
+    assert rows["fake"]["config_options"]
 
 
 async def test_attachments_are_stored_and_reach_the_agent(hub):
@@ -404,3 +411,171 @@ async def test_repeated_session_states_are_sent_once(hub):
     states = [e["payload"] for e in await hub.events(0, sid) if e["kind"] == "session"]
     plain = [{k: v for k, v in p.items() if k != "updated_at"} for p in states]
     assert all(a != b for a, b in zip(plain, plain[1:]))
+
+
+# routines and compaction
+
+from datetime import UTC, datetime, timedelta  # noqa: E402
+
+
+async def wait_run(hub: Hub, routine_id, status: str, timeout: float = 10.0) -> dict:
+    deadline = asyncio.get_running_loop().time() + timeout
+    while asyncio.get_running_loop().time() < deadline:
+        runs = await hub.routine_runs(routine_id)
+        if runs and runs[0]["status"] == status:
+            return runs[0]
+        await asyncio.sleep(0.05)
+    raise AssertionError(f"no run with status {status}: {runs}")
+
+
+async def test_routine_has_its_own_chat_and_runs_into_it(hub):
+    routine = await hub.create_routine(
+        "Timesheet", "Fill the timesheet on Fridays.", "0 19 * * 1-5", timezone="Asia/Kolkata"
+    )
+    rid, sid = uuid.UUID(routine["id"]), uuid.UUID(routine["session_id"])
+    assert routine["schedule_text"] == "Weekdays at 19:00" and routine["version"] == 1
+    assert len(routine["next_runs"]) == 3 and routine["next_run_at"]
+    chat = await hub.get_session(sid)
+    assert chat["routine_id"] == routine["id"] and chat["title"] == "Timesheet" and chat["status"] == "idle"
+
+    run = await hub.run_routine(rid)
+    assert run["trigger"] == "manual" and run["session_id"] == str(sid)
+    done = await wait_run(hub, rid, "done")
+    assert "routine-ran" in done["summary"] and done["started_at"] and done["seq"]
+    user = next(e for e in await hub.events(0, sid) if e["kind"] == "user")
+    assert user["payload"]["purpose"] == "routine" and user["payload"]["meta"]["run_id"] == run["id"]
+    assert "Fill the timesheet on Fridays." in user["payload"]["text"]
+    assert "This month ends on" in user["payload"]["text"]
+
+    # A second run goes into the same chat, with the edited instructions as a new version.
+    edited = await hub.update_routine(rid, {"instructions": "Fill it and ask me to review."}, note="review first")
+    assert edited["version"] == 2
+    await hub.run_routine(rid)
+    await wait_run(hub, rid, "done")
+    users = [e for e in await hub.events(0, sid) if e["kind"] == "user"]
+    assert len(users) == 2 and "ask me to review" in users[1]["payload"]["text"]
+    assert len(await hub.list_sessions()) == 1
+    versions = await hub.routine_versions(rid)
+    assert [v["version"] for v in versions] == [2, 1] and versions[0]["note"] == "review first"
+
+
+async def test_scheduler_runs_due_routines_once_and_skips_stale_ones(hub):
+    routine = await hub.create_routine("Daily", "Check out.", "*/5 * * * *", timezone="UTC")
+    rid = uuid.UUID(routine["id"])
+    now = datetime.now(UTC)
+    await hub.pool.execute("update routines set next_run_at = $2 where id = $1", rid, now - timedelta(minutes=1))
+    assert await hub.run_due(now) == 1
+    assert await hub.run_due(now) == 0  # claimed: next_run_at moved on
+    nxt = await hub.pool.fetchval("select next_run_at from routines where id = $1", rid)
+    assert nxt > now
+    await wait_run(hub, rid, "done")
+
+    # Missed by more than the catch-up window (Crew was down): recorded as skipped, not run.
+    # (A yearly schedule, so no later slot falls inside the window either.)
+    yearly = await hub.create_routine("Yearly", "Renew.", "0 0 1 1 *", timezone="UTC")
+    yid = uuid.UUID(yearly["id"])
+    await hub.pool.execute("update routines set next_run_at = $2 where id = $1", yid, now - timedelta(hours=9))
+    assert await hub.run_due(now) == 0
+    runs = await hub.routine_runs(yid)
+    assert runs[0]["status"] == "skipped" and "not running" in runs[0]["summary"]
+
+
+async def test_routine_run_skips_while_the_last_one_runs(hub):
+    routine = await hub.create_routine("Slow", "slow task", "0 9 * * *", timezone="UTC")
+    rid = uuid.UUID(routine["id"])
+    await hub.run_routine(rid)
+    await wait_run(hub, rid, "running")
+    with pytest.raises(Exception, match="not finished"):
+        await hub.run_routine(rid)
+    await hub.cancel(uuid.UUID(routine["session_id"]))
+    await wait_run(hub, rid, "cancelled")
+
+
+async def test_routine_chat_comes_back_after_delete_and_pause_clears_next_run(hub):
+    routine = await hub.create_routine("Again", "Do it.", "0 9 * * *", timezone="UTC")
+    rid = uuid.UUID(routine["id"])
+    await hub.delete_session(uuid.UUID(routine["session_id"]))
+    paused = await hub.update_routine(rid, {"enabled": False})
+    assert paused["next_run_at"] is None and paused["session_id"] is None and paused["next_runs"] == []
+    run = await hub.run_routine(rid)
+    assert run["session_id"] and run["session_id"] != routine["session_id"]
+    await wait_run(hub, rid, "done")
+    await hub.delete_routine(rid)
+    chat = await hub.get_session(uuid.UUID(run["session_id"]))
+    assert chat["routine_id"] is None
+
+
+async def test_bad_schedules_are_refused(hub):
+    from crew_server.routines import Invalid
+    with pytest.raises(Invalid):
+        await hub.create_routine("Bad", "x", "every friday")
+    with pytest.raises(Invalid):
+        await hub.create_routine("Bad", "x", "0 9 * * *", timezone="Mars/Olympus")
+    assert hub.preview_schedule("0 18 * * 5", "Asia/Kolkata")["schedule_text"] == "Fridays at 18:00"
+
+
+async def test_routines_api(hub):
+    app = create_app(hub, TOKEN, lifespan_hub=False)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        h = {"Authorization": f"Bearer {TOKEN}"}
+        r = await client.post("/api/routines", headers=h, json={
+            "title": "API", "instructions": "Do it.", "schedule": "0 9 * * 1", "timezone": "UTC", "by": "agent"})
+        assert r.status_code == 201 and r.json()["created_by"] == "agent"
+        rid = r.json()["id"]
+        assert (await client.post("/api/routines", headers=h, json={
+            "title": "x", "instructions": "y", "schedule": "nonsense here"})).status_code == 422
+        r = await client.patch(f"/api/routines/{rid}", headers=h, json={"schedule": "0 10 * * 1"})
+        assert r.json()["version"] == 2 and r.json()["schedule_text"] == "Mondays at 10:00"
+        assert len((await client.get("/api/routines", headers=h)).json()) == 1
+        assert (await client.post(f"/api/routines/{rid}/run", headers=h)).status_code == 202
+        await wait_run(hub, uuid.UUID(rid), "done")
+        detail = (await client.get(f"/api/routines/{rid}", headers=h)).json()
+        assert detail["runs"][0]["status"] == "done" and detail["last_run"]["status"] == "done"
+        assert (await client.delete(f"/api/routines/{rid}", headers=h)).status_code == 200
+        assert (await client.get(f"/api/routines/{rid}", headers=h)).status_code == 404
+
+
+async def test_compact_uses_the_agents_own_command(hub):
+    session = await hub.create_session("first", engine="native")
+    sid = uuid.UUID(session["id"])
+    await wait_for(hub, sid, "turn_end")
+    for _ in range(100):
+        if (await hub.get_session(sid))["compact"] == "native":
+            break
+        await asyncio.sleep(0.05)
+    assert (await hub.get_session(sid))["compact"] == "native"
+    agent_session = await hub.pool.fetchval("select agent_session from sessions where id = $1", sid)
+    await hub.compact(sid)
+    event = await wait_for(hub, sid, "compact")
+    assert event == {"how": "native", "ok": True}
+    texts = [e["payload"]["text"] for e in await hub.events(0, sid) if e["kind"] == "text"]
+    assert "Compacted." in texts
+    assert await hub.pool.fetchval("select agent_session from sessions where id = $1", sid) == agent_session
+
+
+async def test_compact_hands_over_where_the_agent_cannot(hub):
+    with pytest.raises(Exception, match="Nothing to compact"):
+        await hub.compact(uuid.UUID((await hub.create_routine("R", "x", "0 9 * * *", timezone="UTC"))["session_id"]))
+    session = await hub.create_session("first")
+    sid = uuid.UUID(session["id"])
+    await wait_for(hub, sid, "turn_end")
+    assert (await hub.get_session(sid))["compact"] == "handover"
+    old = await hub.pool.fetchval("select agent_session from sessions where id = $1", sid)
+    await hub.compact(sid)
+    assert await wait_for(hub, sid, "compact") == {"how": "handover", "ok": True}
+    row = await hub.pool.fetchrow("select agent_session, carry from sessions where id = $1", sid)
+    assert row["agent_session"] is None and "MK-42" in row["carry"]
+    await hub.send(sid, "next please")
+    await wait_for(hub, sid, "text", lambda p: "carried=MK-42" in p["text"])
+    await wait_for(hub, sid, "turn_end", lambda p: True)
+    row = await hub.pool.fetchrow("select agent_session, carry from sessions where id = $1", sid)
+    assert row["agent_session"] and row["agent_session"] != old and row["carry"] is None
+
+
+async def test_pin_puts_a_chat_first(hub):
+    a = await hub.create_session("first")
+    b = await hub.create_session("second")
+    await wait_for(hub, uuid.UUID(b["id"]), "turn_end")
+    await hub.update_session(uuid.UUID(a["id"]), {"pinned": True})
+    listing = await hub.list_sessions()
+    assert listing[0]["id"] == a["id"] and listing[0]["pinned"]

@@ -14,19 +14,22 @@ Every route except `/api/health` needs `Authorization: Bearer <token>`.
 | `PATCH /api/sessions/{id}` | `{title?, auto_approve?, pinned?, archived?, mode?, config?: {config_id: value}}` | session |
 | `POST /api/sessions/{id}/messages` | `{text, attachments?, tabs?, delivery?: steer\|queue\|interrupt, client_id?}` | `{ok, message}` (see Messages below) |
 | `POST /api/sessions/{id}/cancel` | | `{ok}`; stops the turn, answers its open approvals with "cancelled" and drops the messages queued behind it |
+| `POST /api/sessions/{id}/compact` | | `{ok, message}`; compacts the agent's context after the running turn (see Compact below); 409 when the chat has no agent context yet. A second call while one is queued returns the queued one. |
 | `POST /api/admin/restart` | | `{ok}`; emergency: stops every agent process and exits, so systemd starts the server again (about 10 to 15 s). Interrupted turns end with an error; queued messages run after the restart. The browser is not touched. |
 | `GET /api/sessions/{id}/events?after=0` | | `{events, last_seq}`: the task's whole timeline |
 | `GET /api/events?after=N&wait=25` | | long-poll across all tasks: returns once there is an event after N |
 | `GET /api/approvals?status=pending` | | approvals |
 | `POST /api/approvals/{id}` | `{option_id}` | the decided approval; 409 if it is no longer waiting |
 
-Session: `{id, engine, title, status (idle|running|waiting|error), mode, modes, auto_approve, usage, last_text, pinned, archived, pending_approvals, browser_tab, created_at, updated_at}`. `browser_tab` `{id, url, title}` is the tab the agent last used (see The agents' browser). `modes` is what the agent advertises (ACP `availableModes`), so the app shows each agent's own modes.
+Session: `{id, engine, title, status (idle|running|waiting|error), mode, modes, auto_approve, usage, last_text, pinned, archived, pending_approvals, browser_tab, routine_id, compact, created_at, updated_at}`. `routine_id` is set on a routine's own chat. `compact` is `native` when the agent advertises a `compact` slash command (ACP `available_commands_update`), else `handover`. `pinned` sessions come first in the list. `browser_tab` `{id, url, title}` is the tab the agent last used (see The agents' browser). `modes` is what the agent advertises (ACP `availableModes`), so the app shows each agent's own modes.
 
 Harness, model and effort (agent-agnostic): sessions also carry `agent` (ACP `agentInfo`: `{name, title, version}`), `config_options` (the agent's ACP `configOptions`, flattened: `[{id, name, description, category, type, current, options: [{value, name, description, group?}]}]`; categories include `model`, `thought_level` (effort) and `mode`), `config` (the user's picks, re-sent to the agent after a restart) and `model_used` (the model the agent reported for its last step, from usage metadata). Setting `config` calls ACP `session/set_config_option`; the agent's reply replaces `config_options` (a model change can change the effort choices).
 
 Event: `{seq, session_id, kind, payload, created_at}`. Kinds:
 
-- `user` `{text, message_id, delivery, client_id?, attachments?, tabs?}`
+- `user` `{text, message_id, delivery, client_id?, attachments?, tabs?, purpose?, meta?}`: `purpose` is set when Crew sent the message itself: `routine` (a run; `meta` `{routine_id, run_id, title, trigger, version}`) or `compact` (`meta` `{how}`)
+- `routine` routine object (without runs) whenever it or its runs change, on the routine's chat; `{id, deleted: true}` when deleted
+- `compact` `{how: native|handover, ok}`: a compaction finished
 - `message` message object, whenever its state changes (delivered or cancelled)
 - `browser` `{id, url, title}`: the agent started using a tab
 - `text` `{message_id, role: assistant|thought, text}`: append to the row with the same `message_id`
@@ -47,6 +50,32 @@ Every message is stored before anything else happens, so it survives the phone g
 
 Clients replay a task with `/sessions/{id}/events`, then follow `/api/events` from `last_seq`. Events are durable, so a client can disconnect at any time and continue from the last seq it saw.
 
+
+## Compact
+
+Where the agent advertises a `compact` slash command (Claude Code and Codex do), Crew sends `/compact` as the next prompt and the agent keeps its session. Otherwise (OpenCode) the agent is asked for a handover summary; Crew then closes that agent session, opens a fresh one in the same chat, and puts the handover in front of the next message. The chat history in Crew is never changed. `usage` is cleared after a handover.
+
+## Routines
+
+A routine is owner instructions that Crew runs on a schedule. Every run goes into the routine's own chat (made with the routine, made again if deleted), so later runs see earlier ones and the owner's replies, and the chat can be compacted or pinned like any task. The schedule is a 5-field cron expression (`minute hour day-of-month month day-of-week`; `L` for the month's last day) read in the routine's timezone (default `CREW_TIMEZONE`, else the machine's). Calendar rules belong in the instructions: each run's prompt gives the date, weekday and the month's last day.
+
+The scheduler looks every 15 s. A due routine is claimed by moving `next_run_at` first, so it runs once. A run missed while Crew was down runs once if Crew is back within 6 hours, else it is recorded as `skipped`. A run while the routine's previous run is still queued or running is `skipped` (scheduled) or refused with 409 (run now). Changing the title, instructions or schedule makes a new version; every version is kept.
+
+| Method and path | Body | Returns |
+|---|---|---|
+| `GET /api/routines` | | routines, enabled first, by next run |
+| `POST /api/routines` | `{title, instructions, schedule, timezone?, engine?, mode?, config?, auto_approve?, enabled?, note?, by?: owner\|agent}` | the routine (201); 422 for a bad schedule or timezone |
+| `POST /api/routines/preview` | `{schedule, timezone?}` | `{schedule, timezone, schedule_text, next_runs}`; 422 with the reason when it is not valid |
+| `GET /api/routines/{id}` | | the routine with `runs` (last 50) |
+| `PATCH /api/routines/{id}` | any of the create fields | the routine. A new `engine` starts a new chat on the next run (a chat belongs to one agent); the old chat stays. |
+| `DELETE /api/routines/{id}` | | `{ok}`; the routine and its runs go, its chat stays as an ordinary task |
+| `POST /api/routines/{id}/run` | | the run (202), on top of the schedule |
+| `GET /api/routines/{id}/runs?limit=50` | | runs, newest first |
+| `GET /api/routines/{id}/versions` | | versions, newest first: `{version, title, instructions, schedule, timezone, changed_by, note, created_at}` |
+
+Routine: `{id, title, instructions, schedule, schedule_text, timezone, session_id, engine, mode, config, auto_approve, enabled, version, next_run_at, next_runs (next 3), last_run, session_status, created_by, created_at, updated_at}`. Run: `{id, routine_id, session_id, message_id, seq, trigger: schedule|manual, version, status: queued|running|done|error|cancelled|skipped, summary, scheduled_for, started_at, finished_at, created_at}`. `seq` is the run's message in the chat timeline, so the app can scroll to it; `summary` is the agent's last reply (clipped).
+
+Agents manage routines with the `crew` command on the Crew machine (`deploy/crew-cli.sh`, linked as `~/.local/bin/crew` by `master.sh setup`): `crew routines list|show|create|update|pause|resume|run|delete|versions` and `crew schedule '<cron>'`. It uses this API with the token in `~/.config/crew/token`. Its help text carries the agents' rules (ask before creating a routine when an existing one may be the one to update).
 
 ## The agents' browser
 

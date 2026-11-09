@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -77,7 +78,11 @@ fun TasksScreen(state: UiState, viewModel: CrewViewModel, padding: PaddingValues
         items(state.sessions, key = { it.id }) { session ->
             var confirm by remember { mutableStateOf(false) }
             var close by remember { mutableStateOf<() -> Unit>({}) }
-            SwipeToReveal(onDelete = { closeReveal -> close = closeReveal; confirm = true }) {
+            SwipeToReveal(
+                pinned = session.pinned,
+                onPin = { closeReveal -> closeReveal(); viewModel.setPinned(session.id, !session.pinned) },
+                onDelete = { closeReveal -> close = closeReveal; confirm = true },
+            ) {
                 SessionRow(session, onClick = { viewModel.openSession(session.id) })
             }
             if (confirm) {
@@ -210,6 +215,12 @@ private fun SessionRow(session: SessionInfo, onClick: () -> Unit) {
     ) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (session.pinned) {
+                    Icon(painterResource(R.drawable.ic_pin_24), contentDescription = "Pinned", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(16.dp))
+                }
+                if (session.routineId != null) {
+                    Icon(painterResource(R.drawable.ic_schedule_24), contentDescription = "Routine chat", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(16.dp))
+                }
                 Text(
                     session.title,
                     style = MaterialTheme.typography.titleMedium,
@@ -243,14 +254,20 @@ private fun SessionRow(session: SessionInfo, onClick: () -> Unit) {
 
 
 private val DELETE_WIDTH = 96.dp
+private val PIN_WIDTH = 88.dp
 
 /**
- * Slide a row left to reveal its Delete button. Releasing past half the button keeps it open; a tap on
- * the button calls [onDelete] with a function that slides the row back (for Cancel).
+ * Slide a row left to reveal Pin and Delete. Releasing past half the buttons keeps them open; a tap on
+ * a button calls it with a function that slides the row back (for Cancel, or after pinning).
  */
 @Composable
-private fun SwipeToReveal(onDelete: (close: () -> Unit) -> Unit, content: @Composable () -> Unit) {
-    val revealPx = with(androidx.compose.ui.platform.LocalDensity.current) { DELETE_WIDTH.toPx() }
+private fun SwipeToReveal(
+    pinned: Boolean,
+    onPin: (close: () -> Unit) -> Unit,
+    onDelete: (close: () -> Unit) -> Unit,
+    content: @Composable () -> Unit,
+) {
+    val revealPx = with(androidx.compose.ui.platform.LocalDensity.current) { (DELETE_WIDTH + PIN_WIDTH).toPx() }
     val offset = remember { androidx.compose.animation.core.Animatable(0f) }
     val scope = androidx.compose.runtime.rememberCoroutineScope()
     val close: () -> Unit = { scope.launch { offset.animateTo(0f) } }
@@ -261,6 +278,19 @@ private fun SwipeToReveal(onDelete: (close: () -> Unit) -> Unit, content: @Compo
                 .background(MaterialTheme.colorScheme.errorContainer, RoundedCornerShape(ShellDimensions.CARD_CORNER)),
             contentAlignment = Alignment.CenterEnd,
         ) {
+          Row(Modifier.fillMaxHeight()) {
+            Column(
+                Modifier
+                    .width(PIN_WIDTH)
+                    .fillMaxHeight()
+                    .background(MaterialTheme.colorScheme.secondaryContainer)
+                    .clickable(enabled = offset.value < -revealPx / 2) { onPin(close) },
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center,
+            ) {
+                Icon(painterResource(R.drawable.ic_pin_24), contentDescription = null, tint = MaterialTheme.colorScheme.onSecondaryContainer)
+                Text(if (pinned) "Unpin" else "Pin", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSecondaryContainer)
+            }
             Column(
                 Modifier
                     .width(DELETE_WIDTH)
@@ -272,6 +302,7 @@ private fun SwipeToReveal(onDelete: (close: () -> Unit) -> Unit, content: @Compo
                 Icon(painterResource(R.drawable.ic_delete_24), contentDescription = null, tint = MaterialTheme.colorScheme.onErrorContainer)
                 Text("Delete", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onErrorContainer)
             }
+          }
         }
         androidx.compose.foundation.layout.Box(
             Modifier
