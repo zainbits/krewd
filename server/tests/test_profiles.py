@@ -195,11 +195,20 @@ def profile_engines(tmp_path, gateway: str, codex: str, key: str | None = KEY) -
     return with_profiles(engines, {"gw": profile})
 
 
-async def test_claude_engines_get_the_gateway_and_key(tmp_path, gateway, fake_codex):
+async def test_claude_engines_get_the_gateway_key_and_a_model_the_key_may_use(tmp_path, gateway, fake_codex):
     engine = profile_engines(tmp_path, gateway, fake_codex)["fake@gw"]
     env = await Gateways(port=8800).engine_env(engine)
+    first = "anthropic/vendor/reasoner[1m]"  # the gateway's first model, as Claude Code's discovery sees it
     assert env == {"ANTHROPIC_BASE_URL": gateway, "ANTHROPIC_AUTH_TOKEN": KEY, "ANTHROPIC_API_KEY": "",
-                   "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY": "1"}
+                   "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY": "1", "ANTHROPIC_MODEL": first,
+                   "ANTHROPIC_DEFAULT_HAIKU_MODEL": first}
+
+
+def test_claude_lists_what_its_discovery_keeps():
+    from crew_server.profiles import claude_listed
+
+    models = [{"id": "claude-haiku-9"}, {"id": "gpt-x"}, {"id": "anthropic/glm[1m]"}]
+    assert claude_listed(models) == ["claude-haiku-9", "anthropic/glm[1m]"]
 
 
 async def test_codex_engines_get_a_provider_with_a_catalog_from_crew(tmp_path, gateway, fake_codex):

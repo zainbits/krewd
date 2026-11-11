@@ -121,6 +121,11 @@ def codex_catalog(models: list[dict[str, Any]], bundled: dict[str, Any]) -> dict
     return {"models": out}
 
 
+def claude_listed(models: list[dict[str, Any]]) -> list[str]:
+    """What Claude Code's gateway discovery keeps: ids with "claude" or "anthropic" in them."""
+    return [m["id"] for m in models if "claude" in m["id"].lower() or "anthropic" in m["id"].lower()]
+
+
 def default_model(catalog: dict[str, Any]) -> str | None:
     listed = [m for m in catalog.get("models", []) if m.get("visibility", "list") == "list"]
     return listed[0]["slug"] if listed else None
@@ -193,6 +198,19 @@ class Gateways:
     async def codex_catalog(self, engine: Engine) -> dict[str, Any]:
         return codex_catalog(await self.models(engine), await self.bundled(engine))
 
+    async def claude_models(self, engine: Engine) -> list[str]:
+        """The model ids Claude Code's gateway discovery will list for this key, in the gateway's order."""
+        profile = engine.profile
+        assert profile is not None
+        url = f"{profile.url_for(engine.gateway)}/v1"
+        cached = self._models.get((profile.id, url))
+        if cached and time.monotonic() - cached[0] < MODELS_TTL:
+            models = cached[1]
+        else:
+            models = await asyncio.to_thread(fetch_models, url, self.key(profile), True)
+            self._models[(profile.id, url)] = (time.monotonic(), models)
+        return claude_listed(models)
+
     async def engine_env(self, engine: Engine) -> dict[str, str]:
         """Environment that points the engine at its profile's gateway (added to the engine's own env)."""
         profile = engine.profile
@@ -200,12 +218,22 @@ class Gateways:
         key = self.key(profile)
         url = profile.url_for(engine.gateway)
         if engine.gateway == "claude":
-            return {
+            env = {
                 "ANTHROPIC_BASE_URL": url or "",
                 "ANTHROPIC_AUTH_TOKEN": key,
                 "ANTHROPIC_API_KEY": "",
                 "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY": "1",
             }
+            try:
+                models = await self.claude_models(engine)
+            except ProfileError:  # the gateway may not list models; Claude Code's own aliases still apply
+                models = []
+            if models:
+                # Start on a model the key may use (Claude Code's default may be blocked), as Codex does.
+                env["ANTHROPIC_MODEL"] = models[0]
+                if not any("haiku" in m.lower() for m in models):
+                    env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = models[0]  # Claude Code's background calls use this slot
+            return env
         if engine.gateway == "codex":
             catalog = await self.codex_catalog(engine)
             if not catalog["models"]:
@@ -248,10 +276,7 @@ async def check(engines: dict[str, Engine]) -> list[tuple[str, str, str]]:
                     raise ProfileError("the gateway offers no models to this key")
                 rows.append(("ok", engine.id, f"{len(names)} models: {', '.join(names[:4])}{' ...' if len(names) > 4 else ''}"))
             else:
-                # What Claude Code's gateway discovery sees: it keeps ids with "claude" or "anthropic".
-                url = (engine.profile.url_for(engine.gateway) or "") + "/v1"
-                models = await asyncio.to_thread(fetch_models, url, gateways.key(engine.profile), True)
-                kept = [m["id"] for m in models if "claude" in m["id"].lower() or "anthropic" in m["id"].lower()]
+                kept = await gateways.claude_models(engine)
                 if kept:
                     rows.append(("ok", engine.id, f"{len(kept)} models: {', '.join(kept[:4])}{' ...' if len(kept) > 4 else ''}"))
                 else:
