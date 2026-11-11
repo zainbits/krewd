@@ -86,6 +86,7 @@ An agent runs on its own login (the owner's subscription: `claude` then /login, 
   - Codex: a model provider in `MODEL_PROVIDER` and `CODEX_CONFIG` (read by codex-acp at start), whose `model_catalog_url` is Crew's `/api/codex-catalog/...`. Crew builds that catalog on Codex's own bundled catalog: a gateway that uses Codex's model names (an OpenAI proxy) gets the Codex models it serves; any other gateway gets its whole list on a plain template, described from the gateway's metadata.
 - A profile starts on the first model its gateway lists (`ANTHROPIC_MODEL`, or `model` in `CODEX_CONFIG`), since an agent's own default may be a model the key blocks; Claude Code's Haiku slot, used for its background calls, also points there when the gateway has no Haiku. The app remembers each profile's picks like any agent's.
 - The global configs must not point at a gateway (`env` in `~/.claude/settings.json`, `model_provider` in `~/.codex/config.toml`), or the subscription is not the default.
+- The app's model lists follow a change to the key's limits within 10 minutes (idle profile engines are asked again), or at once after Restart Crew backend.
 - `./master.sh doctor` checks every profile engine by asking its gateway for the key's models (no tokens spent).
 - OpenCode keeps its own providers in its own config; it has no Crew profiles.
 

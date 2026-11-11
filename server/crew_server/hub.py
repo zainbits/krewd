@@ -39,6 +39,7 @@ TITLE_MAX = 80
 PREVIEW_MAX = 280
 SCHEDULER_TICK = 15  # seconds between looks for due routines
 PROBE_RETRY = 60.0  # seconds before probing an engine again after a failed probe
+PROFILE_REFRESH = 600.0  # seconds a profile engine's model list is trusted before an idle engine is asked again
 RUN_SUMMARY_MAX = 2000
 NOTES_MAX = 8000
 TRIGGER_NAME = re.compile(r"^[a-z0-9][a-z0-9 _-]{0,39}$")
@@ -194,6 +195,9 @@ class Hub:
         self.scheduler: asyncio.Task | None = None
         self.gateways = Gateways(settings.port)
         self.probe_failed: dict[str, float] = {}  # engine id -> when its last probe failed
+        # Profile engine id -> when it last listed its options in this run. Gateway model lists change with the
+        # key's limits, so a profile engine is asked again on each start and, while idle, every PROFILE_REFRESH.
+        self.listed_at: dict[str, float] = {}
 
     # lifecycle
 
@@ -253,6 +257,9 @@ class Hub:
         for engine in self.settings.engines.values():
             info = self.engine_info.get(engine.id) or {}
             unknown = not info.get("config_options") or info.get("steering") is None
+            if engine.profile and not unknown:
+                running = self.procs.get(engine.id) is not None and self.procs[engine.id].alive
+                unknown = not running and time.monotonic() - self.listed_at.get(engine.id, -PROFILE_REFRESH) >= PROFILE_REFRESH
             retry = time.monotonic() - self.probe_failed.get(engine.id, -PROBE_RETRY) >= PROBE_RETRY
             if unknown and retry and engine.id not in self.probing and not self.closing and not self.gateways.problem(engine):
                 self.probing.add(engine.id)
@@ -280,6 +287,8 @@ class Hub:
         return bool((self.engine_info.get(engine_id) or {}).get("steering"))
 
     async def _remember_engine(self, engine_id: str, **info: Any) -> None:
+        if info.get("config_options") is not None:
+            self.listed_at[engine_id] = time.monotonic()
         current = self.engine_info.setdefault(engine_id, {})
         changes = {k: v for k, v in info.items() if v is not None and current.get(k) != v}
         if not changes:
