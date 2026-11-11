@@ -151,7 +151,8 @@ fun ProfilePicker(choices: List<EngineInfo>, selected: String?, enabled: Boolean
                 onClick = { if (engine.id != selected) onPick(engine.id) },
                 enabled = enabled,
                 shape = SegmentedButtonDefaults.itemShape(i, choices.size),
-                label = { Text(engine.profileName ?: "Sign-in account", maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                // "Sign-in": the agent's sign-in account (the full name fits in Settings, not in a three-way row).
+                label = { Text(engine.profileName ?: "Sign-in", maxLines = 1, overflow = TextOverflow.Ellipsis) },
             )
         }
     }
