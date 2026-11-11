@@ -77,7 +77,7 @@ class Notifier(private val context: Context) {
     private fun alert(sessionId: String, channel: String, title: String, text: String) {
         if (!allowed) return
         val notification = Notification.Builder(context, channel)
-            .setSmallIcon(R.drawable.ic_launcher_symbol)
+            .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle(title)
             .setContentText(text)
             .setStyle(Notification.BigTextStyle().bigText(text))
@@ -131,7 +131,7 @@ class Notifier(private val context: Context) {
             Icon.createWithResource(context, R.drawable.ic_chat_24), "Open", openIntent(task.sessionId),
         ).build()
         return Notification.Builder(context, CHANNEL_LIVE)
-            .setSmallIcon(R.drawable.ic_launcher_symbol)
+            .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle("${task.engine}: ${task.activity}")
             .setContentText(task.title)
             .setContentIntent(openIntent(task.sessionId))
