@@ -18,12 +18,14 @@ import asyncio
 import copy
 import json
 import os
+import re
 import secrets
 import shutil
 import sys
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 from typing import Any
 
 from .config import Engine, Profile
@@ -39,6 +41,95 @@ REASONING_LEVELS = [
 
 class ProfileError(Exception):
     """A profile cannot be used right now (no key, gateway unreachable, no Codex to read a template from)."""
+
+
+# Gateways the app offers ready-made: only the key is asked for. Anything else is a custom profile.
+PRESETS = [
+    {"id": "openrouter", "name": "OpenRouter", "key": "OPENROUTER_API_KEY",
+     "openai": "https://openrouter.ai/api/v1", "anthropic": "https://openrouter.ai/api"},
+]
+PROFILES_HEADER = (
+    "# Crew profiles: gateways an agent can run on instead of its own login (the default).\n"
+    "# Written by Crew (app: Settings > Profiles); editing by hand works too, then restart Crew.\n"
+    "# One entry per gateway; the models come from the gateway. Keys are never here (see key_file, default keys.env).\n"
+)
+
+
+def _write_private(path: Path, text: str) -> None:
+    """Replace a file atomically, readable only by the owner."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(text)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+
+
+def write_profiles(path: Path, profiles: dict[str, Profile], fallbacks: dict[str, str] | None = None) -> None:
+    """Save profiles.toml. A key_file is written only when it is not the default keys.env beside the file."""
+    def q(value: str) -> str:  # a TOML basic string; JSON's escapes are a subset of TOML's
+        return json.dumps(value, ensure_ascii=False)
+
+    parts = [PROFILES_HEADER]
+    for profile in profiles.values():
+        lines = [f"[profiles.{profile.id}]", f"name = {q(profile.name)}", f"key = {q(profile.key)}"]
+        if profile.key_file != path.parent / "keys.env":
+            home = str(Path.home())
+            shown = str(profile.key_file)
+            lines.append(f"key_file = {q('~' + shown[len(home):] if shown.startswith(home + os.sep) else shown)}")
+        if profile.openai:
+            lines.append(f"openai = {q(profile.openai)}")
+        if profile.anthropic:
+            lines.append(f"anthropic = {q(profile.anthropic)}")
+        parts.append("\n".join(lines) + "\n")
+    if fallbacks:
+        parts.append("# Until an agent is signed in to its own subscription, it runs on this profile.\n[fallback]\n"
+                     + "".join(f"{agent} = {q(profile)}\n" for agent, profile in fallbacks.items()))
+    _write_private(path, "\n".join(parts))
+
+
+def set_key(path: Path, name: str, value: str | None) -> None:
+    """Set (or with None, remove) NAME=value in a KEY=value file, keeping its other lines and an `export` prefix."""
+    lines = path.read_text().splitlines() if path.is_file() else []
+    out, done = [], False
+    for line in lines:
+        bare = line.strip()
+        prefix = "export " if bare.startswith("export ") else ""
+        if bare[len(prefix):].partition("=")[0].strip() == name:
+            if value is not None and not done:
+                out.append(f"{prefix}{name}={value}")
+            done = True
+            continue
+        out.append(line)
+    if value is not None and not done:
+        out.append(f"{name}={value}")
+    _write_private(path, "\n".join(out) + ("\n" if out else ""))
+
+
+def slug(name: str, taken: set[str]) -> str:
+    """A profile id from its name: lowercase letters, digits and dashes, unique."""
+    base = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:24] or "profile"
+    if not base[0].isalnum():
+        base = "p" + base
+    candidate, n = base, 2
+    while candidate in taken:
+        candidate, n = f"{base}-{n}", n + 1
+    return candidate
+
+
+def check_gateway(openai: str | None, anthropic: str | None, key: str) -> dict[str, int]:
+    """Ask each URL for the key's models before saving a profile. Raises ProfileError with what went wrong."""
+    found = {}
+    if openai:
+        found["openai"] = len(fetch_models(openai, key))
+    if anthropic:
+        found["anthropic"] = len(claude_listed(fetch_models(f"{anthropic}/v1", key, anthropic=True)))
+    return found
+
+
+def valid_url(url: str) -> bool:
+    return bool(re.match(r"^https?://[^\s/]+(/\S*)?$", url))
 
 
 def fetch_models(url: str, key: str, anthropic: bool = False, timeout: float = HTTP_TIMEOUT) -> list[dict[str, Any]]:
@@ -168,6 +259,11 @@ class Gateways:
         self._models: dict[tuple[str, str, bool], tuple[float, list[dict[str, Any]]]] = {}
         self._bundled: dict[tuple[str, float], dict[str, Any]] = {}
 
+    def forget(self, profile_id: str) -> None:
+        """Drop a profile's cached model lists (after its key or URLs change)."""
+        for cache_key in [k for k in self._models if k[0] == profile_id]:
+            del self._models[cache_key]
+
     def catalog_url(self, engine_id: str) -> str:
         return f"http://127.0.0.1:{self.port}/api/codex-catalog/{self.secret}/{engine_id}"
 
@@ -272,10 +368,24 @@ class Gateways:
         return None
 
 
-async def check(engines: dict[str, Engine]) -> list[tuple[str, str, str]]:
-    """(status, engine id, detail) for every profile engine: what doctor shows."""
+async def check(engines: dict[str, Engine], fallbacks: dict[str, str] | None = None) -> list[tuple[str, str, str]]:
+    """(status, engine id, detail) for every agent's sign-in and every profile engine: what doctor shows."""
+    from .logins import Logins
+
     gateways = Gateways(port=0)
     rows = []
+    logins = Logins()
+    for engine in engines.values():
+        if engine.profile or not engine.gateway:
+            continue
+        status = await logins.check(engine)
+        stand_in = (fallbacks or {}).get(engine.id)
+        if status["logged_in"]:
+            rows.append(("ok", engine.id, "signed in" + (f" ({status['account']})" if status["account"] else "")))
+        elif stand_in:
+            rows.append(("ok", engine.id, f"not signed in; runs on the {stand_in} profile until then (app: Settings > Sign-ins)"))
+        else:
+            rows.append(("warn", engine.id, "not signed in and no stand-in profile: sign in from the app (Settings > Sign-ins)"))
     for engine in engines.values():
         if not engine.profile:
             continue
@@ -302,14 +412,15 @@ def main() -> None:
     """`python -m crew_server.profiles check`: one tab-separated line per profile engine, for doctor."""
     from pathlib import Path
 
-    from .config import CONFIG_DIR, load_engines, load_env_file, load_profiles, with_profiles
+    from .config import CONFIG_DIR, load_engines, load_env_file, load_fallbacks, load_profiles, with_profiles
 
     load_env_file()
     engines, _ = load_engines(Path(os.environ.get("CREW_ENGINES_FILE", CONFIG_DIR / "engines.toml")))
-    profiles = load_profiles(Path(os.environ.get("CREW_PROFILES_FILE", CONFIG_DIR / "profiles.toml")))
+    path = Path(os.environ.get("CREW_PROFILES_FILE", CONFIG_DIR / "profiles.toml"))
+    profiles = load_profiles(path)
     if len(sys.argv) < 2 or sys.argv[1] != "check":
         sys.exit("usage: python -m crew_server.profiles check")
-    for status, engine_id, detail in asyncio.run(check(with_profiles(engines, profiles))):
+    for status, engine_id, detail in asyncio.run(check(with_profiles(engines, profiles), load_fallbacks(path))):
         print(status, engine_id, detail, sep="\t")
 
 

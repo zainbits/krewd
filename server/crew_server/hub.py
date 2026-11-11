@@ -28,8 +28,10 @@ from . import routines as rtn
 from .acp import AcpError, AcpProcess, MethodNotFound
 from .tool_images import ToolImages, is_empty, split as split_images
 from .attachments import Attachments, UnknownUpload, prompt_blocks
-from .config import Settings
-from .profiles import Gateways, ProfileError
+from .config import Profile, Settings, with_profiles
+from .logins import LoginError, Logins
+from .profiles import PRESETS, Gateways, ProfileError, check_gateway, set_key, slug, valid_url, write_profiles
+from .routines import Invalid
 
 log = logging.getLogger("crew.hub")
 
@@ -199,6 +201,9 @@ class Hub:
         # key's limits, so a profile engine is asked again on each start and, while idle, every PROFILE_REFRESH.
         self.listed_at: dict[str, float] = {}
         self.probe_locks: dict[str, asyncio.Lock] = {}  # base engine -> one probe of its profiles at a time
+        self.profiles_lock = asyncio.Lock()  # one profile change at a time
+        self.logins = Logins()
+        self.checking: set[str] = set()  # agents whose sign-in status is being checked
 
     # lifecycle
 
@@ -224,6 +229,7 @@ class Hub:
 
     async def close(self) -> None:
         self.closing = True
+        await self.logins.close()
         if self.scheduler:
             self.scheduler.cancel()
             await asyncio.gather(self.scheduler, return_exceptions=True)
@@ -277,9 +283,253 @@ class Hub:
                 "base": engine.base,
                 "profile": engine.profile.id if engine.profile else None,
                 "profile_name": engine.profile.name if engine.profile else None,
-                "problem": self.gateways.problem(engine),
+                "problem": self.gateways.problem(engine) or self._login_problem(engine),
+                "note": self._login_note(engine),
             })
         return listing
+
+    # sign-ins (each agent's own subscription, from the app: Settings > Sign-ins)
+
+    def _signed_in(self, engine: Any) -> bool | None:
+        """Cached sign-in state of an agent with a gateway kind; refreshed in the background when old."""
+        if engine.profile or not engine.gateway:
+            return None
+        if self.logins.stale(engine.id) and engine.id not in self.checking and not self.closing:
+            self.checking.add(engine.id)
+
+            async def check() -> None:
+                try:
+                    await self.logins.check(engine)
+                finally:
+                    self.checking.discard(engine.id)
+
+            asyncio.create_task(check())
+        return self.logins.known(engine.id)
+
+    def _stand_in(self, engine: Any) -> Any:
+        """The profile engine an agent runs as while it is not signed in, if one is set and usable."""
+        profile_id = self.settings.fallbacks.get(engine.id)
+        return self.settings.engines.get(f"{engine.id}@{profile_id}") if profile_id else None
+
+    def _login_note(self, engine: Any) -> str | None:
+        stand_in = self._stand_in(engine)
+        if self._signed_in(engine) is False and stand_in:
+            return f"Not signed in: runs on {stand_in.profile.name} until you sign in (Settings)"
+        return None
+
+    def _login_problem(self, engine: Any) -> str | None:
+        if self._signed_in(engine) is False and not self._stand_in(engine):
+            return "Not signed in: sign in under Settings > Sign-ins, or pick a stand-in profile there"
+        return None
+
+    async def _stand_in_env(self, engine: Any) -> dict[str, str]:
+        """For an agent starting without its own login: its stand-in profile's environment (else nothing)."""
+        stand_in = self._stand_in(engine)
+        if engine.profile or not engine.gateway or not stand_in:
+            return {}
+        if self.logins.stale(engine.id):
+            await self.logins.check(engine)
+        if self.logins.known(engine.id):
+            return {}
+        return await self.gateways.engine_env(stand_in)
+
+    def logins_listing(self) -> dict[str, Any]:
+        agents = []
+        for engine in self.settings.engines.values():
+            if engine.profile or not engine.gateway:
+                continue
+            status = self.logins.status.get(engine.id) or {}
+            self._signed_in(engine)
+            agents.append({
+                "engine": engine.id,
+                "name": engine.name,
+                "gateway": engine.gateway,
+                "logged_in": status.get("logged_in"),
+                "account": status.get("account"),
+                "error": status.get("error"),
+                "fallback": self.settings.fallbacks.get(engine.id),
+                "fallback_choices": [e.profile.id for e in self.settings.engines.values()
+                                     if e.base == engine.id and e.profile],
+                "flow": self.logins.flow(engine.id),
+            })
+        return {"agents": agents}
+
+    def _login_engine(self, engine_id: str) -> Any:
+        engine = self.settings.engines.get(engine_id)
+        if engine is None or engine.profile or not engine.gateway:
+            raise NotFound("no such agent with a sign-in")
+        return engine
+
+    async def start_login(self, engine_id: str) -> dict[str, Any]:
+        engine = self._login_engine(engine_id)
+        try:
+            return await self.logins.start(engine, self._login_changed)
+        except LoginError as exc:
+            raise Invalid(str(exc)) from None
+
+    async def submit_login(self, engine_id: str, code: str) -> dict[str, Any]:
+        self._login_engine(engine_id)
+        try:
+            return await self.logins.submit(engine_id, code)
+        except LoginError as exc:
+            raise Invalid(str(exc)) from None
+
+    async def cancel_login(self, engine_id: str) -> None:
+        self._login_engine(engine_id)
+        await self.logins.cancel(engine_id)
+
+    async def logout(self, engine_id: str) -> dict[str, Any]:
+        engine = self._login_engine(engine_id)
+        try:
+            status = await self.logins.logout(engine)
+        except LoginError as exc:
+            raise Invalid(str(exc)) from None
+        await self._login_changed(engine_id)
+        return status
+
+    async def set_fallback(self, engine_id: str, profile_id: str | None) -> dict[str, Any]:
+        engine = self._login_engine(engine_id)
+        path = self.settings.profiles_file
+        if path is None:
+            raise Conflict("Profiles are not managed from the app on this server")
+        if profile_id and f"{engine_id}@{profile_id}" not in self.settings.engines:
+            raise Invalid(f"{profile_id} is not a profile {engine.name} can use")
+        async with self.profiles_lock:
+            if profile_id:
+                self.settings.fallbacks[engine_id] = profile_id
+            else:
+                self.settings.fallbacks.pop(engine_id, None)
+            write_profiles(path, self.settings.profiles, self.settings.fallbacks)
+        await self._login_changed(engine_id)
+        return next(a for a in self.logins_listing()["agents"] if a["engine"] == engine_id)
+
+    async def _login_changed(self, engine_id: str) -> None:
+        """After a sign-in, sign-out or stand-in change: restart the agent's idle process and relist its options."""
+        info = self.engine_info.get(engine_id)
+        if info is not None:
+            info["config_options"] = []  # probed again: the models differ between a login and a gateway
+        proc = self.procs.get(engine_id)
+        busy = any(rt.engine == engine_id and rt.running for rt in self.runtimes.values())
+        if proc and proc.alive and not busy:
+            async with self.proc_locks.setdefault(engine_id, asyncio.Lock()):
+                await proc.stop()
+
+    # profiles (managed from the app: Settings > Profiles)
+
+    def profiles(self) -> dict[str, Any]:
+        """The profiles (never their keys: only whether one is set and its last 4 characters) and the presets."""
+        listing = []
+        for profile in self.settings.profiles.values():
+            key = profile.read_key()
+            listing.append({
+                "id": profile.id,
+                "name": profile.name,
+                "openai": profile.openai,
+                "anthropic": profile.anthropic,
+                "key_set": bool(key),
+                "key_hint": key[-4:] if key and len(key) >= 12 else None,
+                "engines": [e.id for e in self.settings.engines.values() if e.profile and e.profile.id == profile.id],
+            })
+        presets = [{k: v for k, v in p.items() if k != "key"} for p in PRESETS]
+        return {"profiles": listing, "presets": presets, "managed": self.settings.profiles_file is not None}
+
+    async def save_profile(self, profile_id: str | None, fields: dict[str, Any], key: str | None) -> dict[str, Any]:
+        """Create (profile_id None) or change a profile; the gateway is asked for the key's models first."""
+        path = self.settings.profiles_file
+        if path is None:
+            raise Conflict("Profiles are not managed from the app on this server")
+        async with self.profiles_lock:
+            profiles = dict(self.settings.profiles)
+            current = profiles.get(profile_id) if profile_id else None
+            if profile_id and current is None:
+                raise NotFound("no such profile")
+            preset = next((p for p in PRESETS if p["id"] == fields.get("preset")), None) if not current else None
+            name = (fields.get("name") or (current.name if current else None) or (preset or {}).get("name") or "").strip()
+            if not name:
+                raise Invalid("Give the profile a name")
+            urls = {}
+            for kind in ("openai", "anthropic"):
+                value = fields.get(kind)
+                if value is None:
+                    value = getattr(current, kind) if current else (preset or {}).get(kind)
+                value = (value or "").strip().rstrip("/") or None
+                if value and not valid_url(value):
+                    raise Invalid(f"{value} is not an http(s) address")
+                urls[kind] = value
+            if not (urls["openai"] or urls["anthropic"]):
+                raise Invalid("A profile needs an OpenAI (for Codex) or Anthropic (for Claude Code) address")
+            new_id = current.id if current else slug(name, set(profiles))
+            key_name = current.key if current else ((preset or {}).get("key") or f"{new_id.upper().replace('-', '_')}_API_KEY")
+            key_file = current.key_file if current else path.parent / "keys.env"
+            profile = Profile(id=new_id, name=name, key=key_name, key_file=key_file, **urls)
+            key = (key or "").strip() or None
+            usable_key = key or profile.read_key()
+            if not usable_key:
+                raise Invalid("Paste the gateway's API key")
+            if key or not current or (current.openai, current.anthropic) != (profile.openai, profile.anthropic):
+                try:
+                    await asyncio.to_thread(check_gateway, profile.openai, profile.anthropic, usable_key)
+                except ProfileError as exc:
+                    raise Invalid(f"{name}: {exc}") from None
+            profiles[new_id] = profile
+            await self._check_removed(profiles)
+            write_profiles(path, profiles, self.settings.fallbacks)
+            if key:
+                set_key(profile.key_file, profile.key, key)
+            await self._apply_profiles(profiles, changed={new_id})
+        return next(p for p in self.profiles()["profiles"] if p["id"] == new_id)
+
+    async def delete_profile(self, profile_id: str) -> None:
+        path = self.settings.profiles_file
+        if path is None:
+            raise Conflict("Profiles are not managed from the app on this server")
+        async with self.profiles_lock:
+            profiles = dict(self.settings.profiles)
+            profile = profiles.pop(profile_id, None)
+            if profile is None:
+                raise NotFound("no such profile")
+            await self._check_removed(profiles)
+            write_profiles(path, profiles, self.settings.fallbacks)
+            if profile.key_file == path.parent / "keys.env" and not any(p.key == profile.key for p in profiles.values()):
+                set_key(profile.key_file, profile.key, None)  # a shared key file (key_file) is left alone
+            await self._apply_profiles(profiles, changed={profile_id})
+
+    async def _check_removed(self, profiles: dict[str, Profile]) -> None:
+        """Refuse a change that would take away an engine a chat or routine is on."""
+        base = {i: e for i, e in self.settings.engines.items() if e.base is None}
+        gone = set(self.settings.engines) - set(with_profiles(base, profiles))
+        if not gone:
+            return
+        for agent, profile_id in self.settings.fallbacks.items():
+            if f"{agent}@{profile_id}" in gone:
+                raise Conflict(f"It is the stand-in for {self._engine_name(agent)} until it is signed in: "
+                               "pick another stand-in (Settings > Sign-ins) first")
+        chats = await self.pool.fetchval(
+            "select count(*) from sessions where engine = any($1::text[]) and not archived", list(gone))
+        routines = await self.pool.fetchval("select count(*) from routines where engine = any($1::text[])", list(gone))
+        if chats or routines:
+            what = " and ".join(x for x in (f"{chats} chat(s)" if chats else "", f"{routines} routine(s)" if routines else "") if x)
+            raise Conflict(f"{what} still use it: archive them or switch them to another profile first")
+
+    async def _apply_profiles(self, profiles: dict[str, Profile], changed: set[str]) -> None:
+        """Rebuild the engine list in place, and restart idle agent processes of the changed profiles."""
+        base = {i: e for i, e in self.settings.engines.items() if e.base is None}
+        engines = with_profiles(base, profiles)
+        stale = [i for i, e in self.settings.engines.items() if e.profile and e.profile.id in changed]
+        self.settings.profiles.clear()
+        self.settings.profiles.update(profiles)
+        self.settings.engines.clear()
+        self.settings.engines.update(engines)
+        for profile_id in changed:
+            self.gateways.forget(profile_id)
+        for engine_id in stale:
+            self.listed_at.pop(engine_id, None)
+            self.probe_failed.pop(engine_id, None)
+            proc = self.procs.get(engine_id)
+            busy = any(rt.engine == engine_id and rt.running for rt in self.runtimes.values())
+            if proc and proc.alive and not busy:  # a running turn finishes on the old settings
+                async with self.proc_locks.setdefault(engine_id, asyncio.Lock()):
+                    await proc.stop()
 
     def can_steer(self, engine_id: str) -> bool:
         proc = self.procs.get(engine_id)
@@ -802,11 +1052,13 @@ class Hub:
                 return proc
             engine = self.settings.engines[engine_id]
             env = dict(engine.env)
-            if engine.profile:
-                try:
+            try:
+                if engine.profile:
                     env.update(await self.gateways.engine_env(engine))
-                except ProfileError as exc:
-                    raise AcpError(f"Could not start {engine.name}: {exc}") from exc
+                else:
+                    env.update(await self._stand_in_env(engine))
+            except ProfileError as exc:
+                raise AcpError(f"Could not start {engine.name}: {exc}") from exc
             proc = AcpProcess(
                 engine_id=engine_id,
                 command=engine.command,

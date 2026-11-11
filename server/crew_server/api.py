@@ -113,6 +113,27 @@ class SchedulePreview(BaseModel):
     timezone: str | None = Field(default=None, max_length=64)
 
 
+class ProfileFields(BaseModel):
+    name: str | None = Field(default=None, max_length=60)
+    openai: str | None = Field(default=None, max_length=300)  # "" removes it
+    anthropic: str | None = Field(default=None, max_length=300)
+    key: str | None = Field(default=None, max_length=1000)  # write-only; never sent back
+    preset: str | None = Field(default=None, max_length=40)  # on create: start from a preset (only the key needed)
+
+
+# Keys may only arrive from this machine: Tailscale Serve's HTTPS proxy and local tools connect from loopback,
+# while the phone on the home network talks plain HTTP from its own address.
+LOOPBACK = {"127.0.0.1", "::1", "localhost"}
+
+
+class LoginCode(BaseModel):
+    code: str = Field(min_length=4, max_length=2000)
+
+
+class Fallback(BaseModel):
+    profile: str | None = Field(default=None, max_length=40)
+
+
 class EngineSwitch(BaseModel):
     engine: str = Field(min_length=1, max_length=100)
     config: dict[str, str] | None = None
@@ -231,6 +252,54 @@ def create_app(hub: Hub, token: str, lifespan_hub: bool = True) -> FastAPI:
             "engines": hub.engines(),
             "workdir": str(hub.settings.workdir),
         }
+
+    def key_route(request: Request, body: ProfileFields) -> None:
+        if body.key and (request.client is None or request.client.host not in LOOPBACK):
+            raise HTTPException(403, "Keys are only accepted over Tailscale (HTTPS), not plain home Wi-Fi")
+
+    @app.get("/api/profiles", dependencies=auth)
+    async def profiles() -> dict[str, Any]:
+        return hub.profiles()
+
+    @app.post("/api/profiles", dependencies=auth, status_code=201)
+    async def new_profile(body: ProfileFields, request: Request) -> dict[str, Any]:
+        key_route(request, body)
+        return await hub.save_profile(None, body.model_dump(exclude={"key"}), body.key)
+
+    @app.patch("/api/profiles/{profile_id}", dependencies=auth)
+    async def change_profile(profile_id: str, body: ProfileFields, request: Request) -> dict[str, Any]:
+        key_route(request, body)
+        return await hub.save_profile(profile_id, body.model_dump(exclude={"key", "preset"}), body.key)
+
+    @app.delete("/api/profiles/{profile_id}", dependencies=auth)
+    async def remove_profile(profile_id: str) -> dict[str, Any]:
+        await hub.delete_profile(profile_id)
+        return {"ok": True}
+
+    @app.get("/api/logins", dependencies=auth)
+    async def logins() -> dict[str, Any]:
+        return hub.logins_listing()
+
+    @app.post("/api/logins/{engine_id}", dependencies=auth)
+    async def start_login(engine_id: str) -> dict[str, Any]:
+        return await hub.start_login(engine_id)
+
+    @app.post("/api/logins/{engine_id}/code", dependencies=auth)
+    async def login_code(engine_id: str, body: LoginCode) -> dict[str, Any]:
+        return await hub.submit_login(engine_id, body.code)
+
+    @app.delete("/api/logins/{engine_id}", dependencies=auth)
+    async def cancel_login(engine_id: str) -> dict[str, Any]:
+        await hub.cancel_login(engine_id)
+        return {"ok": True}
+
+    @app.post("/api/logins/{engine_id}/logout", dependencies=auth)
+    async def logout(engine_id: str) -> dict[str, Any]:
+        return await hub.logout(engine_id)
+
+    @app.put("/api/logins/{engine_id}/fallback", dependencies=auth)
+    async def set_fallback(engine_id: str, body: Fallback) -> dict[str, Any]:
+        return await hub.set_fallback(engine_id, body.profile)
 
     @app.get("/api/sessions", dependencies=auth)
     async def sessions(archived: bool = False) -> list[dict[str, Any]]:

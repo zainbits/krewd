@@ -155,8 +155,14 @@ fun ProfilePicker(choices: List<EngineInfo>, selected: String?, enabled: Boolean
             )
         }
     }
-    choices.firstOrNull { it.id == selected }?.problem?.let {
-        Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(start = 4.dp, top = 6.dp))
+    val picked = choices.firstOrNull { it.id == selected }
+    (picked?.problem ?: picked?.note)?.let {
+        Text(
+            it,
+            style = MaterialTheme.typography.bodySmall,
+            color = if (picked?.problem != null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(start = 4.dp, top = 6.dp),
+        )
     }
 }
 

@@ -136,6 +136,7 @@ class CrewApi(val baseUrl: String, private val token: String, val route: Route) 
                     base = it.optStringOrNull("base"),
                     profileName = it.optStringOrNull("profile_name"),
                     problem = it.optStringOrNull("problem"),
+                    note = it.optStringOrNull("note"),
                 )
             },
             workdir = o.optString("workdir"),
@@ -214,6 +215,46 @@ class CrewApi(val baseUrl: String, private val token: String, val route: Route) 
     }
 
     // routines
+
+    // profiles and sign-ins (Settings)
+
+    fun profiles(): ProfilesState {
+        val o = obj("GET", "/api/profiles")
+        return ProfilesState(
+            o.optJSONArray("profiles").objects().map(ProfileInfo::from),
+            o.optJSONArray("presets").objects().map(ProfilePreset::from),
+            o.optBoolean("managed"),
+        )
+    }
+
+    /** Create (id null) or change a profile. A body with a key must go over Tailscale: see [CrewApi.forKeys]. */
+    fun saveProfile(id: String?, fields: JSONObject): ProfileInfo =
+        // The server asks the gateway for the key's models first, so this can take a while.
+        ProfileInfo.from(JSONObject(call(if (id == null) "POST" else "PATCH", if (id == null) "/api/profiles" else "/api/profiles/$id", fields, readTimeoutMs = 60_000)))
+
+    fun deleteProfile(id: String) {
+        call("DELETE", "/api/profiles/$id", null)
+    }
+
+    fun logins(): List<AgentLogin> = obj("GET", "/api/logins").optJSONArray("agents").objects().map(AgentLogin::from)
+
+    fun startLogin(engine: String): LoginFlow? = LoginFlow.from(JSONObject(call("POST", "/api/logins/$engine", null, readTimeoutMs = 45_000)))
+
+    /** Waits while the agent finishes signing in (up to about a minute and a half). */
+    fun submitLoginCode(engine: String, code: String): LoginFlow? =
+        LoginFlow.from(JSONObject(call("POST", "/api/logins/$engine/code", JSONObject().put("code", code), readTimeoutMs = 120_000)))
+
+    fun cancelLogin(engine: String) {
+        call("DELETE", "/api/logins/$engine", null)
+    }
+
+    fun logout(engine: String) {
+        call("POST", "/api/logins/$engine/logout", null, readTimeoutMs = 60_000)
+    }
+
+    fun setFallback(engine: String, profile: String?) {
+        call("PUT", "/api/logins/$engine/fallback", JSONObject().put("profile", profile ?: JSONObject.NULL))
+    }
 
     fun routines(): List<Routine> = arr("GET", "/api/routines").objects().map(Routine::from)
 
@@ -380,6 +421,16 @@ class CrewApi(val baseUrl: String, private val token: String, val route: Route) 
     }
 
     companion object {
+        /**
+         * A client for requests that carry a gateway key: always the Tailscale address (HTTPS), since the home
+         * network address is plain HTTP and the server refuses keys from it.
+         */
+        fun forKeys(current: CrewApi, settings: ConnectionSettings): CrewApi = when {
+            current.route == Route.Tailnet -> current
+            settings.tailnetUrl.isNotBlank() -> CrewApi(settings.tailnetUrl, settings.token, Route.Tailnet)
+            else -> throw ApiException(0, "Keys only go over Tailscale: add the Tailscale address above first")
+        }
+
         /** Picks the route to use. Auto tries the LAN first, since it is direct, then Tailscale. */
         fun resolve(settings: ConnectionSettings): CrewApi {
             val candidates = when (settings.network) {

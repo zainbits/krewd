@@ -22,7 +22,7 @@ from crew_server.profiles import Gateways, ProfileError, codex_catalog, default_
 load_env_file()
 DATABASE_URL = os.environ.get("CREW_TEST_DATABASE_URL")
 FAKE = Path(__file__).with_name("fake_agent.py")
-KEY = "k-test"
+KEY = "k-test-0123456789"
 
 BUNDLED = {"models": [
     {"slug": "gpt-new", "display_name": "GPT New", "visibility": "list", "priority": 1, "tool_mode": "code_mode_only",
@@ -179,7 +179,40 @@ def gateway():
 @pytest.fixture
 def fake_codex(tmp_path):
     catalog = write(tmp_path / "bundled.json", json.dumps(BUNDLED))
-    script = write(tmp_path / "codex", f"#!/bin/sh\n[ \"$1 $2 $3\" = 'debug models --bundled' ] && exec cat {catalog}\nexit 2\n")
+    mark = tmp_path / "codex-signed-in"
+    script = write(tmp_path / "codex", f"""#!/bin/sh
+case "$1 $2 $3" in
+  "debug models --bundled") exec cat {catalog} ;;
+  "login status ") if [ -f {mark} ]; then echo "Logged in using ChatGPT"; else echo "Not logged in"; exit 1; fi ;;
+  "login --device-auth ") echo "1. Open this link in your browser and sign in to your account"
+    echo "   https://auth.example.com/codex/device"
+    echo "2. Enter this one-time code (expires in 15 minutes)"
+    echo "   ABCD-EFG12"
+    sleep 1; touch {mark}; echo "Successfully logged in"; exit 0 ;;
+  "logout  ") rm -f {mark} ;;
+  *) exit 2 ;;
+esac
+""")
+    script.chmod(0o755)
+    return str(script)
+
+
+@pytest.fixture
+def fake_claude(tmp_path):
+    mark = tmp_path / "claude-signed-in"
+    script = write(tmp_path / "claude", f"""#!/bin/sh
+case "$1 $2" in
+  "auth status") if [ -f {mark} ]; then echo '{{"loggedIn": true, "email": "owner@example.com", "subscriptionType": "max"}}'
+    else echo '{{"loggedIn": false, "authMethod": "none"}}'; fi ;;
+  "auth login") echo "Opening browser to sign in..."
+    echo "If the browser didn't open, visit: https://claude.example.com/oauth/authorize?code=true&state=x"
+    printf "Paste code here if prompted > "
+    read code
+    if [ "$code" = "good-code" ]; then touch {mark}; echo "Login successful."; exit 0; fi
+    echo "Invalid code"; exit 1 ;;
+  "auth logout") rm -f {mark} ;;
+esac
+""")
     script.chmod(0o755)
     return str(script)
 
@@ -188,7 +221,8 @@ def profile_engines(tmp_path, gateway: str, codex: str, key: str | None = KEY) -
     keys = write(tmp_path / "keys.env", f"GW_KEY={key}\n" if key else "")
     profile = Profile(id="gw", name="Gateway", key="GW_KEY", key_file=keys, openai=f"{gateway}/v1", anthropic=gateway)
     engines = {
-        "fake": Engine(id="fake", name="Fake", command=[sys.executable, str(FAKE)], gateway="claude"),
+        "fake": Engine(id="fake", name="Fake", command=[sys.executable, str(FAKE)], gateway="claude",
+                       env={"CLAUDE_PATH": str(tmp_path / "no-claude")}),  # never the machine's real claude
         "cx": Engine(id="cx", name="Codex", command=[sys.executable, str(FAKE)], gateway="codex",
                      env={"CODEX_PATH": codex, "CODEX_CONFIG": '{"approval_policy": "never"}'}),
     }
@@ -311,3 +345,170 @@ async def test_codex_catalog_route_needs_the_secret(hub):
         ok = await client.get(f"/api/codex-catalog/{hub.gateways.secret}/cx@gw", params={"client_version": "1"})
         assert ok.status_code == 200
         assert [m["slug"] for m in ok.json()["models"]] == ["vendor/reasoner", "vendor/plain"]
+
+
+# profiles managed from the app (need a database)
+
+
+@pytest.fixture
+async def managed(tmp_path, fake_codex, fake_claude):
+    if not DATABASE_URL:
+        pytest.skip("CREW_TEST_DATABASE_URL is not set")
+    pool = await db.connect(DATABASE_URL)
+    await pool.execute(
+        "drop table if exists session_agents, routine_triggers, routine_runs, routine_versions, routines, messages, events, approvals, sessions,"
+        " engines, schema_version cascade"
+    )
+    engines = {
+        "fake": Engine(id="fake", name="Fake", command=[sys.executable, str(FAKE)], gateway="claude",
+                       env={"CLAUDE_PATH": fake_claude}),
+        "cx": Engine(id="cx", name="Codex", command=[sys.executable, str(FAKE)], gateway="codex", env={"CODEX_PATH": fake_codex}),
+    }
+    settings = Settings(
+        database_url=DATABASE_URL, host="127.0.0.1", port=0, workdir=tmp_path, token_file=tmp_path / "token",
+        state_dir=tmp_path / "state", engines=engines, default_engine="fake", data_dir=tmp_path / "data",
+        max_upload_mb=1, profiles={}, profiles_file=tmp_path / "conf" / "profiles.toml",
+    )
+    hub = Hub(settings, pool)
+    await hub.start()
+    yield hub
+    await hub.close()
+    await pool.close()
+
+
+def client(hub: Hub, host: str = "127.0.0.1") -> httpx.AsyncClient:
+    app = create_app(hub, "test-token", lifespan_hub=False)
+    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app, client=(host, 5000)), base_url="http://test",
+                             headers={"Authorization": "Bearer test-token"})
+
+
+async def test_profiles_are_added_from_the_app_and_used_at_once(managed, gateway, tmp_path):
+    conf = tmp_path / "conf"
+    async with client(managed) as c:
+        listing = (await c.get("/api/profiles")).json()
+        assert listing["profiles"] == [] and listing["managed"] is True
+        assert [p["id"] for p in listing["presets"]] == ["openrouter"] and "key" not in listing["presets"][0]
+
+        made = await c.post("/api/profiles", json={"name": "My Gateway", "openai": f"{gateway}/v1/", "anthropic": gateway, "key": KEY})
+        assert made.status_code == 201, made.text
+        profile = made.json()
+        assert profile["id"] == "my-gateway" and profile["openai"] == f"{gateway}/v1"
+        assert profile["key_set"] is True and profile["key_hint"] == KEY[-4:]
+        assert sorted(profile["engines"]) == ["cx@my-gateway", "fake@my-gateway"]
+        assert KEY not in (await c.get("/api/profiles")).text  # never sent back
+
+    # saved: profiles.toml without the key, the key in keys.env (owner-only)
+    toml = (conf / "profiles.toml").read_text()
+    assert "[profiles.my-gateway]" in toml and KEY not in toml and 'key = "MY_GATEWAY_API_KEY"' in toml
+    assert (conf / "keys.env").read_text() == f"MY_GATEWAY_API_KEY={KEY}\n"
+    assert (conf / "keys.env").stat().st_mode & 0o777 == 0o600
+    assert load_profiles(conf / "profiles.toml")["my-gateway"].read_key() == KEY
+
+    # the new engines are listed and run on the gateway straight away
+    names = {e["id"]: e["name"] for e in managed.engines()}
+    assert names["fake@my-gateway"] == "Fake · My Gateway"
+    assert await reply_to(managed, "fake@my-gateway", "env ANTHROPIC_BASE_URL") == gateway
+
+
+async def test_bad_keys_and_keys_over_plain_wifi_are_refused(managed, gateway):
+    async with client(managed) as c:
+        wrong = await c.post("/api/profiles", json={"name": "GW", "openai": f"{gateway}/v1", "key": "wrong-key-123456"})
+        assert wrong.status_code == 422 and "HTTP 401" in wrong.json()["detail"]
+        assert (await c.post("/api/profiles", json={"name": "GW", "openai": f"{gateway}/v1"})).status_code == 422  # no key
+        assert (await c.post("/api/profiles", json={"name": "GW", "key": KEY})).status_code == 422  # no address
+        assert (await c.post("/api/profiles", json={"name": "GW", "openai": "ftp://x", "key": KEY})).status_code == 422
+    async with client(managed, host="192.168.0.20") as lan:
+        refused = await lan.post("/api/profiles", json={"name": "GW", "openai": f"{gateway}/v1", "key": KEY})
+        assert refused.status_code == 403 and "Tailscale" in refused.json()["detail"]
+    assert managed.settings.profiles == {}
+
+
+async def test_profiles_are_renamed_and_removed_only_when_unused(managed, gateway, tmp_path):
+    async with client(managed) as c:
+        await c.post("/api/profiles", json={"name": "GW", "openai": f"{gateway}/v1", "anthropic": gateway, "key": KEY})
+    async with client(managed, host="192.168.0.20") as lan:  # no key in it: fine over the home network
+        renamed = await lan.patch("/api/profiles/gw", json={"name": "Gateway Two"})
+        assert renamed.status_code == 200 and renamed.json()["name"] == "Gateway Two"
+        assert {e["id"]: e["name"] for e in managed.engines()}["cx@gw"] == "Codex · Gateway Two"
+
+        reply = await reply_to(managed, "cx@gw", "env MODEL_PROVIDER")  # a chat now uses Codex on it
+        assert reply == "crew-gw"
+        blocked = await lan.delete("/api/profiles/gw")
+        assert blocked.status_code == 409 and "1 chat" in blocked.json()["detail"]
+        no_openai = await lan.patch("/api/profiles/gw", json={"openai": ""})
+        assert no_openai.status_code == 409  # Codex would lose it
+        assert (await lan.patch("/api/profiles/gw", json={"anthropic": ""})).status_code == 200  # Claude has no chat on it
+        assert "fake@gw" not in managed.settings.engines
+
+        for session in await managed.list_sessions(False):
+            await managed.update_session(uuid.UUID(session["id"]), {"archived": True})
+        assert (await lan.delete("/api/profiles/gw")).status_code == 200
+        assert (await lan.delete("/api/profiles/gw")).status_code == 404
+    assert "cx@gw" not in managed.settings.engines and managed.settings.profiles == {}
+    assert "GW_API_KEY" not in (tmp_path / "conf" / "keys.env").read_text()
+
+
+# sign-ins (need a database)
+
+
+async def test_claude_signs_in_with_the_code_pasted_in_the_app(managed):
+    async with client(managed, host="192.168.0.20") as c:  # no key involved: fine over the home network
+        assert (await managed.logins.check(managed.settings.engines["fake"]))["logged_in"] is False
+        agents = {a["engine"]: a for a in (await c.get("/api/logins")).json()["agents"]}
+        assert set(agents) == {"fake", "cx"} and agents["fake"]["logged_in"] is False
+
+        flow = (await c.post("/api/logins/fake")).json()
+        assert flow["state"] == "waiting" and flow["paste"] is True and flow["code"] is None
+        assert flow["url"].startswith("https://claude.example.com/oauth/authorize")
+        failed = (await c.post("/api/logins/fake/code", json={"code": "bad-code"})).json()
+        assert failed["state"] == "failed" and "Invalid code" in failed["error"]
+        assert (await c.post("/api/logins/fake/code", json={"code": "good-code"})).status_code == 422  # flow over
+
+        await c.post("/api/logins/fake")
+        done = (await c.post("/api/logins/fake/code", json={"code": "good-code"})).json()
+        assert done["state"] == "done"
+        agent = next(a for a in (await c.get("/api/logins")).json()["agents"] if a["engine"] == "fake")
+        assert agent["logged_in"] is True and agent["account"] == "owner@example.com (max)"
+
+        assert (await c.post("/api/logins/fake/logout")).json()["logged_in"] is False
+        assert (await c.post("/api/logins/fake@nope")).status_code == 404
+
+
+async def test_codex_signs_in_with_a_device_code(managed):
+    import asyncio
+
+    async with client(managed) as c:
+        flow = (await c.post("/api/logins/cx")).json()
+        assert flow == {**flow, "state": "waiting", "paste": False, "code": "ABCD-EFG12",
+                        "url": "https://auth.example.com/codex/device"}
+        for _ in range(50):
+            agent = next(a for a in (await c.get("/api/logins")).json()["agents"] if a["engine"] == "cx")
+            if agent["flow"]["state"] == "done":
+                break
+            await asyncio.sleep(0.1)
+        assert agent["flow"]["state"] == "done" and agent["logged_in"] is True
+
+
+async def test_a_stand_in_profile_runs_the_agent_until_it_is_signed_in(managed, gateway):
+    async with client(managed) as c:
+        await c.post("/api/profiles", json={"name": "GW", "openai": f"{gateway}/v1", "anthropic": gateway, "key": KEY})
+        assert (await c.put("/api/logins/fake/fallback", json={"profile": "nope"})).status_code == 422
+        agent = (await c.put("/api/logins/fake/fallback", json={"profile": "gw"})).json()
+        assert agent["fallback"] == "gw" and agent["fallback_choices"] == ["gw"]
+        assert "[fallback]" in managed.settings.profiles_file.read_text()
+
+        # not signed in: the plain agent runs on its stand-in, and says so
+        await managed.logins.check(managed.settings.engines["fake"])
+        assert await reply_to(managed, "fake", "env ANTHROPIC_BASE_URL") == gateway
+        listed = next(e for e in managed.engines() if e["id"] == "fake")
+        assert listed["problem"] is None and "runs on GW" in listed["note"]
+        assert "stand-in" in (await c.delete("/api/profiles/gw")).json()["detail"]  # still needed
+
+        # signed in: the stand-in drops out by itself
+        await c.post("/api/logins/fake")
+        assert (await c.post("/api/logins/fake/code", json={"code": "good-code"})).json()["state"] == "done"
+        assert await reply_to(managed, "fake", "env ANTHROPIC_BASE_URL") == os.environ.get("ANTHROPIC_BASE_URL", "<unset>")
+        assert next(e for e in managed.engines() if e["id"] == "fake")["note"] is None
+
+        assert (await c.put("/api/logins/fake/fallback", json={"profile": None})).json()["fallback"] is None
+        assert "[fallback]" not in managed.settings.profiles_file.read_text()

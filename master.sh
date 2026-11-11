@@ -72,21 +72,22 @@ for e in engines.values():
 PY
 )
   fi
-  if [[ -f "$CONFIG_DIR/profiles.toml" && -n "$(find_uv)" ]]; then
-    # Profiles: each agent on each gateway, checked by asking the gateway for the key's models (no tokens spent).
+  if [[ -f "$CONFIG_DIR/engines.toml" && -n "$(find_uv)" ]]; then
+    # Sign-ins (each agent's own subscription) and profiles (each agent on each gateway, checked by asking the
+    # gateway for the key's models; no tokens spent).
     local keys="$CONFIG_DIR/keys.env" checked
     [[ ! -f "$keys" || "$(stat -c %a "$keys" 2>/dev/null)" == 600 ]] || warn "keys.env is not mode 600" "chmod 600 $keys"
     if checked="$(CREW_CONFIG_DIR="$CONFIG_DIR" uvrun python -m crew_server.profiles check 2>/dev/null)"; then
       while IFS=$'\t' read -r status id detail; do
         [[ -z "$status" ]] && continue
         case "$status" in
-          ok) ok "profile $id: $detail" ;;
-          warn) warn "profile $id: $detail" ;;
-          *) bad "profile $id: $detail" "set the key in keys.env, check the gateway URL in profiles.toml, or set CODEX_PATH (AGENTS.md, Profiles)" ;;
+          ok) ok "$( [[ "$id" == *@* ]] && echo profile || echo sign-in ) $id: $detail" ;;
+          warn) warn "$( [[ "$id" == *@* ]] && echo profile || echo sign-in ) $id: $detail" ;;
+          *) bad "profile $id: $detail" "fix the key or URL in the app (Settings > Profiles), or set CODEX_PATH (AGENTS.md, Profiles)" ;;
         esac
       done <<< "$checked"
     else
-      bad "profiles.toml could not be read" "cd $REPO/server && uv run python -m crew_server.profiles check"
+      bad "sign-ins and profiles could not be checked" "cd $REPO/server && uv run python -m crew_server.profiles check"
     fi
   fi
   if [[ -n "$(conf CREW_DATABASE_URL '')" && -n "$(find_uv)" ]]; then

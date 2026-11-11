@@ -73,6 +73,9 @@ class Settings:
     engines: dict[str, Engine]
     default_engine: str
     profiles: dict[str, Profile] = field(default_factory=dict)
+    profiles_file: Path | None = None  # where the app's profile changes are saved; None: not managed from the app
+    # Agent -> profile it runs on while its own login (subscription) is not signed in ("stand-in").
+    fallbacks: dict[str, str] = field(default_factory=dict)
     cdp_port: int = 9222
     data_dir: Path = Path.home() / ".crew"
     max_upload_mb: int = 1024
@@ -153,6 +156,13 @@ def load_profiles(path: Path) -> dict[str, Profile]:
     return profiles
 
 
+def load_fallbacks(path: Path) -> dict[str, str]:
+    """The `[fallback]` table of profiles.toml: agent id -> profile it uses until it is signed in."""
+    if not path.is_file():
+        return {}
+    return {k: str(v) for k, v in tomllib.loads(path.read_text()).get("fallback", {}).items()}
+
+
 def with_profiles(engines: dict[str, Engine], profiles: dict[str, Profile]) -> dict[str, Engine]:
     """Each engine, followed by one engine per profile it can use ("codex@openrouter": Codex on OpenRouter)."""
     out: dict[str, Engine] = {}
@@ -178,7 +188,8 @@ def load_settings() -> Settings:
     if not database_url:
         raise SystemExit(f"CREW_DATABASE_URL is not set (put it in {ENV_FILE})")
     engines, default_engine = load_engines(Path(os.environ.get("CREW_ENGINES_FILE", CONFIG_DIR / "engines.toml")))
-    profiles = load_profiles(Path(os.environ.get("CREW_PROFILES_FILE", CONFIG_DIR / "profiles.toml")))
+    profiles_file = Path(os.environ.get("CREW_PROFILES_FILE", CONFIG_DIR / "profiles.toml"))
+    profiles = load_profiles(profiles_file)
     engines = with_profiles(engines, profiles)
     return Settings(
         database_url=database_url,
@@ -190,6 +201,8 @@ def load_settings() -> Settings:
         engines=engines,
         default_engine=default_engine,
         profiles=profiles,
+        profiles_file=profiles_file,
+        fallbacks=load_fallbacks(profiles_file),
         cdp_port=int(os.environ.get("CREW_CDP_PORT", "9222")),
         data_dir=Path(os.path.expanduser(os.environ.get("CREW_DATA_DIR", "~/.crew"))),
         max_upload_mb=int(os.environ.get("CREW_MAX_UPLOAD_MB", "1024")),

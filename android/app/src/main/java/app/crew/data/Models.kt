@@ -334,9 +334,79 @@ data class EngineInfo(
     val base: String? = null,
     /** The gateway profile's name ("OpenRouter"); null for the agent's own login (subscription). */
     val profileName: String? = null,
-    /** Why this profile cannot start (no key), as far as the server can tell. */
+    /** Why this engine cannot start (no key, not signed in), as far as the server can tell. */
     val problem: String? = null,
+    /** Something to know about how it runs now ("Not signed in: runs on gwmeter until you sign in"). */
+    val note: String? = null,
 )
+
+/** A gateway profile managed from Settings. The key itself never comes back from the server. */
+data class ProfileInfo(
+    val id: String,
+    val name: String,
+    val openai: String?,
+    val anthropic: String?,
+    val keySet: Boolean,
+    val keyHint: String?,
+    val engines: List<String>,
+) {
+    companion object {
+        fun from(o: JSONObject) = ProfileInfo(
+            id = o.optString("id"),
+            name = o.optString("name"),
+            openai = o.optStringOrNull("openai"),
+            anthropic = o.optStringOrNull("anthropic"),
+            keySet = o.optBoolean("key_set"),
+            keyHint = o.optStringOrNull("key_hint"),
+            engines = o.optJSONArray("engines").strings(),
+        )
+    }
+}
+
+/** A ready-made gateway: only its key is asked for. */
+data class ProfilePreset(val id: String, val name: String, val openai: String?, val anthropic: String?) {
+    companion object {
+        fun from(o: JSONObject) = ProfilePreset(o.optString("id"), o.optString("name"), o.optStringOrNull("openai"), o.optStringOrNull("anthropic"))
+    }
+}
+
+data class ProfilesState(val profiles: List<ProfileInfo> = emptyList(), val presets: List<ProfilePreset> = emptyList(), val managed: Boolean = false)
+
+/** A sign-in in progress: the page to open, and a code to type there (Codex) or a code to paste back (Claude Code). */
+data class LoginFlow(val state: String, val url: String?, val code: String?, val paste: Boolean, val error: String?, val expiresIn: Int) {
+    val active: Boolean get() = state == "starting" || state == "waiting" || state == "finishing"
+
+    companion object {
+        fun from(o: JSONObject?) = o?.let {
+            LoginFlow(it.optString("state"), it.optStringOrNull("url"), it.optStringOrNull("code"), it.optBoolean("paste"), it.optStringOrNull("error"), it.optInt("expires_in"))
+        }
+    }
+}
+
+/** An agent's own subscription sign-in, and the profile it runs on until then. */
+data class AgentLogin(
+    val engine: String,
+    val name: String,
+    val loggedIn: Boolean?,
+    val account: String?,
+    val error: String?,
+    val fallback: String?,
+    val fallbackChoices: List<String>,
+    val flow: LoginFlow?,
+) {
+    companion object {
+        fun from(o: JSONObject) = AgentLogin(
+            engine = o.optString("engine"),
+            name = o.optString("name"),
+            loggedIn = if (o.isNull("logged_in") || !o.has("logged_in")) null else o.optBoolean("logged_in"),
+            account = o.optStringOrNull("account"),
+            error = o.optStringOrNull("error"),
+            fallback = o.optStringOrNull("fallback"),
+            fallbackChoices = o.optJSONArray("fallback_choices").strings(),
+            flow = LoginFlow.from(o.optJSONObject("flow")),
+        )
+    }
+}
 
 data class ServerState(val lastSeq: Long, val engines: List<EngineInfo>, val workdir: String)
 

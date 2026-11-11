@@ -7,6 +7,7 @@ import android.net.Uri
 import android.provider.MediaStore
 import androidx.compose.ui.graphics.asImageBitmap
 import app.crew.constants.Timing
+import app.crew.data.AgentLogin
 import app.crew.data.ApiException
 import app.crew.data.Approval
 import app.crew.data.Attachment
@@ -22,6 +23,7 @@ import app.crew.data.EngineInfo
 import app.crew.data.Event
 import app.crew.data.FrameStream
 import app.crew.data.PendingFile
+import app.crew.data.ProfilesState
 import app.crew.data.Prefs
 import app.crew.data.Routine
 import app.crew.data.RoutineRun
@@ -121,6 +123,10 @@ data class UiState(
     val live: Map<String, LiveInfo> = emptyMap(),
     /** The owner's saved prompts for the new-task sheet, newest first. */
     val savedPrompts: List<String> = emptyList(),
+    /** Gateway profiles and the presets the app offers (Settings). */
+    val profiles: ProfilesState = ProfilesState(),
+    /** Each agent's own sign-in, and its stand-in profile (Settings). */
+    val logins: List<AgentLogin> = emptyList(),
 ) {
     val openRoutine: Routine? get() = routineDetail?.takeIf { it.id == openRoutineId } ?: routines.firstOrNull { it.id == openRoutineId }
     fun routine(id: String?): Routine? = routines.firstOrNull { it.id == id }
@@ -767,6 +773,72 @@ class CrewViewModel(private val app: Application) {
     fun refreshEngines() = act { client ->
         val engines = client.state().engines
         _state.update { it.copy(engines = engines) }
+    }
+
+    // profiles and sign-ins (Settings)
+
+    /** Profiles, presets, sign-ins and engines, read again together (they change one another). */
+    fun loadProfiles() = act { client -> reloadProfiles(client) }
+
+    private fun reloadProfiles(client: CrewApi) {
+        val profiles = client.profiles()
+        val logins = client.logins()
+        val engines = client.state().engines
+        _state.update { it.copy(profiles = profiles, logins = logins, engines = engines) }
+    }
+
+    /** Create (id null) or change a profile; [done] gets null on success, else what went wrong. */
+    fun saveProfile(id: String?, fields: JSONObject, key: String?, done: (String?) -> Unit) = withResult(done) { client ->
+        val target = if (key.isNullOrBlank()) client else CrewApi.forKeys(client, _state.value.settings)
+        if (!key.isNullOrBlank()) fields.put("key", key.trim())
+        target.saveProfile(id, fields)
+        reloadProfiles(client)
+    }
+
+    fun deleteProfile(id: String, done: (String?) -> Unit) = withResult(done) { client ->
+        client.deleteProfile(id)
+        reloadProfiles(client)
+    }
+
+    fun refreshLogins() = act { client -> _state.update { it.copy(logins = client.logins()) } }
+
+    fun startLogin(engine: String, done: (String?) -> Unit) = withResult(done) { client ->
+        client.startLogin(engine)
+        _state.update { it.copy(logins = client.logins()) }
+    }
+
+    fun submitLoginCode(engine: String, code: String, done: (String?) -> Unit) = withResult(done) { client ->
+        client.submitLoginCode(engine, code.trim())
+        reloadProfiles(client)
+    }
+
+    fun cancelLogin(engine: String) = act { client ->
+        client.cancelLogin(engine)
+        _state.update { it.copy(logins = client.logins()) }
+    }
+
+    fun logout(engine: String) = act { client ->
+        client.logout(engine)
+        reloadProfiles(client)
+    }
+
+    fun setFallback(engine: String, profile: String?) = act { client ->
+        client.setFallback(engine, profile)
+        reloadProfiles(client)
+    }
+
+    /** Runs [block] off the main thread and reports null (it worked) or the error message to [done], on the main thread. */
+    private fun withResult(done: (String?) -> Unit, block: (CrewApi) -> Unit) {
+        val client = api ?: return done("Not connected to Crew")
+        scope.launch(Dispatchers.IO) {
+            val error = try {
+                block(client)
+                null
+            } catch (e: Exception) {
+                e.message ?: "Request failed"
+            }
+            withContext(Dispatchers.Main) { done(error) }
+        }
     }
 
     fun archive(id: String) = act { client ->

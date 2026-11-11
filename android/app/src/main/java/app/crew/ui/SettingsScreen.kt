@@ -18,6 +18,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -41,6 +42,8 @@ fun SettingsScreen(state: UiState, viewModel: CrewViewModel, padding: PaddingVal
     var network by remember(saved) { mutableStateOf(saved.network) }
     var showToken by remember { mutableStateOf(false) }
     var confirmRestart by remember { mutableStateOf(false) }
+    val online = state.connection is Connection.Online
+    LaunchedEffect(online) { if (online) viewModel.loadProfiles() }
 
     if (confirmRestart) {
         AlertDialog(
@@ -126,6 +129,8 @@ fun SettingsScreen(state: UiState, viewModel: CrewViewModel, padding: PaddingVal
                 )
             }
         }
+        item { SignInsCard(state, viewModel) }
+        item { ProfilesCard(state, viewModel) }
         item {
             SectionCard {
                 Text("Emergency", style = MaterialTheme.typography.titleMedium)
