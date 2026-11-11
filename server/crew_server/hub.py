@@ -460,7 +460,11 @@ class Hub:
     async def _restart_agent(self, engine_id: str) -> None:
         """Stop the agent's idle process (it starts again on its current profile at the next turn) and relist its
         options. A running turn finishes first on the old settings; the process restarts after it."""
-        self.listed_on.pop(engine_id, None)  # probed again: the models differ between gateways and sign-ins
+        # Probed again: the models differ between gateways and sign-ins. Until then the app shows no stale choices.
+        self.listed_on.pop(engine_id, None)
+        info = self.engine_info.get(engine_id)
+        if info is not None:
+            info["config_options"] = []
         # Under the engine's lock: a process still starting (a probe, a chat) is stopped too, once it is up.
         async with self.proc_locks.setdefault(engine_id, asyncio.Lock()):
             self.restarted[engine_id] = time.monotonic()
