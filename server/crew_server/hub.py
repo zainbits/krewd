@@ -198,6 +198,7 @@ class Hub:
         # Profile engine id -> when it last listed its options in this run. Gateway model lists change with the
         # key's limits, so a profile engine is asked again on each start and, while idle, every PROFILE_REFRESH.
         self.listed_at: dict[str, float] = {}
+        self.probe_locks: dict[str, asyncio.Lock] = {}  # base engine -> one probe of its profiles at a time
 
     # lifecycle
 
@@ -309,7 +310,25 @@ class Hub:
         )
 
     async def _probe(self, engine_id: str) -> None:
-        """Open and drop a throwaway session to learn an engine's models and options."""
+        """Open and drop a throwaway session to learn an engine's models and options.
+
+        An agent's profiles are asked one at a time, and not while another of them runs: Claude Code keeps one
+        gateway model cache file per config folder, and two gateways writing it at once lose each other's list.
+        """
+        engine = self.settings.engines[engine_id]
+        if not engine.profile:
+            return await self._probe_once(engine_id)
+        try:
+            async with self.probe_locks.setdefault(engine.base or "", asyncio.Lock()):
+                siblings = [e.id for e in self.settings.engines.values()
+                            if e.base == engine.base and e.profile and e.id != engine_id]
+                if any(self.procs.get(s) is not None and self.procs[s].alive for s in siblings):
+                    return  # asked again on a later listing
+                await self._probe_once(engine_id)
+        finally:
+            self.probing.discard(engine_id)
+
+    async def _probe_once(self, engine_id: str) -> None:
         profile = self.settings.engines[engine_id].profile
         try:
             proc = await self._proc(engine_id)

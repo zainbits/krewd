@@ -201,7 +201,7 @@ async def test_claude_engines_get_the_gateway_key_and_a_model_the_key_may_use(tm
     first = "anthropic/vendor/reasoner[1m]"  # the gateway's first model, as Claude Code's discovery sees it
     assert env == {"ANTHROPIC_BASE_URL": gateway, "ANTHROPIC_AUTH_TOKEN": KEY, "ANTHROPIC_API_KEY": "",
                    "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY": "1", "ANTHROPIC_MODEL": first,
-                   "ANTHROPIC_DEFAULT_HAIKU_MODEL": first}
+                   "ANTHROPIC_SMALL_FAST_MODEL": first}
 
 
 def test_claude_lists_what_its_discovery_keeps():
@@ -225,6 +225,12 @@ async def test_codex_engines_get_a_provider_with_a_catalog_from_crew(tmp_path, g
     }
     catalog = await gateways.codex_catalog(engine)
     assert [m["slug"] for m in catalog["models"]] == ["vendor/reasoner", "vendor/plain"]
+    # the Anthropic form of the same list (for Claude Code) never leaks into Codex's catalog
+    claude = profile_engines(tmp_path, gateway, fake_codex)["fake@gw"]
+    claude = Engine(id=claude.id, name=claude.name, command=claude.command, gateway="claude", base="fake",
+                    profile=engine.profile)  # same profile object, same gateway URL family
+    await gateways.claude_models(claude)
+    assert [m["slug"] for m in (await gateways.codex_catalog(engine))["models"]] == ["vendor/reasoner", "vendor/plain"]
 
 
 async def test_missing_key_or_wrong_key_is_a_clear_error(tmp_path, gateway, fake_codex):

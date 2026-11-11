@@ -148,7 +148,8 @@ class Gateways:
         # Codex fetches its catalog from Crew without Crew's token; this unguessable path segment stands in
         # for it (Tailscale Serve forwards to 127.0.0.1 too, so the caller's address proves nothing).
         self.secret = secrets.token_urlsafe(18)
-        self._models: dict[tuple[str, str], tuple[float, list[dict[str, Any]]]] = {}
+        # (profile, URL, Anthropic form) -> (when, models): OpenRouter answers the same URL in two forms.
+        self._models: dict[tuple[str, str, bool], tuple[float, list[dict[str, Any]]]] = {}
         self._bundled: dict[tuple[str, float], dict[str, Any]] = {}
 
     def catalog_url(self, engine_id: str) -> str:
@@ -166,11 +167,11 @@ class Gateways:
         url = profile.url_for(engine.gateway)
         if not url:
             raise ProfileError(f"{profile.name} has no URL for {engine.gateway}")
-        cached = self._models.get((profile.id, url))
+        cached = self._models.get((profile.id, url, False))
         if cached and time.monotonic() - cached[0] < MODELS_TTL:
             return cached[1]
         models = await asyncio.to_thread(fetch_models, url, self.key(profile))
-        self._models[(profile.id, url)] = (time.monotonic(), models)
+        self._models[(profile.id, url, False)] = (time.monotonic(), models)
         return models
 
     async def bundled(self, engine: Engine) -> dict[str, Any]:
@@ -203,12 +204,12 @@ class Gateways:
         profile = engine.profile
         assert profile is not None
         url = f"{profile.url_for(engine.gateway)}/v1"
-        cached = self._models.get((profile.id, url))
+        cached = self._models.get((profile.id, url, True))
         if cached and time.monotonic() - cached[0] < MODELS_TTL:
             models = cached[1]
         else:
             models = await asyncio.to_thread(fetch_models, url, self.key(profile), True)
-            self._models[(profile.id, url)] = (time.monotonic(), models)
+            self._models[(profile.id, url, True)] = (time.monotonic(), models)
         return claude_listed(models)
 
     async def engine_env(self, engine: Engine) -> dict[str, str]:
@@ -232,7 +233,8 @@ class Gateways:
                 # Start on a model the key may use (Claude Code's default may be blocked), as Codex does.
                 env["ANTHROPIC_MODEL"] = models[0]
                 if not any("haiku" in m.lower() for m in models):
-                    env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = models[0]  # Claude Code's background calls use this slot
+                    # Claude Code's background calls (titles, summaries) use Haiku, which the key may block.
+                    env["ANTHROPIC_SMALL_FAST_MODEL"] = models[0]
             return env
         if engine.gateway == "codex":
             catalog = await self.codex_catalog(engine)
