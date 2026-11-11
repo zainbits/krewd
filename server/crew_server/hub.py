@@ -198,6 +198,7 @@ class Hub:
         self.probe_failed: dict[str, float] = {}  # engine id -> when its last probe failed
         self.restart_after_turn: set[str] = set()  # agents whose profile changed during a turn
         self.restarted: dict[str, float] = {}  # agent -> when its process was last stopped on purpose
+        self.listed_on: dict[str, str] = {}  # agent -> the profile ("" its sign-in account) its options were listed on
         self.profiles_lock = asyncio.Lock()  # one profile change at a time
         self.logins = Logins()
         self.checking: set[str] = set()  # agents whose sign-in status is being checked
@@ -261,12 +262,14 @@ class Hub:
         for engine in self.settings.engines.values():
             info = self.engine_info.get(engine.id) or {}
             unknown = not info.get("config_options") or info.get("steering") is None
+            profile = self._profile_of(engine)
+            if engine.gateway and self.listed_on.get(engine.id) != (profile.id if profile else ""):
+                unknown = True  # its models were listed on another profile (or before this start): ask again
             retry = time.monotonic() - self.probe_failed.get(engine.id, -PROBE_RETRY) >= PROBE_RETRY
             problem = self._problem(engine)
             if unknown and retry and engine.id not in self.probing and not self.closing and not problem:
                 self.probing.add(engine.id)
                 asyncio.create_task(self._probe(engine.id))
-            profile = self._profile_of(engine)
             listing.append({
                 "id": engine.id,
                 "name": engine.name,
@@ -287,6 +290,10 @@ class Hub:
         return bool((self.engine_info.get(engine_id) or {}).get("steering"))
 
     async def _remember_engine(self, engine_id: str, **info: Any) -> None:
+        engine = self.settings.engines.get(engine_id)
+        if info.get("config_options") is not None and engine and engine.gateway:
+            profile = self._profile_of(engine)
+            self.listed_on[engine_id] = profile.id if profile else ""
         current = self.engine_info.setdefault(engine_id, {})
         changes = {k: v for k, v in info.items() if v is not None and current.get(k) != v}
         if not changes:
@@ -453,9 +460,7 @@ class Hub:
     async def _restart_agent(self, engine_id: str) -> None:
         """Stop the agent's idle process (it starts again on its current profile at the next turn) and relist its
         options. A running turn finishes first on the old settings; the process restarts after it."""
-        info = self.engine_info.get(engine_id)
-        if info is not None:
-            info["config_options"] = []  # probed again: the models differ between gateways and sign-ins
+        self.listed_on.pop(engine_id, None)  # probed again: the models differ between gateways and sign-ins
         # Under the engine's lock: a process still starting (a probe, a chat) is stopped too, once it is up.
         async with self.proc_locks.setdefault(engine_id, asyncio.Lock()):
             self.restarted[engine_id] = time.monotonic()

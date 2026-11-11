@@ -351,6 +351,12 @@ async def test_an_agent_runs_on_the_profile_picked_for_it_and_chats_follow(manag
         assert (await reply_to(managed, "cx", "env MODEL_PROVIDER"))[0] == "crew-gw"
         assert (await c.put("/api/agents/cx/profile", json={"profile": "nope"})).status_code == 422
 
+        # model lists are asked again whenever they were listed on another profile, also after a restart
+        assert managed.listed_on["cx"] == "gw"
+        managed.listed_on.clear()
+        managed.engines()
+        assert "cx" in managed.probing or managed.listed_on.get("cx") == "gw"
+
 
 async def test_codex_catalog_route_needs_the_secret_and_a_profile(managed, gateway):
     async with client(managed) as c:
