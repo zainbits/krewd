@@ -126,6 +126,22 @@ def claude_listed(models: list[dict[str, Any]]) -> list[str]:
     return [m["id"] for m in models if "claude" in m["id"].lower() or "anthropic" in m["id"].lower()]
 
 
+def claude_defaults(listed: list[str]) -> dict[str, str]:
+    """The models a Claude profile starts on, as environment variables.
+
+    A gateway that uses Claude Code's own model names (`claude-...`, an Anthropic proxy) keeps Claude Code's own
+    default: such a gateway may list models it then refuses. Any other gateway (OpenRouter, whose list is what the
+    key may use) starts on its first model, since Claude Code's default would be blocked; its background model
+    (Haiku by default, for titles and summaries) too, unless the gateway offers a Haiku.
+    """
+    if not listed or any(m.startswith("claude-") for m in listed):
+        return {}
+    env = {"ANTHROPIC_MODEL": listed[0]}
+    if not any("haiku" in m.lower() for m in listed):
+        env["ANTHROPIC_SMALL_FAST_MODEL"] = listed[0]
+    return env
+
+
 def default_model(catalog: dict[str, Any]) -> str | None:
     listed = [m for m in catalog.get("models", []) if m.get("visibility", "list") == "list"]
     return listed[0]["slug"] if listed else None
@@ -229,13 +245,7 @@ class Gateways:
                 models = await self.claude_models(engine)
             except ProfileError:  # the gateway may not list models; Claude Code's own aliases still apply
                 models = []
-            if models:
-                # Start on a model the key may use (Claude Code's default may be blocked), as Codex does.
-                env["ANTHROPIC_MODEL"] = models[0]
-                if not any("haiku" in m.lower() for m in models):
-                    # Claude Code's background calls (titles, summaries) use Haiku, which the key may block.
-                    env["ANTHROPIC_SMALL_FAST_MODEL"] = models[0]
-            return env
+            return env | claude_defaults(models)
         if engine.gateway == "codex":
             catalog = await self.codex_catalog(engine)
             if not catalog["models"]:

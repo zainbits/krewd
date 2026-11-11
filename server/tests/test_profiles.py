@@ -204,6 +204,19 @@ async def test_claude_engines_get_the_gateway_key_and_a_model_the_key_may_use(tm
                    "ANTHROPIC_SMALL_FAST_MODEL": first}
 
 
+def test_claude_profiles_start_on_a_listed_model_only_off_claude_names():
+    from crew_server.profiles import claude_defaults
+
+    # an Anthropic-style proxy (Claude Code's own names) may list models it refuses: Claude Code's default stays
+    assert claude_defaults(["claude-fable-9", "claude-haiku-9"]) == {}
+    assert claude_defaults([]) == {}
+    # OpenRouter-style ids: the first listed model, and the background model when there is no Haiku
+    assert claude_defaults(["anthropic/claude-sonnet-9[1m]", "anthropic/claude-haiku-9[1m]"]) == {
+        "ANTHROPIC_MODEL": "anthropic/claude-sonnet-9[1m]"}
+    assert claude_defaults(["anthropic/glm[1m]"]) == {"ANTHROPIC_MODEL": "anthropic/glm[1m]",
+                                                       "ANTHROPIC_SMALL_FAST_MODEL": "anthropic/glm[1m]"}
+
+
 def test_claude_lists_what_its_discovery_keeps():
     from crew_server.profiles import claude_listed
 
