@@ -59,7 +59,6 @@ private enum class Tab(val title: String, val label: String, val icon: Int) {
     Tasks("Crew", "Tasks", R.drawable.ic_chat_24),
     Routines("Routines", "Routines", R.drawable.ic_schedule_24),
     Browser("Browser", "Browser", R.drawable.ic_web_24),
-    Approvals("Approvals", "Approvals", R.drawable.ic_approval_24),
     Settings("Settings", "Settings", R.drawable.ic_tune_24),
 }
 
@@ -120,16 +119,16 @@ fun CrewApp(viewModel: CrewViewModel) {
         } else {
             val tab = Tab.entries[tabIndex]
             Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surface)) {
-                val padding = shellContentPadding()
+                // The Crew tab has its own header (no title pill) and the Ask Crew bar above the nav bar.
+                val padding = if (tab == Tab.Tasks) shellContentPadding(titlePill = false, extraBottom = ASK_BAR_HEIGHT + ASK_BAR_GAP) else shellContentPadding()
                 when (tab) {
                     Tab.Tasks -> TasksScreen(state, viewModel, padding, onOpenSettings = { viewModel.navigate(NavTab.SETTINGS) })
                     Tab.Routines -> RoutinesScreen(state, viewModel, padding)
                     Tab.Browser -> BrowserScreen(state, viewModel, landscape)
-                    Tab.Approvals -> ApprovalsScreen(state, viewModel, padding)
                     Tab.Settings -> SettingsScreen(state, viewModel, padding)
                 }
-                if (tab != Tab.Browser) TitlePill(
-                    title = if (tab == Tab.Approvals && state.approvals.isNotEmpty()) "Approvals · ${state.approvals.size}" else tab.title,
+                if (tab != Tab.Browser && tab != Tab.Tasks) TitlePill(
+                    title = tab.title,
                     connection = state.connection,
                     modifier = Modifier
                         .align(Alignment.TopStart)
@@ -165,7 +164,12 @@ fun CrewApp(viewModel: CrewViewModel) {
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .windowInsetsPadding(WindowInsets.navigationBars)
-                .padding(bottom = LiquidNavDimensions.BOTTOM_GAP + LiquidNavDimensions.BAR_HEIGHT + 12.dp, start = 16.dp, end = 16.dp),
+                .padding(
+                    bottom = LiquidNavDimensions.BOTTOM_GAP + LiquidNavDimensions.BAR_HEIGHT + 12.dp +
+                        if (state.openSessionId == null && tabIndex == NavTab.TASKS) ASK_BAR_HEIGHT + ASK_BAR_GAP else 0.dp,
+                    start = 16.dp,
+                    end = 16.dp,
+                ),
         )
     }
     if (state.restarting) {
@@ -217,15 +221,15 @@ private fun RestartingPill(modifier: Modifier = Modifier) {
 
 /** Content scrolls edge to edge behind the title pill and the nav bar, with room to clear both. */
 @Composable
-private fun shellContentPadding(): PaddingValues {
+private fun shellContentPadding(titlePill: Boolean = true, extraBottom: androidx.compose.ui.unit.Dp = 0.dp): PaddingValues {
     val bars = WindowInsets.systemBars.union(WindowInsets.displayCutout).asPaddingValues()
     val dir = LocalLayoutDirection.current
     return PaddingValues(
         start = bars.calculateStartPadding(dir) + ShellDimensions.CONTENT_HORIZONTAL_PADDING,
         end = bars.calculateEndPadding(dir) + ShellDimensions.CONTENT_HORIZONTAL_PADDING,
         top = bars.calculateTopPadding() + ShellDimensions.TITLE_PILL_TOP_GAP +
-            ShellDimensions.TITLE_PILL_HEIGHT + ShellDimensions.CONTENT_CLEARANCE,
+            (if (titlePill) ShellDimensions.TITLE_PILL_HEIGHT + ShellDimensions.CONTENT_CLEARANCE else 0.dp),
         bottom = bars.calculateBottomPadding() + LiquidNavDimensions.BOTTOM_GAP +
-            LiquidNavDimensions.BAR_HEIGHT + ShellDimensions.CONTENT_CLEARANCE,
+            LiquidNavDimensions.BAR_HEIGHT + ShellDimensions.CONTENT_CLEARANCE + extraBottom,
     )
 }

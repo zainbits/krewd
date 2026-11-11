@@ -52,6 +52,19 @@ class Prefs(context: Context) {
 
     fun setLastEngine(id: String) = prefs.edit().putString("last_engine", id).apply()
 
+    /** The picture-in-picture size the owner picked: width (dp) for horizontal tabs, height for vertical ones. */
+    fun pipSize(wide: Boolean): Float = prefs.getFloat(if (wide) "pip_wide_width" else "pip_tall_height", if (wide) 180f else 240f)
+
+    fun setPipSize(wide: Boolean, dp: Float) = prefs.edit().putFloat(if (wide) "pip_wide_width" else "pip_tall_height", dp).apply()
+
+    /** Saved prompts for the new-task sheet, newest first. */
+    fun savedPrompts(): List<String> = runCatching {
+        org.json.JSONArray(prefs.getString("saved_prompts", "[]")).strings()
+    }.getOrDefault(emptyList())
+
+    fun setSavedPrompts(list: List<String>) =
+        prefs.edit().putString("saved_prompts", org.json.JSONArray(list).toString()).apply()
+
     /** High quality live view: 60 fps and sharper frames, at about three times the data. Off: 30 fps. */
     fun highQuality(): Boolean = prefs.getBoolean("browser_high_quality", false)
 
@@ -302,6 +315,21 @@ class CrewApi(val baseUrl: String, private val token: String, val route: Route) 
             conn.setRequestProperty("Authorization", "Bearer $token")
             val code = conn.responseCode
             if (code !in 200..299) throw ApiException(code, if (code == 404) "The image is no longer there" else "Image failed (HTTP $code)")
+            return conn.inputStream.use { it.readBytes() }
+        } finally {
+            conn.disconnect()
+        }
+    }
+
+    /** A small JPEG of a browser tab (GET /api/browser/tabs/{id}/snapshot), [width] pixels wide. */
+    fun tabSnapshot(tabId: String, width: Int): ByteArray {
+        val conn = URL("$baseUrl/api/browser/tabs/" + java.net.URLEncoder.encode(tabId, "UTF-8") + "/snapshot?width=$width").openConnection() as HttpURLConnection
+        try {
+            conn.connectTimeout = Timing.CONNECT_TIMEOUT_MS
+            conn.readTimeout = 15_000
+            conn.setRequestProperty("Authorization", "Bearer $token")
+            val code = conn.responseCode
+            if (code !in 200..299) throw ApiException(code, "Snapshot failed (HTTP $code)")
             return conn.inputStream.use { it.readBytes() }
         } finally {
             conn.disconnect()

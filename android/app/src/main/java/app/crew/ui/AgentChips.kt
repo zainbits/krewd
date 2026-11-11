@@ -108,34 +108,3 @@ private fun ChoiceItem(choice: ConfigChoice, current: Boolean, onClick: () -> Un
         onClick = onClick,
     )
 }
-
-/** The open task's agent and settings, in one scrollable row. Changes apply from the next step on. */
-@Composable
-fun SessionAgentChips(session: SessionInfo, engineName: String, enabled: Boolean, onPick: (String, String) -> Unit, onMode: (String) -> Unit, modifier: Modifier = Modifier) {
-    Row(
-        modifier.horizontalScroll(rememberScrollState()),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        val details = listOfNotNull(
-            session.agent?.let { "Harness: ${it.label}" + if (it.name != it.title) " (${it.name})" else "" },
-            "Engine: $engineName",
-            session.modelUsed?.let { "Last step ran on $it" },
-        )
-        InfoChip(session.agent?.title ?: engineName, details)
-        val options = ConfigOption.ordered(session.config)
-        options.forEach { option ->
-            ConfigChip(
-                option = option,
-                selected = option.current,
-                enabled = enabled,
-                onPick = { onPick(option.id, it) },
-                note = if (option.category == "model") session.modelUsed?.let { "Last step ran on $it" } else null,
-            )
-        }
-        // Agents that only offer the older ACP modes list.
-        if (options.none { it.isMode } && session.modes.isNotEmpty()) {
-            val legacy = ConfigOption("mode", "Mode", null, "mode", session.mode, session.modes.map { ConfigChoice(it.id, it.name, it.description) })
-            ConfigChip(legacy, session.mode, enabled, onPick = onMode)
-        }
-    }
-}

@@ -354,6 +354,34 @@ class Browser:
             if link.viewers == 0 and not link.closed:
                 link.idle_task = asyncio.create_task(self._close_when_idle(link))
 
+    async def snapshot(self, target_id: str, width: int = 360) -> bytes:
+        """A small JPEG of a tab for the phone's task cards: one screenshot of the visible viewport, scaled to
+        [width] pixels, without bringing the tab to the front. The connection closes once snapshots stop."""
+        link = await self.link(target_id)
+        try:
+            metrics = await link.call("Page.getLayoutMetrics")
+            view = metrics.get("cssVisualViewport") or metrics.get("visualViewport") or {}
+            w = float(view.get("clientWidth") or 1280)
+            h = float(view.get("clientHeight") or 720)
+            clip = {
+                "x": float(view.get("pageX") or 0),
+                "y": float(view.get("pageY") or 0),
+                "width": w,
+                "height": h,
+                "scale": max(0.05, min(1.0, width / w)),
+            }
+            shot = await link.call(
+                "Page.captureScreenshot",
+                {"format": "jpeg", "quality": 55, "optimizeForSpeed": True, "clip": clip},
+                timeout=8,
+            )
+        finally:
+            if link.viewers == 0 and not link.closed:
+                if link.idle_task:
+                    link.idle_task.cancel()
+                link.idle_task = asyncio.create_task(self._close_when_idle(link))
+        return base64.b64decode(shot["data"])
+
     async def _close_when_idle(self, link: TabLink) -> None:
         await asyncio.sleep(IDLE_CLOSE_SECONDS)
         if link.viewers:

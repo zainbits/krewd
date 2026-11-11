@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.only
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
@@ -55,6 +56,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -77,6 +79,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.crew.Connection
+import kotlinx.coroutines.launch
 import app.crew.CrewViewModel
 import app.crew.R
 import app.crew.UiState
@@ -101,7 +104,7 @@ fun ChatScreen(state: UiState, viewModel: CrewViewModel) {
     val items = state.timeline + (session?.let { viewModel.localRows(it.id) } ?: emptyList())
     val rows = items.asReversed()
     val busy = session?.isBusy == true
-    val rowCount = items.size + if (busy) 1 else 0
+    val rowCount = items.size
     val lastLength = (items.lastOrNull() as? TextItem)?.text?.length ?: 0
 
     // Opened from a routine's run: scroll to the message that started that run, once it is loaded.
@@ -109,7 +112,7 @@ fun ChatScreen(state: UiState, viewModel: CrewViewModel) {
     LaunchedEffect(focusIndex) {
         if (focusIndex != null) {
             // The run's message sits at the top of the screen, its reply below it.
-            listState.scrollToItem(focusIndex + if (busy) 1 else 0)
+            listState.scrollToItem(focusIndex)
             viewModel.focusDone()
         }
     }
@@ -122,6 +125,8 @@ fun ChatScreen(state: UiState, viewModel: CrewViewModel) {
 
     val bars = WindowInsets.statusBars.union(WindowInsets.displayCutout).asPaddingValues()
     val bottomInsets = WindowInsets.ime.union(WindowInsets.navigationBars).asPaddingValues()
+    var settingsOpen by rememberSaveable(state.openSessionId) { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
     Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surface)) {
         LazyColumn(
             state = listState,
@@ -132,16 +137,14 @@ fun ChatScreen(state: UiState, viewModel: CrewViewModel) {
                 top = bars.calculateTopPadding() + ShellDimensions.TITLE_PILL_TOP_GAP +
                     ShellDimensions.TITLE_PILL_HEIGHT + ShellDimensions.CONTENT_CLEARANCE,
                 bottom = bottomInsets.calculateBottomPadding() + ShellDimensions.COMPOSER_MIN_HEIGHT +
-                    ShellDimensions.COMPOSER_MARGIN * 2 + ShellDimensions.AGENT_CHIPS_HEIGHT + ShellDimensions.CONTENT_CLEARANCE +
+                    ShellDimensions.COMPOSER_MARGIN * 2 + ShellDimensions.CONTENT_CLEARANCE +
+                    (if (busy) ACTIVITY_HEIGHT else 0.dp) +
                     // room for the "Add to chat" tab chips above the composer
                     (if (session != null && state.draftTabs[session.id].orEmpty().isNotEmpty()) ShellDimensions.AGENT_CHIPS_HEIGHT else 0.dp),
             ),
             reverseLayout = true,
             verticalArrangement = Arrangement.spacedBy(10.dp, Alignment.Bottom),
         ) {
-            if (busy) {
-                item(key = "working") { WorkingRow(waiting = session?.status == "waiting") }
-            }
             items(rows, key = { it.key }) { item -> ChatRow(item, viewModel, session?.isBusy == true) }
             if (state.timelineLoading && rows.isEmpty()) {
                 item(key = "loading") { CircularProgressIndicator(Modifier.padding(24.dp)) }
@@ -157,13 +160,14 @@ fun ChatScreen(state: UiState, viewModel: CrewViewModel) {
                 viewModel = viewModel,
                 top = bars.calculateTopPadding() + ShellDimensions.TITLE_PILL_TOP_GAP + ShellDimensions.TITLE_PILL_HEIGHT,
                 bottom = bottomInsets.calculateBottomPadding() + ShellDimensions.COMPOSER_MIN_HEIGHT +
-                    ShellDimensions.COMPOSER_MARGIN * 2 + ShellDimensions.AGENT_CHIPS_HEIGHT,
+                    ShellDimensions.COMPOSER_MARGIN * 2 + (if (busy) ACTIVITY_HEIGHT else 0.dp),
                 onClose = { viewModel.hidePip(session.id, pipTab) },
                 onOpen = { viewModel.openBrowserAt(pipTab) },
             )
         }
 
-        ChatTopBar(state, viewModel)
+        ChatTopBar(state, viewModel, onSettings = { settingsOpen = true })
+        if (settingsOpen && session != null) ChatSettingsSheet(state, viewModel, session, onDismiss = { settingsOpen = false })
 
         Column(
             Modifier
@@ -171,14 +175,13 @@ fun ChatScreen(state: UiState, viewModel: CrewViewModel) {
                 .windowInsetsPadding(WindowInsets.ime.union(WindowInsets.navigationBars))
                 .padding(ShellDimensions.COMPOSER_MARGIN),
         ) {
-            if (session != null) {
-                SessionAgentChips(
-                    session = session,
-                    engineName = state.engines.firstOrNull { it.id == session.engine }?.name ?: session.engine,
-                    enabled = state.connection is Connection.Online,
-                    onPick = { configId, value -> viewModel.setConfig(session.id, configId, value) },
-                    onMode = { viewModel.setMode(session.id, it) },
-                    modifier = Modifier.padding(start = 4.dp, bottom = 4.dp),
+            if (session != null && busy) {
+                ActivityLine(
+                    look = lookFor(session.engine, state.engines),
+                    face = faceOf(session, state.live[session.id]),
+                    live = state.live[session.id],
+                    onClick = { scope.launch { listState.animateScrollToItem(0) } },
+                    modifier = Modifier.padding(bottom = 8.dp),
                 )
             }
             if (session != null) {
@@ -201,6 +204,10 @@ fun ChatScreen(state: UiState, viewModel: CrewViewModel) {
                 }
                 val pick = rememberFilePicker { viewModel.attach(session.id, it) }
                 Composer(
+                    look = lookFor(session.engine, state.engines),
+                    face = if (busy) faceOf(session, state.live[session.id]) else FaceState.Idle,
+                    autoApprove = session.autoApprove,
+                    onAvatar = { settingsOpen = true },
                     busy = busy,
                     steering = state.engine(session.engine)?.steering == true,
                     files = files,
@@ -214,61 +221,10 @@ fun ChatScreen(state: UiState, viewModel: CrewViewModel) {
     }
 }
 
+/** Back, and the title with the agent and its settings under it; tap the title for the chat's settings. */
 @Composable
-private fun ChatTopBar(state: UiState, viewModel: CrewViewModel) {
+private fun ChatTopBar(state: UiState, viewModel: CrewViewModel, onSettings: () -> Unit) {
     val session = state.openSession
-    var menuOpen by remember { mutableStateOf(false) }
-    var confirmCompact by remember { mutableStateOf(false) }
-    var switching by remember { mutableStateOf(false) }
-    if (switching && session != null) {
-        var pick by remember { mutableStateOf<String?>(null) }
-        val current = state.engine(session.engine)?.name ?: session.engine
-        AlertDialog(
-            onDismissRequest = { switching = false },
-            title = { Text("Switch agent") },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    state.engines.filter { it.id != session.engine }.forEach { engine ->
-                        Surface(
-                            shape = RoundedCornerShape(12.dp),
-                            color = if (pick == engine.id) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent,
-                            modifier = Modifier.fillMaxWidth().clickable { pick = engine.id },
-                        ) {
-                            Text(
-                                listOfNotNull(engine.name, engine.agent?.label?.takeIf { it != engine.name }).joinToString(" · "),
-                                modifier = Modifier.padding(12.dp),
-                            )
-                        }
-                    }
-                    Text(
-                        "$current writes a short handover, then the new agent continues in this chat. Each agent keeps its own session: switching back resumes it and briefs it on what it missed.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(top = 8.dp),
-                    )
-                }
-            },
-            confirmButton = {
-                TextButton(enabled = pick != null, onClick = { switching = false; pick?.let { viewModel.switchEngine(session.id, it) } }) { Text("Switch") }
-            },
-            dismissButton = { TextButton(onClick = { switching = false }) { Text("Cancel") } },
-        )
-    }
-    if (confirmCompact && session != null) {
-        AlertDialog(
-            onDismissRequest = { confirmCompact = false },
-            title = { Text("Compact the context?") },
-            text = {
-                Text(
-                    (session.contextPercent?.let { "The agent's context is $it% full. " } ?: "") +
-                        if (session.compact == "native") "The agent summarises the chat so far with its own /compact and carries on with the summary."
-                        else "The agent writes a handover, then a fresh agent session continues from it.\n\nThe chat here stays as it is either way. It runs after the current turn.",
-                )
-            },
-            confirmButton = { TextButton(onClick = { confirmCompact = false; viewModel.compact(session.id) }) { Text("Compact") } },
-            dismissButton = { TextButton(onClick = { confirmCompact = false }) { Text("Cancel") } },
-        )
-    }
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -286,81 +242,74 @@ private fun ChatTopBar(state: UiState, viewModel: CrewViewModel) {
                 Icon(painterResource(R.drawable.ic_chevron_left_24), contentDescription = "Back")
             }
         }
-        FloatingPill(Modifier.weight(1f)) {
-            Row(
-                Modifier.padding(horizontal = 16.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
+        Surface(
+            onClick = onSettings,
+            enabled = session != null,
+            shape = RoundedCornerShape(26.dp),
+            color = MaterialTheme.colorScheme.surfaceContainerHigh,
+            border = androidx.compose.foundation.BorderStroke(ShellDimensions.PILL_BORDER_WIDTH, MaterialTheme.colorScheme.outlineVariant),
+            shadowElevation = 2.dp,
+            modifier = Modifier.weight(1f),
+        ) {
+            Column(Modifier.padding(start = 16.dp, end = 12.dp, top = 6.dp, bottom = 7.dp)) {
                 Text(
                     session?.title ?: "Task",
                     style = MaterialTheme.typography.titleMedium,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f, fill = false),
                 )
-                if (session != null) StatusChip(session.status, session.pendingApprovals)
-            }
-        }
-        Box {
-            FloatingPill {
-                IconButton(onClick = { menuOpen = true }) {
-                    Icon(painterResource(R.drawable.ic_more_24), contentDescription = "Task options")
+                if (session != null) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Box(Modifier.size(8.dp).background(lookFor(session.engine, state.engines).color, CircleShape))
+                        Text(
+                            chatSubtitle(state, session),
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false),
+                        )
+                        Icon(painterResource(R.drawable.ic_chevron_right_24), contentDescription = "Chat settings", tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(16.dp))
+                    }
                 }
             }
-            DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                if (session != null) {
-                    DropdownMenuItem(
-                        text = { Text(if (session.autoApprove) "Auto-approve: on" else "Auto-approve: off") },
-                        onClick = {
-                            viewModel.setAutoApprove(session.id, !session.autoApprove)
-                            menuOpen = false
-                        },
-                    )
-                    DropdownMenuItem(
-                        text = { Text(if (session.pinned) "Unpin" else "Pin to top") },
-                        leadingIcon = { Icon(painterResource(R.drawable.ic_pin_24), contentDescription = null) },
-                        onClick = {
-                            menuOpen = false
-                            viewModel.setPinned(session.id, !session.pinned)
-                        },
-                    )
-                    if (state.engines.size > 1) DropdownMenuItem(
-                        text = { Text("Switch agent · now ${state.engine(session.engine)?.name ?: session.engine}") },
-                        leadingIcon = { Icon(painterResource(R.drawable.ic_swap_24), contentDescription = null) },
-                        onClick = {
-                            menuOpen = false
-                            switching = true
-                        },
-                    )
-                    DropdownMenuItem(
-                        text = { Text("Compact context" + (session.contextPercent?.let { " · $it% used" } ?: "")) },
-                        leadingIcon = { Icon(painterResource(R.drawable.ic_compress_24), contentDescription = null) },
-                        onClick = {
-                            menuOpen = false
-                            confirmCompact = true
-                        },
-                    )
-                    session.routineId?.let { routineId ->
-                        DropdownMenuItem(
-                            text = { Text("Routine: schedule and runs") },
-                            leadingIcon = { Icon(painterResource(R.drawable.ic_schedule_24), contentDescription = null) },
-                            onClick = {
-                                menuOpen = false
-                                viewModel.closeSession()
-                                viewModel.openRoutine(routineId)
-                            },
+        }
+    }
+}
+
+/** Height the activity line takes above the composer, gap included. */
+private val ACTIVITY_HEIGHT = 52.dp
+
+/** While a turn runs: the agent's face, what it is doing, the time and steps so far. Tap to jump to the end. */
+@Composable
+private fun ActivityLine(look: CrewLook, face: FaceState, live: app.crew.LiveInfo?, onClick: () -> Unit, modifier: Modifier = Modifier) {
+    Surface(
+        onClick = onClick,
+        shape = RoundedCornerShape(20.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        shadowElevation = 2.dp,
+        modifier = modifier.fillMaxWidth(),
+    ) {
+        Row(Modifier.padding(start = 12.dp, end = 14.dp, top = 9.dp, bottom = 9.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            CrewFace(look, face, 24.dp)
+            Text(
+                live?.activity ?: "Working",
+                style = MaterialTheme.typography.labelLarge,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            if (live != null) {
+                Elapsed(live.since)
+                if (live.steps > 0) {
+                    Surface(shape = RoundedCornerShape(10.dp), color = MaterialTheme.colorScheme.surfaceContainerHighest) {
+                        Text(
+                            if (live.steps == 1) "1 step" else "${live.steps} steps",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
                         )
                     }
-                    HorizontalDivider()
-                    DropdownMenuItem(text = { Text("Watch the browser") }, onClick = {
-                        menuOpen = false
-                        viewModel.openBrowserAt(session.browserTab?.id)
-                    })
-                    DropdownMenuItem(text = { Text("Archive task") }, onClick = {
-                        menuOpen = false
-                        viewModel.archive(session.id)
-                    })
                 }
             }
         }
@@ -376,6 +325,10 @@ private enum class Delivery(val id: String, val label: String, val hint: String)
 
 @Composable
 private fun Composer(
+    look: CrewLook,
+    face: FaceState,
+    autoApprove: Boolean,
+    onAvatar: () -> Unit,
     busy: Boolean,
     steering: Boolean,
     files: List<PendingFile>,
@@ -398,14 +351,35 @@ private fun Composer(
         border = androidx.compose.foundation.BorderStroke(ShellDimensions.PILL_BORDER_WIDTH, MaterialTheme.colorScheme.outlineVariant),
         shadowElevation = 2.dp,
     ) {
-        Row(verticalAlignment = Alignment.Bottom, modifier = Modifier.padding(start = 4.dp, end = 6.dp, top = 4.dp, bottom = 4.dp)) {
-            IconButton(onClick = onAttach) {
-                Icon(painterResource(R.drawable.ic_attach_24), contentDescription = "Attach files")
+        Row(verticalAlignment = Alignment.Bottom, modifier = Modifier.padding(start = 8.dp, end = 6.dp, top = 4.dp, bottom = 4.dp)) {
+            Box(
+                Modifier
+                    .align(Alignment.CenterVertically)
+                    .clip(CircleShape)
+                    .clickable(onClick = onAvatar)
+                    .padding(2.dp),
+            ) {
+                CrewFace(look, face, 38.dp, description = "Chat settings")
+                Box(
+                    Modifier
+                        .align(Alignment.BottomEnd)
+                        .offset(x = 3.dp, y = 3.dp)
+                        .size(18.dp)
+                        .background(MaterialTheme.colorScheme.surfaceContainerHigh, CircleShape),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        painterResource(if (autoApprove) R.drawable.ic_bolt_24 else R.drawable.ic_approval_24),
+                        contentDescription = if (autoApprove) "Auto-approve on" else "You approve each step",
+                        tint = app.crew.LocalCrewColors.current.needs,
+                        modifier = Modifier.size(12.dp),
+                    )
+                }
             }
             TextField(
                 value = text,
                 onValueChange = { text = it },
-                placeholder = { Text(if (busy) "Add to the task…" else "Reply…") },
+                placeholder = { Text(if (busy) "Steer the agent…" else "Reply…") },
                 modifier = Modifier.weight(1f),
                 maxLines = 6,
                 colors = TextFieldDefaults.colors(
@@ -415,7 +389,7 @@ private fun Composer(
                     unfocusedIndicatorColor = Color.Transparent,
                 ),
             )
-            if (busy) {
+            if (busy && (text.isNotBlank() || files.isNotEmpty() || hasTabs)) {
                 Box(Modifier.align(Alignment.CenterVertically)) {
                     Surface(
                         onClick = { deliveryMenu = true },
@@ -453,6 +427,9 @@ private fun Composer(
                         }
                     }
                 }
+            }
+            IconButton(onClick = onAttach) {
+                Icon(painterResource(R.drawable.ic_attach_24), contentDescription = "Attach files")
             }
             if (busy && text.isBlank() && files.isEmpty() && !hasTabs) {
                 IconButton(onClick = onStop) {
@@ -759,15 +736,4 @@ private fun ToolStatus(status: String?) {
     }
 }
 
-@Composable
-private fun WorkingRow(waiting: Boolean) {
-    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.padding(4.dp)) {
-        if (!waiting) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
-        Text(
-            if (waiting) "Waiting for your OK" else "Working…",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-    }
-}
 

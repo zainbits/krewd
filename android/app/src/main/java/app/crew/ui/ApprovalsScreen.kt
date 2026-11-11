@@ -21,35 +21,6 @@ import app.crew.CrewViewModel
 import app.crew.UiState
 import app.crew.data.Approval
 
-@Composable
-fun ApprovalsScreen(state: UiState, viewModel: CrewViewModel, padding: PaddingValues) {
-    LazyColumn(
-        modifier = Modifier.fillMaxSize(),
-        contentPadding = padding,
-        verticalArrangement = Arrangement.spacedBy(10.dp),
-    ) {
-        if (state.approvals.isEmpty()) {
-            item {
-                Text(
-                    "Nothing is waiting for you.",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(8.dp),
-                )
-            }
-        }
-        items(state.approvals, key = { it.id }) { approval ->
-            val task = state.sessions.firstOrNull { it.id == approval.sessionId }
-            ApprovalCard(
-                approval = approval,
-                taskTitle = task?.title,
-                onDecide = { viewModel.decide(approval, it) },
-                onOpenTask = { viewModel.openSession(approval.sessionId) },
-            )
-        }
-    }
-}
-
 /** An agent's permission prompt: what it wants to run, and the agent's own answer choices. */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable

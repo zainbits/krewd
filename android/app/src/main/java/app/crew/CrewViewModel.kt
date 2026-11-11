@@ -75,8 +75,7 @@ object NavTab {
     const val TASKS = 0
     const val ROUTINES = 1
     const val BROWSER = 2
-    const val APPROVALS = 3
-    const val SETTINGS = 4
+    const val SETTINGS = 3
 }
 
 data class UiState(
@@ -118,6 +117,10 @@ data class UiState(
     val routineDetail: Routine? = null,
     /** A chat row to scroll to once it is loaded (a routine run's message), as its timeline key. */
     val chatFocus: String? = null,
+    /** What each running task is doing right now, by session id (the Crew tab and the chat's activity line). */
+    val live: Map<String, LiveInfo> = emptyMap(),
+    /** The owner's saved prompts for the new-task sheet, newest first. */
+    val savedPrompts: List<String> = emptyList(),
 ) {
     val openRoutine: Routine? get() = routineDetail?.takeIf { it.id == openRoutineId } ?: routines.firstOrNull { it.id == openRoutineId }
     fun routine(id: String?): Routine? = routines.firstOrNull { it.id == id }
@@ -135,6 +138,9 @@ data class UiState(
 }
 
 const val NEW_DRAFT = "new"
+const val MAX_SAVED_PROMPTS = 12
+/** Width of the tab stills on working cards, in pixels. */
+const val SNAPSHOT_WIDTH = 360
 const val UNDO_MS = 3_000L
 
 /**
@@ -148,7 +154,7 @@ class CrewViewModel(private val app: Application) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val prefs = Prefs(app)
     private val notifier = Notifier(app)
-    private val _state = MutableStateFlow(UiState(settings = prefs.load(), highQuality = prefs.highQuality()))
+    private val _state = MutableStateFlow(UiState(settings = prefs.load(), highQuality = prefs.highQuality(), savedPrompts = prefs.savedPrompts()))
     val state: StateFlow<UiState> = _state.asStateFlow()
 
     @Volatile private var api: CrewApi? = null
@@ -258,24 +264,30 @@ class CrewViewModel(private val app: Application) {
             }
             "turn_start" -> {
                 if (_state.value.navTab == NavTab.BROWSER) refreshTabs()
-                live[sid]?.let { it.activity = "Starting"; it.since = System.currentTimeMillis() }
+                live[sid]?.let { it.activity = "Starting"; it.kind = "think"; it.since = System.currentTimeMillis(); it.toolIds.clear() }
                 lastError.remove(sid)
                 pushLive()
             }
             "tool" -> {
                 val status = event.payload.optString("status")
+                live[sid]?.toolIds?.add(event.payload.optString("tool_call_id", event.seq.toString()))
                 if (status != "completed" && status != "failed") {
-                    live[sid]?.activity = event.payload.optString("title", "Working")
+                    live[sid]?.let {
+                        it.activity = event.payload.optString("title", "Working")
+                        it.kind = faceKind(event.payload.optString("kind"))
+                    }
                     pushLive()
                 }
             }
             "text" -> live[sid]?.let {
-                val next = if (event.payload.optString("role") == "thought") "Thinking" else "Writing the reply"
-                if (it.activity != next && !it.waiting) { it.activity = next; pushLive() }
+                val thought = event.payload.optString("role") == "thought"
+                val next = if (thought) "Thinking" else "Writing the reply"
+                if (it.activity != next && !it.waiting) { it.activity = next; it.kind = if (thought) "think" else "write"; pushLive() }
             }
             "browser" -> live[sid].also { if (_state.value.navTab == NavTab.BROWSER) refreshTabs() }?.let {
                 val host = event.payload.optString("url").substringAfter("://").substringBefore('/').removePrefix("www.")
                 it.activity = "Browsing $host"
+                it.kind = "read"
                 pushLive()
             }
             "error" -> lastError[sid] = event.payload.optString("message", "Something went wrong")
@@ -356,7 +368,18 @@ class CrewViewModel(private val app: Application) {
         pushLive()
     }
 
-    private fun pushLive() = notifier.live(live.values.map { it.copy() })
+    private fun pushLive() {
+        notifier.live(live.values.map { it.copy() })
+        val now = live.mapValues { (_, t) -> LiveInfo(t.activity, t.since, if (t.waiting) "needs" else t.kind, t.toolIds.size) }
+        _state.update { it.copy(live = now) }
+    }
+
+    /** The face a tool's ACP kind gets: reading for looking things up, writing for changing things. */
+    private fun faceKind(kind: String): String = when (kind) {
+        "read", "search", "fetch" -> "read"
+        "think" -> "think"
+        else -> "write"
+    }
 
     private fun engineName(sessionId: String, engineId: String? = null): String {
         val s = _state.value
@@ -549,6 +572,34 @@ class CrewViewModel(private val app: Application) {
     fun rememberAutoApprove(engineId: String, on: Boolean) = prefs.updateEngine(engineId) { it.copy(autoApprove = on) }
 
     fun setNewTaskText(text: String) = _state.update { it.copy(newTaskText = text) }
+
+    fun pipSize(wide: Boolean): Float = prefs.pipSize(wide)
+
+    fun setPipSize(wide: Boolean, dp: Float) = prefs.setPipSize(wide, dp)
+
+    fun savePrompt(text: String) {
+        val clean = text.trim().takeIf { it.isNotEmpty() } ?: return
+        val list = (listOf(clean) + _state.value.savedPrompts.filterNot { it == clean }).take(MAX_SAVED_PROMPTS)
+        prefs.setSavedPrompts(list)
+        _state.update { it.copy(savedPrompts = list) }
+    }
+
+    fun forgetPrompt(text: String) {
+        val list = _state.value.savedPrompts.filterNot { it == text }
+        prefs.setSavedPrompts(list)
+        _state.update { it.copy(savedPrompts = list) }
+    }
+
+    /** A small still of a browser tab for the Crew tab's working cards; null when the server has none. */
+    suspend fun tabSnapshot(tabId: String): androidx.compose.ui.graphics.ImageBitmap? {
+        val client = api ?: return null
+        return withContext(Dispatchers.IO) {
+            runCatching {
+                val bytes = client.tabSnapshot(tabId, SNAPSHOT_WIDTH)
+                android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.asImageBitmap()
+            }.getOrNull()
+        }
+    }
 
     /**
      * Sends a message to the open task. [delivery]: steer, queue or interrupt while a turn runs, or null
@@ -1074,4 +1125,13 @@ data class LiveTask(
     var activity: String,
     var since: Long,
     var waiting: Boolean,
-)
+    /** "read", "write" or "think": which face the agent makes on the Crew tab. */
+    var kind: String = "think",
+    /** Tool calls in the current turn, for the step count. */
+    val toolIds: MutableSet<String> = LinkedHashSet(),
+) {
+    fun copy(): LiveTask = LiveTask(sessionId, title, engine, activity, since, waiting, kind, LinkedHashSet(toolIds))
+}
+
+/** What a running task is doing, for the UI: [kind] is read, write, think or needs. */
+data class LiveInfo(val activity: String, val since: Long, val kind: String, val steps: Int)

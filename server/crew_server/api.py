@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager, suppress
 from typing import Any, Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field, model_validator
 
 from . import __version__
@@ -439,6 +439,15 @@ def create_app(hub: Hub, token: str, lifespan_hub: bool = True) -> FastAPI:
         return StreamingResponse(
             body(), media_type="multipart/x-mixed-replace; boundary=frame", headers={"Cache-Control": "no-store"}
         )
+
+    @app.get("/api/browser/tabs/{tab_id}/snapshot", dependencies=auth)
+    async def browser_snapshot(tab_id: str, width: int = Query(360, ge=80, le=1280)) -> Response:
+        """A small still of a tab (JPEG) for the phone's working-task cards."""
+        try:
+            jpeg = await browser.snapshot(tab_id, width)
+        except (RuntimeError, TimeoutError) as exc:
+            raise HTTPException(503, f"no snapshot: {exc}") from exc
+        return Response(content=jpeg, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
 
     @app.post("/api/browser/tabs/{tab_id}/input", dependencies=auth)
     async def browser_input(tab_id: str, body: BrowserInput) -> dict[str, Any]:
