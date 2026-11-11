@@ -13,6 +13,7 @@ import logging
 import os
 import re
 import signal
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -28,6 +29,7 @@ from .acp import AcpError, AcpProcess, MethodNotFound
 from .tool_images import ToolImages, is_empty, split as split_images
 from .attachments import Attachments, UnknownUpload, prompt_blocks
 from .config import Settings
+from .profiles import Gateways, ProfileError
 
 log = logging.getLogger("crew.hub")
 
@@ -36,6 +38,7 @@ CLIP = 4000
 TITLE_MAX = 80
 PREVIEW_MAX = 280
 SCHEDULER_TICK = 15  # seconds between looks for due routines
+PROBE_RETRY = 60.0  # seconds before probing an engine again after a failed probe
 RUN_SUMMARY_MAX = 2000
 NOTES_MAX = 8000
 TRIGGER_NAME = re.compile(r"^[a-z0-9][a-z0-9 _-]{0,39}$")
@@ -189,6 +192,8 @@ class Hub:
         self.last_sent: dict[uuid.UUID, dict[str, Any]] = {}  # last session state emitted, to skip repeats
         self.default_timezone = rtn.local_timezone()
         self.scheduler: asyncio.Task | None = None
+        self.gateways = Gateways(settings.port)
+        self.probe_failed: dict[str, float] = {}  # engine id -> when its last probe failed
 
     # lifecycle
 
@@ -248,7 +253,8 @@ class Hub:
         for engine in self.settings.engines.values():
             info = self.engine_info.get(engine.id) or {}
             unknown = not info.get("config_options") or info.get("steering") is None
-            if unknown and engine.id not in self.probing and not self.closing:
+            retry = time.monotonic() - self.probe_failed.get(engine.id, -PROBE_RETRY) >= PROBE_RETRY
+            if unknown and retry and engine.id not in self.probing and not self.closing and not self.gateways.problem(engine):
                 self.probing.add(engine.id)
                 asyncio.create_task(self._probe(engine.id))
             listing.append({
@@ -259,6 +265,11 @@ class Hub:
                 "config_options": info.get("config_options") or [],
                 "modes": info.get("modes"),
                 "steering": bool(info.get("steering")),
+                # Profile engines: the same agent on a gateway; "base" is the agent on its own login.
+                "base": engine.base,
+                "profile": engine.profile.id if engine.profile else None,
+                "profile_name": engine.profile.name if engine.profile else None,
+                "problem": self.gateways.problem(engine),
             })
         return listing
 
@@ -290,24 +301,37 @@ class Hub:
 
     async def _probe(self, engine_id: str) -> None:
         """Open and drop a throwaway session to learn an engine's models and options."""
+        profile = self.settings.engines[engine_id].profile
         try:
             proc = await self._proc(engine_id)
             self.settings.state_dir.mkdir(parents=True, exist_ok=True)
-            result = await proc.request(
-                "session/new", {"cwd": str(self.settings.state_dir), "mcpServers": []}, timeout=120
-            )
-            await self._remember_engine(
-                engine_id, config_options=normalise_config(result.get("configOptions")), modes=result.get("modes")
-            )
-            caps = proc.capabilities.get("sessionCapabilities") or {}
-            for method in ("delete", "close"):
-                if method in caps:
-                    try:
-                        await proc.request(f"session/{method}", {"sessionId": result["sessionId"]}, timeout=30)
-                        break
-                    except AcpError:
-                        continue
+            # A gateway's model list can arrive after the first session (Claude Code's discovery), so profile
+            # engines are asked twice.
+            for attempt in range(2 if profile else 1):
+                if attempt:
+                    await asyncio.sleep(3)
+                result = await proc.request(
+                    "session/new", {"cwd": str(self.settings.state_dir), "mcpServers": []}, timeout=120
+                )
+                await self._remember_engine(
+                    engine_id, config_options=normalise_config(result.get("configOptions")), modes=result.get("modes")
+                )
+                caps = proc.capabilities.get("sessionCapabilities") or {}
+                for method in ("delete", "close"):
+                    if method in caps:
+                        try:
+                            await proc.request(f"session/{method}", {"sessionId": result["sessionId"]}, timeout=30)
+                            break
+                        except AcpError:
+                            continue
+            # A profile engine is started again when a chat uses it; until then it need not stay running.
+            # Under the engine's lock, so a chat starting right now cannot be handed the process being stopped.
+            if profile:
+                async with self.proc_locks.setdefault(engine_id, asyncio.Lock()):
+                    if not any(rt.engine == engine_id for rt in self.runtimes.values()):
+                        await proc.stop()
         except Exception as exc:  # a probe is best effort; real tasks report their own errors
+            self.probe_failed[engine_id] = time.monotonic()
             log.warning("could not probe %s: %s", engine_id, exc)
         finally:
             self.probing.discard(engine_id)
@@ -749,10 +773,16 @@ class Hub:
             if proc and proc.alive:
                 return proc
             engine = self.settings.engines[engine_id]
+            env = dict(engine.env)
+            if engine.profile:
+                try:
+                    env.update(await self.gateways.engine_env(engine))
+                except ProfileError as exc:
+                    raise AcpError(f"Could not start {engine.name}: {exc}") from exc
             proc = AcpProcess(
                 engine_id=engine_id,
                 command=engine.command,
-                env=engine.env,
+                env=env,
                 cwd=self.settings.workdir,
                 log_dir=self.settings.state_dir,
                 on_notification=partial(self._on_notification, engine_id),

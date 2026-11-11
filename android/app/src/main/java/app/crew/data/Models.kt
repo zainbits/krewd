@@ -330,6 +330,12 @@ data class EngineInfo(
     val config: List<ConfigOption> = emptyList(),
     /** The agent takes messages into a running turn (ACP `_session/steering`). */
     val steering: Boolean = false,
+    /** For a profile engine ("codex@openrouter"): the agent it runs ("codex"), which itself runs on its own login. */
+    val base: String? = null,
+    /** The gateway profile's name ("OpenRouter"); null for the agent's own login (subscription). */
+    val profileName: String? = null,
+    /** Why this profile cannot start (no key), as far as the server can tell. */
+    val problem: String? = null,
 )
 
 data class ServerState(val lastSeq: Long, val engines: List<EngineInfo>, val workdir: String)

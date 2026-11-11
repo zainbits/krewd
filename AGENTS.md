@@ -22,6 +22,7 @@ Crew is a self-hosted, agent-agnostic agent team. The owner asks for a task in t
   - `routines.py`: cron schedules (cronsim, with `L` and `LW` for month ends) in a timezone, their reading in words, catch-up after downtime, and the prompt each run sends (date facts plus the instructions).
   - `cli.py`: the `crew` command for agents and the owner (`crew routines ...`, `crew schedule ...`), over the local HTTP API.
   - `api.py`: HTTP API (see `docs/api.md`).
+  - `profiles.py`: profiles, an agent on a gateway instead of its own login (see Profiles below): the gateway's model list (cached a minute), the Codex model catalog built from it, the environment each profile engine starts with, and `python -m crew_server.profiles check` for doctor.
   - `attachments.py`: uploads from the phone, saved as `~/.crew/common/attachments/<session id prefix>-<name>` and passed to the agent as paths and ACP resource links.
   - `files.py`: files the agents hand back: paths in a reply that name a file in a shared folder (`CREW_SHARE_DIRS`, default `$CREW_WORKDIR/outputs`) are listed on `turn_end`, and `GET /api/files` serves only those folders. The app saves them to Downloads/Crew.
   - `browser.py`: the agents' Brave over DevTools: tabs (list, new, close), live JPEG screencast of a tab (standard 30 fps or high 60 fps, both 1080p), small stills of a tab for the app's working-task cards, mouse (move, press, release, click, double-click, right-click), scrolls, keys and typed text, the phone-sized vertical view (kept per tab, dropped when an agent uses the tab), and a watcher that sees which tab opens or navigates. While an agent's turn uses a tab, the phone only watches it (view only). Typed text goes straight to the page and is never logged or stored.
@@ -69,8 +70,23 @@ All config is in `~/.config/crew/` (folder mode 700, files 600):
   - `CREW_TIMEZONE`: the timezone routine schedules are read in. Default: the machine's own.
   - `CREW_BROWSER_GPU`: default 0. The agents' Brave renders in software, because with the GPU it stops painting (about 1 frame a second, every click waiting a second) once the monitor sleeps, and does not recover. Set 1 only where the display never sleeps.
   - `CREW_BROWSER_LOCATION`: `LAT,LON[,ACCURACY_M]`, the machine's real, fixed location. Brave on Linux has no system location source and a home server has no GPS or Wi-Fi, so pages that ask for the location wait forever. When set, `run-browser.sh` loads `deploy/fixed-location`, a small extension that answers the page's Geolocation API with it. Never put a location in the repo.
-- `engines.toml`: start from `deploy/engines.example.toml`. Each engine is an ACP command with optional environment variables.
+- `engines.toml`: start from `deploy/engines.example.toml`. Each engine is an ACP command with optional environment variables. `gateway = "claude"` or `"codex"` says how the engine is pointed at a profile's gateway; for Codex, `CODEX_PATH` in its env names the Codex that codex-acp runs and that Crew reads the bundled model catalog from.
+- `profiles.toml` (optional): start from `deploy/profiles.example.toml`. See Profiles.
+- `keys.env` (optional): gateway keys as `KEY=value` lines, for profiles. A profile can name another file with `key_file`.
 - `token`: the phone's bearer token, created on the first start. `./master.sh token` shows it.
+
+## Profiles
+
+An agent runs on its own login (the owner's subscription: `claude` then /login, `codex login --device-auth`) unless a chat picks a profile: the same agent on a gateway such as OpenRouter or a company proxy.
+
+- Subscription needs no config and is the default for every new task. The app remembers the agent, never the profile.
+- A profile is one entry per gateway in `profiles.toml`: a name, the variable that holds its key, and its OpenAI (Responses) and Anthropic (Messages) base URLs. Crew adds one engine per agent and profile, `<engine>@<profile>`, which the app shows as that agent's profile, not as another agent. Switching profile in a chat is an agent switch (a handover).
+- Models are never listed here. They come from the gateway's model list, which the key's own limits narrow (an OpenRouter guardrail), so changing models means changing the key's limits on the gateway, nothing in Crew.
+  - Claude Code: `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN` and its gateway model discovery, which keeps the model ids that contain `claude` or `anthropic`. OpenRouter names every model `anthropic/<id>[1m]` for Claude Code, so there it lists all the key's models; other gateways show their Claude models.
+  - Codex: a model provider in `MODEL_PROVIDER` and `CODEX_CONFIG` (read by codex-acp at start), whose `model_catalog_url` is Crew's `/api/codex-catalog/...`. Crew builds that catalog on Codex's own bundled catalog: a gateway that uses Codex's model names (an OpenAI proxy) gets the Codex models it serves; any other gateway gets its whole list on a plain template, described from the gateway's metadata.
+- The global configs must not point at a gateway (`env` in `~/.claude/settings.json`, `model_provider` in `~/.codex/config.toml`), or the subscription is not the default.
+- `./master.sh doctor` checks every profile engine by asking its gateway for the key's models (no tokens spent).
+- OpenCode keeps its own providers in its own config; it has no Crew profiles.
 
 ## Setting up a new machine
 
@@ -87,10 +103,11 @@ Prerequisites that `master.sh` checks but does not install:
    - Put its skill in `~/.agents/skills/browser-harness/` and symlink it into `~/.claude/skills/`.
    - Turn telemetry off. The engine environment in `engines.toml` already sets `BH_TELEMETRY=0`.
 6. The agents' instructions: append `deploy/agents-section.md` to `$CREW_WORKDIR/AGENTS.md`, which is `~/AGENTS.md` by default.
-7. Optional, for use away from home: Tailscale, then `tailscale serve --bg --https=8800 http://127.0.0.1:8800`.
-8. Optional: `sudo loginctl enable-linger $USER`, so Crew starts at boot before anyone logs in. Brave still waits for the desktop login.
+7. Optional, profiles: copy `deploy/profiles.example.toml` to `~/.config/crew/profiles.toml`, put each key in `~/.config/crew/keys.env` (mode 600), add `gateway` (and `CODEX_PATH` for Codex) to the engines in `engines.toml`, then restart and run `doctor`. Log each agent in to its subscription once (`claude` then /login; `codex login --device-auth`).
+8. Optional, for use away from home: Tailscale, then `tailscale serve --bg --https=8800 http://127.0.0.1:8800`.
+9. Optional: `sudo loginctl enable-linger $USER`, so Crew starts at boot before anyone logs in. Brave still waits for the desktop login.
 
-9. Optional, to build the app here: JDK 21, the Android SDK, and a signing key. The key is a properties file at `~/.android/keystores/release.properties` (or `$ANDROID_SIGNING_PROPERTIES`) with `storeFile` (relative to that file), `storePassword`, `keyAlias` and `keyPassword`. Keep it, and the keystore, outside the repo and backed up: every update must be signed with the same key. Without it, `./master.sh app` builds a debug-signed APK.
+10. Optional, to build the app here: JDK 21, the Android SDK, and a signing key. The key is a properties file at `~/.android/keystores/release.properties` (or `$ANDROID_SIGNING_PROPERTIES`) with `storeFile` (relative to that file), `storePassword`, `keyAlias` and `keyPassword`. Keep it, and the keystore, outside the repo and backed up: every update must be signed with the same key. Without it, `./master.sh app` builds a debug-signed APK.
 
 Then run `./master.sh setup`. It creates the config, installs the Python environment and the units, starts both, and runs `doctor`. Finally, enter the machine's address and the token in the app under Settings.
 
@@ -104,7 +121,7 @@ Then run `./master.sh setup`. It creates the config, installs the Python environ
 - Every long-running process runs in a named tmux session the owner can attach to. Use sudo only in a tmux session where the owner types the password.
 - A release bumps `VERSION` and nothing else that holds a version.
 - Work on `main`, the only branch. Use conventional commit messages, with no AI attribution lines.
-- Android: build and install with `./master.sh app`. It builds the release APK signed with the shared key (step 9); never ship a debug-signed build, since a different key cannot update an installed app.
+- Android: build and install with `./master.sh app`. It builds the release APK signed with the shared key (step 10); never ship a debug-signed build, since a different key cannot update an installed app.
 
 ## Checks before you finish
 

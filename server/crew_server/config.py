@@ -1,8 +1,9 @@
-"""Settings from the environment and ~/.config/crew/: database URL, token, engines."""
+"""Settings from the environment and ~/.config/crew/: database URL, token, engines, profiles."""
 
 from __future__ import annotations
 
 import os
+import re
 import secrets
 import tomllib
 from dataclasses import dataclass, field
@@ -15,12 +16,50 @@ ENV_FILE = CONFIG_DIR / "crew.env"
 TOKEN_ALPHABET = "abcdefghijkmnpqrstuvwxyz23456789"
 
 
+# How an engine is pointed at a gateway: "codex" (OpenAI Responses API, Codex settings) or "claude"
+# (Anthropic Messages API, Claude Code settings). Engines without one only run on their own login.
+GATEWAYS = ("codex", "claude")
+PROFILE_ID = re.compile(r"^[a-z0-9][a-z0-9_-]{0,30}$")
+
+
+@dataclass(frozen=True)
+class Profile:
+    """A gateway (OpenRouter, a company proxy...) an agent can use instead of its own subscription login.
+
+    It names the gateway and where its key is, nothing more: the models come from the gateway itself.
+    """
+
+    id: str
+    name: str
+    key: str  # the environment variable that holds the gateway key
+    key_file: Path  # where that variable is set (KEY=value lines); the process environment is the fallback
+    openai: str | None = None  # Responses API base URL, for engines with gateway = "codex"
+    anthropic: str | None = None  # Messages API base URL, for engines with gateway = "claude"
+
+    def url_for(self, gateway: str | None) -> str | None:
+        return {"codex": self.openai, "claude": self.anthropic}.get(gateway or "")
+
+    def read_key(self) -> str | None:
+        if self.key_file.is_file():
+            for line in self.key_file.read_text().splitlines():
+                line = line.strip()
+                if line.startswith("export "):
+                    line = line[len("export "):].lstrip()
+                name, sep, value = line.partition("=")
+                if sep and name.strip() == self.key:
+                    return value.strip().strip("'\"") or None
+        return os.environ.get(self.key) or None
+
+
 @dataclass(frozen=True)
 class Engine:
     id: str
     name: str
     command: list[str]
     env: dict[str, str] = field(default_factory=dict)
+    gateway: str | None = None  # see GATEWAYS
+    base: str | None = None  # for a profile engine: the engine it runs (its own login is the base itself)
+    profile: Profile | None = None
 
 
 @dataclass(frozen=True)
@@ -33,6 +72,7 @@ class Settings:
     state_dir: Path
     engines: dict[str, Engine]
     default_engine: str
+    profiles: dict[str, Profile] = field(default_factory=dict)
     cdp_port: int = 9222
     data_dir: Path = Path.home() / ".crew"
     max_upload_mb: int = 1024
@@ -72,11 +112,15 @@ def load_engines(path: Path) -> tuple[dict[str, Engine], str]:
         command = spec["command"]
         if isinstance(command, str):
             command = [command]
+        gateway = spec.get("gateway")
+        if gateway is not None and gateway not in GATEWAYS:
+            raise ValueError(f"{path}: engine {engine_id} has gateway {gateway!r}; use one of {', '.join(GATEWAYS)}")
         engines[engine_id] = Engine(
             id=engine_id,
             name=spec.get("name", engine_id),
             command=[os.path.expanduser(part) for part in command],
             env={k: str(v) for k, v in spec.get("env", {}).items()},
+            gateway=gateway,
         )
     if not engines:
         raise ValueError(f"{path} defines no engines")
@@ -85,12 +129,57 @@ def load_engines(path: Path) -> tuple[dict[str, Engine], str]:
     return engines, default
 
 
+def load_profiles(path: Path) -> dict[str, Profile]:
+    """Profiles from profiles.toml. None at all is fine: every agent then runs on its own login."""
+    if not path.is_file():
+        return {}
+    data = tomllib.loads(path.read_text())
+    profiles: dict[str, Profile] = {}
+    for profile_id, spec in data.get("profiles", {}).items():
+        if not PROFILE_ID.match(profile_id):
+            raise ValueError(f"{path}: profile id {profile_id!r} must be lowercase letters, digits, - or _")
+        if not spec.get("key"):
+            raise ValueError(f"{path}: profile {profile_id} needs key (the variable that holds its key)")
+        if not (spec.get("openai") or spec.get("anthropic")):
+            raise ValueError(f"{path}: profile {profile_id} needs an openai or anthropic URL")
+        profiles[profile_id] = Profile(
+            id=profile_id,
+            name=spec.get("name", profile_id),
+            key=spec["key"],
+            key_file=Path(os.path.expanduser(spec.get("key_file", str(path.parent / "keys.env")))),
+            openai=(spec.get("openai") or "").rstrip("/") or None,
+            anthropic=(spec.get("anthropic") or "").rstrip("/") or None,
+        )
+    return profiles
+
+
+def with_profiles(engines: dict[str, Engine], profiles: dict[str, Profile]) -> dict[str, Engine]:
+    """Each engine, followed by one engine per profile it can use ("codex@openrouter": Codex on OpenRouter)."""
+    out: dict[str, Engine] = {}
+    for engine in engines.values():
+        out[engine.id] = engine
+        for profile in profiles.values():
+            if engine.gateway and profile.url_for(engine.gateway):
+                out[f"{engine.id}@{profile.id}"] = Engine(
+                    id=f"{engine.id}@{profile.id}",
+                    name=f"{engine.name} · {profile.name}",
+                    command=engine.command,
+                    env=engine.env,
+                    gateway=engine.gateway,
+                    base=engine.id,
+                    profile=profile,
+                )
+    return out
+
+
 def load_settings() -> Settings:
     load_env_file()
     database_url = os.environ.get("CREW_DATABASE_URL")
     if not database_url:
         raise SystemExit(f"CREW_DATABASE_URL is not set (put it in {ENV_FILE})")
     engines, default_engine = load_engines(Path(os.environ.get("CREW_ENGINES_FILE", CONFIG_DIR / "engines.toml")))
+    profiles = load_profiles(Path(os.environ.get("CREW_PROFILES_FILE", CONFIG_DIR / "profiles.toml")))
+    engines = with_profiles(engines, profiles)
     return Settings(
         database_url=database_url,
         host=os.environ.get("CREW_HOST", "127.0.0.1,lan"),
@@ -100,6 +189,7 @@ def load_settings() -> Settings:
         state_dir=Path(os.environ.get("CREW_STATE_DIR", Path.home() / ".local" / "state" / "crew")),
         engines=engines,
         default_engine=default_engine,
+        profiles=profiles,
         cdp_port=int(os.environ.get("CREW_CDP_PORT", "9222")),
         data_dir=Path(os.path.expanduser(os.environ.get("CREW_DATA_DIR", "~/.crew"))),
         max_upload_mb=int(os.environ.get("CREW_MAX_UPLOAD_MB", "1024")),

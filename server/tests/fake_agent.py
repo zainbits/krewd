@@ -68,6 +68,11 @@ async def prompt(request_id: int, params: dict) -> None:
 async def run_prompt(request_id: int, sid: str, text: str, params: dict) -> None:
     if "crash" in text:
         sys.exit(1)
+    if text.startswith("env "):  # tests read what environment an engine was started with
+        value = os.environ.get(text.split()[1], "<unset>")
+        update(sid, {"sessionUpdate": "agent_message_chunk", "messageId": "e1", "content": {"type": "text", "text": value}})
+        send({"jsonrpc": "2.0", "id": request_id, "result": {"stopReason": "end_turn"}})
+        return
     if text == "/compact":
         update(sid, {"sessionUpdate": "agent_message_chunk", "messageId": "c1",
                      "content": {"type": "text", "text": "Compacted."}})

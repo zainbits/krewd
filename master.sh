@@ -33,7 +33,7 @@ doctor() {
   linux_systemd && ok "systemd user session" || bad "no systemd user session (Crew's services need Linux with systemd)"
   [[ -n "$(find_brave)" ]] && ok "Brave ($(find_brave))" || bad "Brave not found" "install Brave, or set CREW_BROWSER in $ENV_FILE"
   [[ -f "$(signing_file)" ]] && ok "APK signing key ($(signing_file))" \
-    || warn "no APK signing key: ./master.sh app makes debug-signed APKs" "put a signing properties file at $(signing_file) (AGENTS.md, new machine step 9)"
+    || warn "no APK signing key: ./master.sh app makes debug-signed APKs" "put a signing properties file at $(signing_file) (AGENTS.md, new machine step 10)"
   has browser-harness && ok "browser-harness" || bad "browser-harness is missing" "uv tool install browser-harness (AGENTS.md, new machine step 5)"
 
   say "${B}Config${N} ($CONFIG_DIR)"
@@ -71,6 +71,23 @@ for e in engines.values():
     print(e.id, "ok" if path and os.access(path, os.X_OK) else "missing", cmd, sep="\t")
 PY
 )
+  fi
+  if [[ -f "$CONFIG_DIR/profiles.toml" && -n "$(find_uv)" ]]; then
+    # Profiles: each agent on each gateway, checked by asking the gateway for the key's models (no tokens spent).
+    local keys="$CONFIG_DIR/keys.env" checked
+    [[ ! -f "$keys" || "$(stat -c %a "$keys" 2>/dev/null)" == 600 ]] || warn "keys.env is not mode 600" "chmod 600 $keys"
+    if checked="$(CREW_CONFIG_DIR="$CONFIG_DIR" uvrun python -m crew_server.profiles check 2>/dev/null)"; then
+      while IFS=$'\t' read -r status id detail; do
+        [[ -z "$status" ]] && continue
+        case "$status" in
+          ok) ok "profile $id: $detail" ;;
+          warn) warn "profile $id: $detail" ;;
+          *) bad "profile $id: $detail" "set the key in keys.env, check the gateway URL in profiles.toml, or set CODEX_PATH (AGENTS.md, Profiles)" ;;
+        esac
+      done <<< "$checked"
+    else
+      bad "profiles.toml could not be read" "cd $REPO/server && uv run python -m crew_server.profiles check"
+    fi
   fi
   if [[ -n "$(conf CREW_DATABASE_URL '')" && -n "$(find_uv)" ]]; then
     local db; db="$(CREW_CONFIG_DIR="$CONFIG_DIR" uvrun python - <<'PY' 2>&1
@@ -273,7 +290,7 @@ Crew is my self-hosted agent team: a server that runs coding agents (Claude Code
 
 - Repository: $REPO (read its AGENTS.md first; it explains every part and how to set it up).
 - The one script for everything is $REPO/master.sh: run ./master.sh doctor to see what is wrong, ./master.sh help for all actions.
-- Config lives in $CONFIG_DIR (crew.env, engines.toml, token). Never print or paste secrets from it (database passwords, the token).
+- Config lives in $CONFIG_DIR (crew.env, engines.toml, profiles.toml, keys.env, token). Never print or paste secrets from it (database passwords, gateway keys, the token).
 - Use sudo only in a tmux session where I type the password myself. Ask me before anything consequential.
 - When you are done, run ./master.sh doctor again and tell me what changed and what is still open.
 

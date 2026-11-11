@@ -63,9 +63,19 @@ fun ChatSettingsSheet(state: UiState, viewModel: CrewViewModel, session: Session
             Text("Chat settings", style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(start = 4.dp))
             Text(session.title, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(start = 4.dp, top = 2.dp))
 
-            if (state.engines.size > 1) {
+            val agentId = state.agentOf(session.engine)
+            val members = crewMembers(state)
+            val profiles = state.profilesOf(agentId)
+            if (members.size > 1) {
                 SheetLabel("Agent")
-                CrewPicker(crewMembers(state), session.engine, onPick = { if (it != session.engine) switchTo = it })
+                // Another agent starts on its own login; pick its profile here afterwards.
+                CrewPicker(members, agentId, onPick = { if (it != agentId) switchTo = it })
+            }
+            if (profiles.size > 1) {
+                SheetLabel("Profile")
+                ProfilePicker(profiles, session.engine, enabled = online, onPick = { switchTo = it })
+            }
+            if (members.size > 1 || profiles.size > 1) {
                 Text(
                     "Switching hands the chat over with a summary.",
                     style = MaterialTheme.typography.bodySmall,

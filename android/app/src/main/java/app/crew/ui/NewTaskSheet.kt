@@ -63,7 +63,8 @@ fun NewTaskSheet(state: UiState, viewModel: CrewViewModel, initialEngine: String
     val sheet = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val scope = rememberCoroutineScope()
     val close: () -> Unit = { scope.launch { sheet.hide() }.invokeOnCompletion { onDismiss() } }
-    var engineId by remember { mutableStateOf(initialEngine ?: viewModel.lastEngine()) }
+    // Always the agent on its own login (subscription) to start with; a profile is picked per task.
+    var engineId by remember { mutableStateOf(state.agentOf(initialEngine ?: viewModel.lastEngine())) }
     val engine = state.engines.firstOrNull { it.id == engineId } ?: state.engines.firstOrNull { it.isDefault } ?: state.engines.firstOrNull()
     val options = ConfigOption.ordered(viewModel.engineConfig(engine?.id))
     // Each agent starts with the owner's last picks for it (model, effort, permission mode, auto-approve).
@@ -128,11 +129,17 @@ fun NewTaskSheet(state: UiState, viewModel: CrewViewModel, initialEngine: String
             )
             PendingFiles(files, onRemove = { viewModel.removeAttachment(NEW_DRAFT, it) })
             if (state.engines.isNotEmpty()) {
+                val agentId = state.agentOf(engine?.id)
                 SheetLabel("Who")
-                CrewPicker(crewMembers(state), engine?.id, onPick = {
+                CrewPicker(crewMembers(state), agentId, onPick = {
                     engineId = it
                     viewModel.setNewTaskEngine(it)
                 })
+                val profiles = state.profilesOf(agentId)
+                if (profiles.size > 1) {
+                    SheetLabel("Profile")
+                    ProfilePicker(profiles, engine?.id, enabled = true, onPick = { engineId = it })
+                }
             }
             if (engine != null) {
                 SettingsLine(

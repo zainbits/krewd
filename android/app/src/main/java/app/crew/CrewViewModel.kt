@@ -129,6 +129,12 @@ data class UiState(
     val openSession: SessionInfo? get() = sessions.firstOrNull { it.id == openSessionId }
     fun engine(id: String?): EngineInfo? = engines.firstOrNull { it.id == id }
 
+    /** The agent an engine is: a profile engine ("codex@openrouter") is its base agent ("codex"). */
+    fun agentOf(engineId: String?): String? = engine(engineId)?.base ?: engineId
+
+    /** How an agent can run: on its own login (subscription) first, then on each gateway profile. */
+    fun profilesOf(agentId: String?): List<EngineInfo> = engines.filter { it.id == agentId || it.base == agentId }
+
     /** The tab to show as picture-in-picture on a chat: picked by hand, or the one its agent is using right now. */
     fun pipTab(session: SessionInfo?): String? {
         session ?: return null
@@ -564,7 +570,8 @@ class CrewViewModel(private val app: Application) {
 
     fun lastEngine(): String? = prefs.lastEngine()
 
-    fun setNewTaskEngine(id: String) = prefs.setLastEngine(id)
+    /** Remembers the agent, not its profile: a new task always starts on the agent's own login. */
+    fun setNewTaskEngine(id: String) = prefs.setLastEngine(_state.value.agentOf(id) ?: id)
 
     fun rememberPick(engineId: String, configId: String, value: String) =
         prefs.updateEngine(engineId) { it.copy(config = it.config + (configId to value)) }

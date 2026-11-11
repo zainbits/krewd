@@ -6,6 +6,9 @@ default = "claude"
 name = "Claude Code"
 # Standalone adapter from https://github.com/agentclientprotocol/claude-agent-acp (bundles Claude Code).
 command = ["~/.local/bin/claude-agent-acp"]
+# How this engine is pointed at a gateway from profiles.toml ("claude" or "codex"). Without it the engine
+# only runs on its own login.
+gateway = "claude"
 
 [engines.claude.env]
 # browser-harness attaches to the agents' Brave (crew-browser.service) instead of launching one.
@@ -17,8 +20,11 @@ BH_TAB_MARKER = "0"
 # [engines.codex]
 # name = "Codex"
 # command = ["~/.local/bin/codex-acp"]
+# gateway = "codex"
 #
 # [engines.codex.env]
+# # The Codex that codex-acp runs, and that Crew reads Codex's model catalog from for profiles.
+# CODEX_PATH = "/path/to/codex"
 # BU_CDP_URL = "http://127.0.0.1:9222"
 # BH_TELEMETRY = "0"
 # BH_UPDATE_CHECK = "0"

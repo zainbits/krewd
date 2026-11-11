@@ -133,6 +133,9 @@ class CrewApi(val baseUrl: String, private val token: String, val route: Route) 
                     agent = AgentInfo.from(it.optJSONObject("agent")),
                     config = ConfigOption.list(it.optJSONArray("config_options")),
                     steering = it.optBoolean("steering"),
+                    base = it.optStringOrNull("base"),
+                    profileName = it.optStringOrNull("profile_name"),
+                    problem = it.optStringOrNull("problem"),
                 )
             },
             workdir = o.optString("workdir"),

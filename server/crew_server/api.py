@@ -18,6 +18,7 @@ from . import files as shared_files
 from .attachments import TooLarge
 from .browser import Browser, BrowserUnavailable, TabGone
 from .hub import Conflict, Hub, NotFound
+from .profiles import ProfileError
 from .routines import Invalid
 
 LONG_POLL_MAX_SECONDS = 30
@@ -206,6 +207,20 @@ def create_app(hub: Hub, token: str, lifespan_hub: bool = True) -> FastAPI:
     @app.get("/api/health")
     async def health() -> dict[str, Any]:
         return {"ok": True, "version": __version__}
+
+    @app.get("/api/codex-catalog/{secret}/{engine_id}")
+    async def codex_catalog(secret: str, engine_id: str) -> Any:
+        """Codex's model catalog for a profile engine, fetched by that engine's Codex (see profiles.py).
+
+        No token: the per-start secret in the path, which only Crew's own agent processes are given, stands in.
+        """
+        engine = hub.settings.engines.get(engine_id)
+        if not hmac.compare_digest(secret, hub.gateways.secret) or not engine or not engine.profile or engine.gateway != "codex":
+            raise HTTPException(404, "not found")
+        try:
+            return await hub.gateways.codex_catalog(engine)
+        except ProfileError as exc:
+            return JSONResponse(status_code=502, content={"detail": str(exc)})
 
     auth = [Depends(require_token)]
 
