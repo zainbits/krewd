@@ -5,6 +5,11 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
+// One version for the app and the server: VERSION at the repo root. The version code follows from it
+// (0.8.1 is 801), so it always grows with the version.
+val crewVersion = providers.fileContents(rootProject.layout.projectDirectory.file("../VERSION")).asText.get().trim()
+val crewVersionCode = crewVersion.split(".").map(String::toInt).let { (major, minor, patch) -> major * 10_000 + minor * 100 + patch }
+
 // Signing key, kept outside the repo: a properties file with storeFile (relative to the file),
 // storePassword, keyAlias and keyPassword. Default ~/.android/keystores/release.properties;
 // override with ANDROID_SIGNING_PROPERTIES. Without it, release APKs are unsigned and debug APKs use
@@ -21,8 +26,8 @@ android {
         applicationId = "app.crew"
         minSdk = 36
         targetSdk = 37
-        versionCode = 14
-        versionName = "0.8.0"
+        versionCode = crewVersionCode
+        versionName = crewVersion
     }
 
     signingConfigs {

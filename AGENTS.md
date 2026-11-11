@@ -36,6 +36,7 @@ Crew is a self-hosted, agent-agnostic agent team. The owner asks for a task in t
   - `agents-section.md`: instructions for the agents Crew runs, including the routine rules (ask before creating a routine when an existing one may be the one to update).
   - `crew-cli.sh`: the `crew` command, run with the server's environment.
 - `docs/`: `api.md`.
+- `VERSION`: the one Crew version. The server reads it live (`/api/health`, its ACP client info and its package metadata), and the app's build takes its version name from it, with the version code worked out from it (0.8.1 is 801).
 
 ## How it runs
 
@@ -101,6 +102,7 @@ Then run `./master.sh setup`. It creates the config, installs the Python environ
   - Agent instructions live in `AGENTS.md` files, and skills in `~/.agents/skills`, symlinked for Claude Code.
 - Secrets: never print, log or commit database URLs, passwords or the token. `doctor` reports only whether they are set.
 - Every long-running process runs in a named tmux session the owner can attach to. Use sudo only in a tmux session where the owner types the password.
+- A release bumps `VERSION` and nothing else that holds a version.
 - Work on `main`, the only branch. Use conventional commit messages, with no AI attribution lines.
 - Android: build and install with `./master.sh app`. It builds the release APK signed with the shared key (step 9); never ship a debug-signed build, since a different key cannot update an installed app.
 

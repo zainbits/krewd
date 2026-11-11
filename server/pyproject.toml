@@ -1,6 +1,6 @@
 [project]
 name = "crew-server"
-version = "0.7.0"
+dynamic = ["version"]
 description = "Crew server: runs ACP coding agents on the host and serves the Crew apps"
 requires-python = ">=3.12"
 dependencies = [
@@ -26,6 +26,14 @@ testpaths = ["tests"]
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+# One version for the server and the app: VERSION at the repo root.
+[tool.hatch.version]
+path = "../VERSION"
+pattern = "^(?P<version>\\S+)"
+
+[tool.uv]
+cache-keys = [{ file = "pyproject.toml" }, { file = "../VERSION" }]
 
 [tool.hatch.build.targets.wheel]
 packages = ["crew_server"]

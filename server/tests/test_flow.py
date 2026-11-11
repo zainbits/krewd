@@ -146,7 +146,9 @@ async def test_api_requires_token_and_long_polls(hub):
     app = create_app(hub, TOKEN, lifespan_hub=False)
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        assert (await client.get("/api/health")).status_code == 200
+        health = await client.get("/api/health")
+        version = (Path(__file__).resolve().parents[2] / "VERSION").read_text().strip()
+        assert health.status_code == 200 and health.json()["version"] == version
         assert (await client.get("/api/sessions")).status_code == 401
         headers = {"Authorization": f"Bearer {TOKEN}"}
         state = (await client.get("/api/state", headers=headers)).json()
