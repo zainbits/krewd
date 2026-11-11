@@ -284,7 +284,8 @@ class Hub:
                 "profile": engine.profile.id if engine.profile else None,
                 "profile_name": engine.profile.name if engine.profile else None,
                 "problem": self.gateways.problem(engine) or self._login_problem(engine),
-                "note": self._login_note(engine),
+                # The engine new tasks on this agent start on: its sign-in account, or its default profile.
+                "preferred": engine.id == self._preferred(engine.base or engine.id),
             })
         return listing
 
@@ -306,32 +307,17 @@ class Hub:
             asyncio.create_task(check())
         return self.logins.known(engine.id)
 
-    def _stand_in(self, engine: Any) -> Any:
-        """The profile engine an agent runs as while it is not signed in, if one is set and usable."""
-        profile_id = self.settings.fallbacks.get(engine.id)
-        return self.settings.engines.get(f"{engine.id}@{profile_id}") if profile_id else None
-
-    def _login_note(self, engine: Any) -> str | None:
-        stand_in = self._stand_in(engine)
-        if self._signed_in(engine) is False and stand_in:
-            return f"Not signed in: runs on {stand_in.profile.name} until you sign in (Settings)"
-        return None
+    def _preferred(self, agent_id: str) -> str:
+        """The engine an agent's new tasks start on: its default profile, else its own sign-in account."""
+        profile_id = self.settings.defaults.get(agent_id)
+        engine_id = f"{agent_id}@{profile_id}" if profile_id else agent_id
+        return engine_id if engine_id in self.settings.engines else agent_id
 
     def _login_problem(self, engine: Any) -> str | None:
-        if self._signed_in(engine) is False and not self._stand_in(engine):
-            return "Not signed in: sign in under Settings > Sign-ins, or pick a stand-in profile there"
+        """The agent's own engine is its sign-in account, nothing else: without a sign-in it cannot run."""
+        if self._signed_in(engine) is False:
+            return "Not signed in: sign in under Settings > Agents, or pick another profile"
         return None
-
-    async def _stand_in_env(self, engine: Any) -> dict[str, str]:
-        """For an agent starting without its own login: its stand-in profile's environment (else nothing)."""
-        stand_in = self._stand_in(engine)
-        if engine.profile or not engine.gateway or not stand_in:
-            return {}
-        if self.logins.stale(engine.id):
-            await self.logins.check(engine)
-        if self.logins.known(engine.id):
-            return {}
-        return await self.gateways.engine_env(stand_in)
 
     def logins_listing(self) -> dict[str, Any]:
         agents = []
@@ -347,9 +333,9 @@ class Hub:
                 "logged_in": status.get("logged_in"),
                 "account": status.get("account"),
                 "error": status.get("error"),
-                "fallback": self.settings.fallbacks.get(engine.id),
-                "fallback_choices": [e.profile.id for e in self.settings.engines.values()
-                                     if e.base == engine.id and e.profile],
+                "default": self.settings.defaults.get(engine.id),
+                "default_choices": [e.profile.id for e in self.settings.engines.values()
+                                    if e.base == engine.id and e.profile],
                 "flow": self.logins.flow(engine.id),
             })
         return {"agents": agents}
@@ -387,7 +373,8 @@ class Hub:
         await self._login_changed(engine_id)
         return status
 
-    async def set_fallback(self, engine_id: str, profile_id: str | None) -> dict[str, Any]:
+    async def set_default(self, engine_id: str, profile_id: str | None) -> dict[str, Any]:
+        """The profile an agent's new tasks start on (None: its sign-in account). Running chats keep theirs."""
         engine = self._login_engine(engine_id)
         path = self.settings.profiles_file
         if path is None:
@@ -396,15 +383,14 @@ class Hub:
             raise Invalid(f"{profile_id} is not a profile {engine.name} can use")
         async with self.profiles_lock:
             if profile_id:
-                self.settings.fallbacks[engine_id] = profile_id
+                self.settings.defaults[engine_id] = profile_id
             else:
-                self.settings.fallbacks.pop(engine_id, None)
-            write_profiles(path, self.settings.profiles, self.settings.fallbacks)
-        await self._login_changed(engine_id)
+                self.settings.defaults.pop(engine_id, None)
+            write_profiles(path, self.settings.profiles, self.settings.defaults)
         return next(a for a in self.logins_listing()["agents"] if a["engine"] == engine_id)
 
     async def _login_changed(self, engine_id: str) -> None:
-        """After a sign-in, sign-out or stand-in change: restart the agent's idle process and relist its options."""
+        """After a sign-in or sign-out: restart the agent's idle process and relist its options."""
         info = self.engine_info.get(engine_id)
         if info is not None:
             info["config_options"] = []  # probed again: the models differ between a login and a gateway
@@ -473,7 +459,7 @@ class Hub:
                     raise Invalid(f"{name}: {exc}") from None
             profiles[new_id] = profile
             await self._check_removed(profiles)
-            write_profiles(path, profiles, self.settings.fallbacks)
+            write_profiles(path, profiles, self.settings.defaults)
             if key:
                 set_key(profile.key_file, profile.key, key)
             await self._apply_profiles(profiles, changed={new_id})
@@ -489,7 +475,7 @@ class Hub:
             if profile is None:
                 raise NotFound("no such profile")
             await self._check_removed(profiles)
-            write_profiles(path, profiles, self.settings.fallbacks)
+            write_profiles(path, profiles, self.settings.defaults)
             if profile.key_file == path.parent / "keys.env" and not any(p.key == profile.key for p in profiles.values()):
                 set_key(profile.key_file, profile.key, None)  # a shared key file (key_file) is left alone
             await self._apply_profiles(profiles, changed={profile_id})
@@ -500,10 +486,10 @@ class Hub:
         gone = set(self.settings.engines) - set(with_profiles(base, profiles))
         if not gone:
             return
-        for agent, profile_id in self.settings.fallbacks.items():
+        for agent, profile_id in self.settings.defaults.items():
             if f"{agent}@{profile_id}" in gone:
-                raise Conflict(f"It is the stand-in for {self._engine_name(agent)} until it is signed in: "
-                               "pick another stand-in (Settings > Sign-ins) first")
+                raise Conflict(f"New {self._engine_name(agent)} tasks start on it: pick another default "
+                               "(Settings > Agents) first")
         chats = await self.pool.fetchval(
             "select count(*) from sessions where engine = any($1::text[]) and not archived", list(gone))
         routines = await self.pool.fetchval("select count(*) from routines where engine = any($1::text[])", list(gone))
@@ -1055,8 +1041,6 @@ class Hub:
             try:
                 if engine.profile:
                     env.update(await self.gateways.engine_env(engine))
-                else:
-                    env.update(await self._stand_in_env(engine))
             except ProfileError as exc:
                 raise AcpError(f"Could not start {engine.name}: {exc}") from exc
             proc = AcpProcess(

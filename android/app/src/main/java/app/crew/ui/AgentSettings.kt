@@ -139,8 +139,8 @@ fun SettingsLine(values: List<Pair<String, String>>, onClick: () -> Unit, modifi
 }
 
 /**
- * How the agent runs: on its own login ("Subscription", the default) or on a gateway profile. Each choice is an
- * engine; [choices] starts with the agent itself. Shows the picked profile's problem (no key) under it.
+ * How the agent runs: on its sign-in account or on a gateway profile. Each choice is an engine; [choices] starts
+ * with the agent itself (its sign-in account). Shows the picked one's problem (no key, not signed in) under it.
  */
 @Composable
 fun ProfilePicker(choices: List<EngineInfo>, selected: String?, enabled: Boolean, onPick: (String) -> Unit) {
@@ -151,7 +151,7 @@ fun ProfilePicker(choices: List<EngineInfo>, selected: String?, enabled: Boolean
                 onClick = { if (engine.id != selected) onPick(engine.id) },
                 enabled = enabled,
                 shape = SegmentedButtonDefaults.itemShape(i, choices.size),
-                label = { Text(engine.profileName ?: "Subscription", maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                label = { Text(engine.profileName ?: "Sign-in account", maxLines = 1, overflow = TextOverflow.Ellipsis) },
             )
         }
     }

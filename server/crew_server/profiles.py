@@ -66,7 +66,7 @@ def _write_private(path: Path, text: str) -> None:
     os.replace(tmp, path)
 
 
-def write_profiles(path: Path, profiles: dict[str, Profile], fallbacks: dict[str, str] | None = None) -> None:
+def write_profiles(path: Path, profiles: dict[str, Profile], defaults: dict[str, str] | None = None) -> None:
     """Save profiles.toml. A key_file is written only when it is not the default keys.env beside the file."""
     def q(value: str) -> str:  # a TOML basic string; JSON's escapes are a subset of TOML's
         return json.dumps(value, ensure_ascii=False)
@@ -83,9 +83,9 @@ def write_profiles(path: Path, profiles: dict[str, Profile], fallbacks: dict[str
         if profile.anthropic:
             lines.append(f"anthropic = {q(profile.anthropic)}")
         parts.append("\n".join(lines) + "\n")
-    if fallbacks:
-        parts.append("# Until an agent is signed in to its own subscription, it runs on this profile.\n[fallback]\n"
-                     + "".join(f"{agent} = {q(profile)}\n" for agent, profile in fallbacks.items()))
+    if defaults:
+        parts.append("# The profile each agent's new tasks start on (an agent not listed: its own sign-in account).\n[defaults]\n"
+                     + "".join(f"{agent} = {q(profile)}\n" for agent, profile in defaults.items()))
     _write_private(path, "\n".join(parts))
 
 
@@ -368,7 +368,7 @@ class Gateways:
         return None
 
 
-async def check(engines: dict[str, Engine], fallbacks: dict[str, str] | None = None) -> list[tuple[str, str, str]]:
+async def check(engines: dict[str, Engine], defaults: dict[str, str] | None = None) -> list[tuple[str, str, str]]:
     """(status, engine id, detail) for every agent's sign-in and every profile engine: what doctor shows."""
     from .logins import Logins
 
@@ -379,13 +379,14 @@ async def check(engines: dict[str, Engine], fallbacks: dict[str, str] | None = N
         if engine.profile or not engine.gateway:
             continue
         status = await logins.check(engine)
-        stand_in = (fallbacks or {}).get(engine.id)
+        default = (defaults or {}).get(engine.id)
+        starts = f"new tasks start on {default}" if default else "new tasks start on its sign-in account"
         if status["logged_in"]:
-            rows.append(("ok", engine.id, "signed in" + (f" ({status['account']})" if status["account"] else "")))
-        elif stand_in:
-            rows.append(("ok", engine.id, f"not signed in; runs on the {stand_in} profile until then (app: Settings > Sign-ins)"))
+            rows.append(("ok", engine.id, "signed in" + (f" ({status['account']})" if status["account"] else "") + f"; {starts}"))
+        elif default:
+            rows.append(("ok", engine.id, f"not signed in; {starts}"))
         else:
-            rows.append(("warn", engine.id, "not signed in and no stand-in profile: sign in from the app (Settings > Sign-ins)"))
+            rows.append(("warn", engine.id, f"not signed in, but {starts}: sign in, or pick another default (app: Settings > Agents)"))
     for engine in engines.values():
         if not engine.profile:
             continue
@@ -412,7 +413,7 @@ def main() -> None:
     """`python -m crew_server.profiles check`: one tab-separated line per profile engine, for doctor."""
     from pathlib import Path
 
-    from .config import CONFIG_DIR, load_engines, load_env_file, load_fallbacks, load_profiles, with_profiles
+    from .config import CONFIG_DIR, load_defaults, load_engines, load_env_file, load_profiles, with_profiles
 
     load_env_file()
     engines, _ = load_engines(Path(os.environ.get("CREW_ENGINES_FILE", CONFIG_DIR / "engines.toml")))
@@ -420,7 +421,7 @@ def main() -> None:
     profiles = load_profiles(path)
     if len(sys.argv) < 2 or sys.argv[1] != "check":
         sys.exit("usage: python -m crew_server.profiles check")
-    for status, engine_id, detail in asyncio.run(check(with_profiles(engines, profiles), load_fallbacks(path))):
+    for status, engine_id, detail in asyncio.run(check(with_profiles(engines, profiles), load_defaults(path))):
         print(status, engine_id, detail, sep="\t")
 
 

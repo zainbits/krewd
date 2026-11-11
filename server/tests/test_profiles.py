@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import sys
@@ -475,8 +476,6 @@ async def test_claude_signs_in_with_the_code_pasted_in_the_app(managed):
 
 
 async def test_codex_signs_in_with_a_device_code(managed):
-    import asyncio
-
     async with client(managed) as c:
         flow = (await c.post("/api/logins/cx")).json()
         assert flow == {**flow, "state": "waiting", "paste": False, "code": "ABCD-EFG12",
@@ -489,26 +488,31 @@ async def test_codex_signs_in_with_a_device_code(managed):
         assert agent["flow"]["state"] == "done" and agent["logged_in"] is True
 
 
-async def test_a_stand_in_profile_runs_the_agent_until_it_is_signed_in(managed, gateway):
+async def test_an_agents_default_profile_is_where_its_new_tasks_start(managed, gateway):
     async with client(managed) as c:
         await c.post("/api/profiles", json={"name": "GW", "openai": f"{gateway}/v1", "anthropic": gateway, "key": KEY})
-        assert (await c.put("/api/logins/fake/fallback", json={"profile": "nope"})).status_code == 422
-        agent = (await c.put("/api/logins/fake/fallback", json={"profile": "gw"})).json()
-        assert agent["fallback"] == "gw" and agent["fallback_choices"] == ["gw"]
-        assert "[fallback]" in managed.settings.profiles_file.read_text()
+        assert (await c.put("/api/logins/cx/default", json={"profile": "nope"})).status_code == 422
+        agent = (await c.put("/api/logins/cx/default", json={"profile": "gw"})).json()
+        assert agent["default"] == "gw" and agent["default_choices"] == ["gw"]
+        assert "[defaults]" in managed.settings.profiles_file.read_text()
+        preferred = {e["id"]: e["preferred"] for e in managed.engines()}
+        assert preferred["cx@gw"] and not preferred["cx"]  # new Codex tasks start on the gateway
+        assert preferred["fake"] and not preferred["fake@gw"]  # no default: the sign-in account
+        assert "pick another default" in (await c.delete("/api/profiles/gw")).json()["detail"]
 
-        # not signed in: the plain agent runs on its stand-in, and says so
-        await managed.logins.check(managed.settings.engines["fake"])
-        assert await reply_to(managed, "fake", "env ANTHROPIC_BASE_URL") == gateway
-        listed = next(e for e in managed.engines() if e["id"] == "fake")
-        assert listed["problem"] is None and "runs on GW" in listed["note"]
-        assert "stand-in" in (await c.delete("/api/profiles/gw")).json()["detail"]  # still needed
+        # the agent's own engine is its sign-in account whatever the default: never a gateway in disguise
+        await managed.logins.check(managed.settings.engines["cx"])
+        assert next(e for e in managed.engines() if e["id"] == "cx")["problem"].startswith("Not signed in")
+        assert await reply_to(managed, "cx", "env MODEL_PROVIDER") == "<unset>"
+        await c.post("/api/logins/cx")
+        for _ in range(50):
+            if managed.logins.known("cx"):
+                break
+            await asyncio.sleep(0.1)
+        assert managed.logins.known("cx") is True
+        assert next(e for e in managed.engines() if e["id"] == "cx")["problem"] is None
+        assert {e["id"]: e["preferred"] for e in managed.engines()}["cx@gw"]  # signing in changes nothing here
+        assert await reply_to(managed, "cx", "env MODEL_PROVIDER") == "<unset>"
 
-        # signed in: the stand-in drops out by itself
-        await c.post("/api/logins/fake")
-        assert (await c.post("/api/logins/fake/code", json={"code": "good-code"})).json()["state"] == "done"
-        assert await reply_to(managed, "fake", "env ANTHROPIC_BASE_URL") == os.environ.get("ANTHROPIC_BASE_URL", "<unset>")
-        assert next(e for e in managed.engines() if e["id"] == "fake")["note"] is None
-
-        assert (await c.put("/api/logins/fake/fallback", json={"profile": None})).json()["fallback"] is None
-        assert "[fallback]" not in managed.settings.profiles_file.read_text()
+        assert (await c.put("/api/logins/cx/default", json={"profile": None})).json()["default"] is None
+        assert "[defaults]" not in managed.settings.profiles_file.read_text()

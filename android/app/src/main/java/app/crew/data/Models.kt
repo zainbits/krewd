@@ -336,8 +336,10 @@ data class EngineInfo(
     val profileName: String? = null,
     /** Why this engine cannot start (no key, not signed in), as far as the server can tell. */
     val problem: String? = null,
-    /** Something to know about how it runs now ("Not signed in: runs on gwmeter until you sign in"). */
+    /** Something to know about how it runs now. */
     val note: String? = null,
+    /** The engine an agent's new tasks start on: its sign-in account, or the default profile picked in Settings. */
+    val preferred: Boolean = false,
 )
 
 /** A gateway profile managed from Settings. The key itself never comes back from the server. */
@@ -383,15 +385,15 @@ data class LoginFlow(val state: String, val url: String?, val code: String?, val
     }
 }
 
-/** An agent's own subscription sign-in, and the profile it runs on until then. */
+/** An agent's sign-in account, and the profile its new tasks start on (null: the sign-in account). */
 data class AgentLogin(
     val engine: String,
     val name: String,
     val loggedIn: Boolean?,
     val account: String?,
     val error: String?,
-    val fallback: String?,
-    val fallbackChoices: List<String>,
+    val default: String?,
+    val defaultChoices: List<String>,
     val flow: LoginFlow?,
 ) {
     companion object {
@@ -401,8 +403,8 @@ data class AgentLogin(
             loggedIn = if (o.isNull("logged_in") || !o.has("logged_in")) null else o.optBoolean("logged_in"),
             account = o.optStringOrNull("account"),
             error = o.optStringOrNull("error"),
-            fallback = o.optStringOrNull("fallback"),
-            fallbackChoices = o.optJSONArray("fallback_choices").strings(),
+            default = o.optStringOrNull("default"),
+            defaultChoices = o.optJSONArray("default_choices").strings(),
             flow = LoginFlow.from(o.optJSONObject("flow")),
         )
     }

@@ -85,7 +85,7 @@ fun ProfilesCard(state: UiState, viewModel: CrewViewModel) {
                     Text(
                         listOfNotNull(
                             listOfNotNull(profile.openai?.let { "Codex" }, profile.anthropic?.let { "Claude Code" }).joinToString(" and ").let { "For $it" },
-                            if (profile.keySet) "key …${profile.keyHint ?: "set"}" else "no key",
+                            if (!profile.keySet) "no key" else profile.keyHint?.let { "key …$it" } ?: "key set",
                         ).joinToString(" · "),
                         style = MaterialTheme.typography.bodySmall,
                         color = if (profile.keySet) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error,
@@ -166,7 +166,7 @@ private fun ProfileEditorSheet(
                 key, { key = it }, label = { Text("API key") }, singleLine = true,
                 supportingText = {
                     Text(
-                        (if (existing?.keySet == true) "Set (…${existing.keyHint ?: ""}). Leave empty to keep it. " else "") +
+                        (if (existing?.keySet == true) "Set${existing.keyHint?.let { " (…$it)" } ?: ""}. Leave empty to keep it. " else "") +
                             "Sent only over Tailscale, stored on the server, never shown again.",
                     )
                 },
@@ -240,8 +240,8 @@ private fun ProfileEditorSheet(
 }
 
 /**
- * Settings > Sign-ins: each agent's own subscription. New tasks start on it; until an agent is signed in it can
- * run on a stand-in profile, which drops out by itself once the sign-in is done.
+ * Settings > Agents: each agent's sign-in account (sign in and out here) and the profile its new tasks start on.
+ * The sign-in account is one profile among the others; signing in never changes which one is picked.
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -252,9 +252,9 @@ fun SignInsCard(state: UiState, viewModel: CrewViewModel) {
     if (state.logins.isEmpty()) return
 
     SectionCard {
-        Text("Sign-ins", style = MaterialTheme.typography.titleMedium)
+        Text("Agents", style = MaterialTheme.typography.titleMedium)
         Text(
-            "Each agent's own subscription: new tasks start on it. Until an agent is signed in, it can run on a stand-in profile.",
+            "Each agent's sign-in account, and the profile its new tasks start on. A chat keeps its own profile: change it in the chat's settings.",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -270,7 +270,7 @@ fun SignInsCard(state: UiState, viewModel: CrewViewModel) {
                             null -> "Checking…"
                         },
                         style = MaterialTheme.typography.bodySmall,
-                        color = if (login.loggedIn == false && login.fallback == null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                        color = if (login.loggedIn == false && login.default == null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
                 when {
@@ -282,15 +282,15 @@ fun SignInsCard(state: UiState, viewModel: CrewViewModel) {
                     }, enabled = online) { Text("Sign in") }
                 }
             }
-            if (login.fallbackChoices.isNotEmpty()) {
-                Text("Until signed in, use", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (login.defaultChoices.isNotEmpty()) {
+                Text("New tasks start on", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    (listOf<String?>(null) + login.fallbackChoices).forEach { choice ->
+                    (listOf<String?>(null) + login.defaultChoices).forEach { choice ->
                         FilterChip(
-                            selected = login.fallback == choice,
-                            onClick = { if (login.fallback != choice) viewModel.setFallback(login.engine, choice) },
+                            selected = login.default == choice,
+                            onClick = { if (login.default != choice) viewModel.setDefault(login.engine, choice) },
                             enabled = online,
-                            label = { Text(choice?.let { id -> state.profiles.profiles.firstOrNull { it.id == id }?.name ?: id } ?: "Nothing") },
+                            label = { Text(choice?.let { id -> state.profiles.profiles.firstOrNull { it.id == id }?.name ?: id } ?: "Sign-in account") },
                         )
                     }
                 }
@@ -307,7 +307,7 @@ fun SignInsCard(state: UiState, viewModel: CrewViewModel) {
         AlertDialog(
             onDismissRequest = { confirmSignOut = null },
             title = { Text("Sign ${login.name} out?") },
-            text = { Text("Its tasks then run on the stand-in profile, if one is set, until you sign in again.") },
+            text = { Text("Chats on its sign-in account cannot run until you sign in again. Chats on other profiles are not affected.") },
             confirmButton = { TextButton(onClick = { confirmSignOut = null; viewModel.logout(login.engine) }) { Text("Sign out") } },
             dismissButton = { TextButton(onClick = { confirmSignOut = null }) { Text("Cancel") } },
         )
@@ -379,7 +379,7 @@ private fun SignInSheet(login: AgentLogin, viewModel: CrewViewModel, onDismiss: 
                     TextButton(onClick = { viewModel.cancelLogin(login.engine); onDismiss() }) { Text("Cancel sign-in") }
                 }
                 "done" -> {
-                    Text("Signed in" + (login.account?.let { " as $it" } ?: "") + ". New tasks on ${login.name} now use your subscription.", style = MaterialTheme.typography.bodyLarge)
+                    Text("Signed in" + (login.account?.let { " as $it" } ?: "") + ". Pick \"Sign-in account\" to run ${login.name} on it.", style = MaterialTheme.typography.bodyLarge)
                     Button(onClick = onDismiss, modifier = Modifier.fillMaxWidth()) { Text("Done") }
                 }
                 else -> {

@@ -137,6 +137,7 @@ class CrewApi(val baseUrl: String, private val token: String, val route: Route) 
                     profileName = it.optStringOrNull("profile_name"),
                     problem = it.optStringOrNull("problem"),
                     note = it.optStringOrNull("note"),
+                    preferred = it.optBoolean("preferred"),
                 )
             },
             workdir = o.optString("workdir"),
@@ -252,8 +253,8 @@ class CrewApi(val baseUrl: String, private val token: String, val route: Route) 
         call("POST", "/api/logins/$engine/logout", null, readTimeoutMs = 60_000)
     }
 
-    fun setFallback(engine: String, profile: String?) {
-        call("PUT", "/api/logins/$engine/fallback", JSONObject().put("profile", profile ?: JSONObject.NULL))
+    fun setDefault(engine: String, profile: String?) {
+        call("PUT", "/api/logins/$engine/default", JSONObject().put("profile", profile ?: JSONObject.NULL))
     }
 
     fun routines(): List<Routine> = arr("GET", "/api/routines").objects().map(Routine::from)

@@ -125,7 +125,7 @@ data class UiState(
     val savedPrompts: List<String> = emptyList(),
     /** Gateway profiles and the presets the app offers (Settings). */
     val profiles: ProfilesState = ProfilesState(),
-    /** Each agent's own sign-in, and its stand-in profile (Settings). */
+    /** Each agent's sign-in account, and the profile its new tasks start on (Settings > Agents). */
     val logins: List<AgentLogin> = emptyList(),
 ) {
     val openRoutine: Routine? get() = routineDetail?.takeIf { it.id == openRoutineId } ?: routines.firstOrNull { it.id == openRoutineId }
@@ -138,7 +138,11 @@ data class UiState(
     /** The agent an engine is: a profile engine ("codex@openrouter") is its base agent ("codex"). */
     fun agentOf(engineId: String?): String? = engine(engineId)?.base ?: engineId
 
-    /** How an agent can run: on its own login (subscription) first, then on each gateway profile. */
+    /** Where an agent's new tasks start: its default profile, else its sign-in account (the agent itself). */
+    fun preferredOf(agentId: String?): String? =
+        engines.firstOrNull { (it.base ?: it.id) == agentId && it.preferred }?.id ?: agentId
+
+    /** How an agent can run: on its sign-in account first, then on each gateway profile. */
     fun profilesOf(agentId: String?): List<EngineInfo> = engines.filter { it.id == agentId || it.base == agentId }
 
     /** The tab to show as picture-in-picture on a chat: picked by hand, or the one its agent is using right now. */
@@ -822,8 +826,8 @@ class CrewViewModel(private val app: Application) {
         reloadProfiles(client)
     }
 
-    fun setFallback(engine: String, profile: String?) = act { client ->
-        client.setFallback(engine, profile)
+    fun setDefault(engine: String, profile: String?) = act { client ->
+        client.setDefault(engine, profile)
         reloadProfiles(client)
     }
 

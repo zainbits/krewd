@@ -74,8 +74,8 @@ class Settings:
     default_engine: str
     profiles: dict[str, Profile] = field(default_factory=dict)
     profiles_file: Path | None = None  # where the app's profile changes are saved; None: not managed from the app
-    # Agent -> profile it runs on while its own login (subscription) is not signed in ("stand-in").
-    fallbacks: dict[str, str] = field(default_factory=dict)
+    # Agent -> profile its new tasks start on; an agent not listed starts on its own sign-in account.
+    defaults: dict[str, str] = field(default_factory=dict)
     cdp_port: int = 9222
     data_dir: Path = Path.home() / ".crew"
     max_upload_mb: int = 1024
@@ -156,11 +156,11 @@ def load_profiles(path: Path) -> dict[str, Profile]:
     return profiles
 
 
-def load_fallbacks(path: Path) -> dict[str, str]:
-    """The `[fallback]` table of profiles.toml: agent id -> profile it uses until it is signed in."""
+def load_defaults(path: Path) -> dict[str, str]:
+    """The `[defaults]` table of profiles.toml: agent id -> profile its new tasks start on."""
     if not path.is_file():
         return {}
-    return {k: str(v) for k, v in tomllib.loads(path.read_text()).get("fallback", {}).items()}
+    return {k: str(v) for k, v in tomllib.loads(path.read_text()).get("defaults", {}).items()}
 
 
 def with_profiles(engines: dict[str, Engine], profiles: dict[str, Profile]) -> dict[str, Engine]:
@@ -202,7 +202,7 @@ def load_settings() -> Settings:
         default_engine=default_engine,
         profiles=profiles,
         profiles_file=profiles_file,
-        fallbacks=load_fallbacks(profiles_file),
+        defaults=load_defaults(profiles_file),
         cdp_port=int(os.environ.get("CREW_CDP_PORT", "9222")),
         data_dir=Path(os.path.expanduser(os.environ.get("CREW_DATA_DIR", "~/.crew"))),
         max_upload_mb=int(os.environ.get("CREW_MAX_UPLOAD_MB", "1024")),

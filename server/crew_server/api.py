@@ -130,7 +130,7 @@ class LoginCode(BaseModel):
     code: str = Field(min_length=4, max_length=2000)
 
 
-class Fallback(BaseModel):
+class DefaultProfile(BaseModel):
     profile: str | None = Field(default=None, max_length=40)
 
 
@@ -297,9 +297,9 @@ def create_app(hub: Hub, token: str, lifespan_hub: bool = True) -> FastAPI:
     async def logout(engine_id: str) -> dict[str, Any]:
         return await hub.logout(engine_id)
 
-    @app.put("/api/logins/{engine_id}/fallback", dependencies=auth)
-    async def set_fallback(engine_id: str, body: Fallback) -> dict[str, Any]:
-        return await hub.set_fallback(engine_id, body.profile)
+    @app.put("/api/logins/{engine_id}/default", dependencies=auth)
+    async def set_default(engine_id: str, body: DefaultProfile) -> dict[str, Any]:
+        return await hub.set_default(engine_id, body.profile)
 
     @app.get("/api/sessions", dependencies=auth)
     async def sessions(archived: bool = False) -> list[dict[str, Any]]:
