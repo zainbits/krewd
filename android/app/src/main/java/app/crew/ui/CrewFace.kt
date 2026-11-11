@@ -88,14 +88,9 @@ fun faceOf(session: SessionInfo, live: LiveInfo?): FaceState = when {
     else -> FaceState.Done
 }
 
-/** An agent's face across its tasks (on any profile): needs you beats working, working beats idle. */
-fun faceOfEngine(
-    engineId: String,
-    sessions: List<SessionInfo>,
-    live: Map<String, LiveInfo>,
-    agentOf: (String) -> String? = { it },
-): FaceState {
-    val mine = sessions.filter { agentOf(it.engine) == engineId && !it.archived }
+/** An agent's face across its tasks: needs you beats working, working beats idle. */
+fun faceOfEngine(engineId: String, sessions: List<SessionInfo>, live: Map<String, LiveInfo>): FaceState {
+    val mine = sessions.filter { it.engine == engineId && !it.archived }
     mine.firstOrNull { it.pendingApprovals > 0 || it.status == "waiting" }?.let { return FaceState.NeedsYou }
     mine.firstOrNull { it.status == "running" }?.let { return faceOf(it, live[it.id]) }
     return FaceState.Idle

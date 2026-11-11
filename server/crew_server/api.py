@@ -130,7 +130,7 @@ class LoginCode(BaseModel):
     code: str = Field(min_length=4, max_length=2000)
 
 
-class DefaultProfile(BaseModel):
+class AgentProfile(BaseModel):
     profile: str | None = Field(default=None, max_length=40)
 
 
@@ -236,10 +236,11 @@ def create_app(hub: Hub, token: str, lifespan_hub: bool = True) -> FastAPI:
         No token: the per-start secret in the path, which only Crew's own agent processes are given, stands in.
         """
         engine = hub.settings.engines.get(engine_id)
-        if not hmac.compare_digest(secret, hub.gateways.secret) or not engine or not engine.profile or engine.gateway != "codex":
+        profile = hub._profile_of(engine) if engine else None
+        if not hmac.compare_digest(secret, hub.gateways.secret) or not profile or engine.gateway != "codex":
             raise HTTPException(404, "not found")
         try:
-            return await hub.gateways.codex_catalog(engine)
+            return await hub.gateways.codex_catalog(engine, profile)
         except ProfileError as exc:
             return JSONResponse(status_code=502, content={"detail": str(exc)})
 
@@ -276,30 +277,30 @@ def create_app(hub: Hub, token: str, lifespan_hub: bool = True) -> FastAPI:
         await hub.delete_profile(profile_id)
         return {"ok": True}
 
-    @app.get("/api/logins", dependencies=auth)
-    async def logins() -> dict[str, Any]:
-        return hub.logins_listing()
+    @app.get("/api/agents", dependencies=auth)
+    async def agents() -> dict[str, Any]:
+        return hub.agents()
 
-    @app.post("/api/logins/{engine_id}", dependencies=auth)
+    @app.put("/api/agents/{engine_id}/profile", dependencies=auth)
+    async def set_profile(engine_id: str, body: AgentProfile) -> dict[str, Any]:
+        return await hub.set_profile(engine_id, body.profile)
+
+    @app.post("/api/agents/{engine_id}/login", dependencies=auth)
     async def start_login(engine_id: str) -> dict[str, Any]:
         return await hub.start_login(engine_id)
 
-    @app.post("/api/logins/{engine_id}/code", dependencies=auth)
+    @app.post("/api/agents/{engine_id}/login/code", dependencies=auth)
     async def login_code(engine_id: str, body: LoginCode) -> dict[str, Any]:
         return await hub.submit_login(engine_id, body.code)
 
-    @app.delete("/api/logins/{engine_id}", dependencies=auth)
+    @app.delete("/api/agents/{engine_id}/login", dependencies=auth)
     async def cancel_login(engine_id: str) -> dict[str, Any]:
         await hub.cancel_login(engine_id)
         return {"ok": True}
 
-    @app.post("/api/logins/{engine_id}/logout", dependencies=auth)
+    @app.post("/api/agents/{engine_id}/logout", dependencies=auth)
     async def logout(engine_id: str) -> dict[str, Any]:
         return await hub.logout(engine_id)
-
-    @app.put("/api/logins/{engine_id}/default", dependencies=auth)
-    async def set_default(engine_id: str, body: DefaultProfile) -> dict[str, Any]:
-        return await hub.set_default(engine_id, body.profile)
 
     @app.get("/api/sessions", dependencies=auth)
     async def sessions(archived: bool = False) -> list[dict[str, Any]]:

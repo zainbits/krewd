@@ -125,7 +125,7 @@ data class UiState(
     val savedPrompts: List<String> = emptyList(),
     /** Gateway profiles and the presets the app offers (Settings). */
     val profiles: ProfilesState = ProfilesState(),
-    /** Each agent's sign-in account, and the profile its new tasks start on (Settings > Agents). */
+    /** Each agent's sign-in account, and the profile it runs on (Settings > Agents). */
     val logins: List<AgentLogin> = emptyList(),
 ) {
     val openRoutine: Routine? get() = routineDetail?.takeIf { it.id == openRoutineId } ?: routines.firstOrNull { it.id == openRoutineId }
@@ -134,16 +134,6 @@ data class UiState(
     val browserTab: BrowserTab? get() = browser?.tabs?.firstOrNull { it.id == browserTabId }
     val openSession: SessionInfo? get() = sessions.firstOrNull { it.id == openSessionId }
     fun engine(id: String?): EngineInfo? = engines.firstOrNull { it.id == id }
-
-    /** The agent an engine is: a profile engine ("codex@openrouter") is its base agent ("codex"). */
-    fun agentOf(engineId: String?): String? = engine(engineId)?.base ?: engineId
-
-    /** Where an agent's new tasks start: its default profile, else its sign-in account (the agent itself). */
-    fun preferredOf(agentId: String?): String? =
-        engines.firstOrNull { (it.base ?: it.id) == agentId && it.preferred }?.id ?: agentId
-
-    /** How an agent can run: on its sign-in account first, then on each gateway profile. */
-    fun profilesOf(agentId: String?): List<EngineInfo> = engines.filter { it.id == agentId || it.base == agentId }
 
     /** The tab to show as picture-in-picture on a chat: picked by hand, or the one its agent is using right now. */
     fun pipTab(session: SessionInfo?): String? {
@@ -580,8 +570,7 @@ class CrewViewModel(private val app: Application) {
 
     fun lastEngine(): String? = prefs.lastEngine()
 
-    /** Remembers the agent, not its profile: a new task always starts on the agent's own login. */
-    fun setNewTaskEngine(id: String) = prefs.setLastEngine(_state.value.agentOf(id) ?: id)
+    fun setNewTaskEngine(id: String) = prefs.setLastEngine(id)
 
     fun rememberPick(engineId: String, configId: String, value: String) =
         prefs.updateEngine(engineId) { it.copy(config = it.config + (configId to value)) }
@@ -826,8 +815,8 @@ class CrewViewModel(private val app: Application) {
         reloadProfiles(client)
     }
 
-    fun setDefault(engine: String, profile: String?) = act { client ->
-        client.setDefault(engine, profile)
+    fun setAgentProfile(engine: String, profile: String?) = act { client ->
+        client.setAgentProfile(engine, profile)
         reloadProfiles(client)
     }
 

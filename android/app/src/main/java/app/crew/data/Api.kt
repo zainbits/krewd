@@ -133,11 +133,7 @@ class CrewApi(val baseUrl: String, private val token: String, val route: Route) 
                     agent = AgentInfo.from(it.optJSONObject("agent")),
                     config = ConfigOption.list(it.optJSONArray("config_options")),
                     steering = it.optBoolean("steering"),
-                    base = it.optStringOrNull("base"),
-                    profileName = it.optStringOrNull("profile_name"),
                     problem = it.optStringOrNull("problem"),
-                    note = it.optStringOrNull("note"),
-                    preferred = it.optBoolean("preferred"),
                 )
             },
             workdir = o.optString("workdir"),
@@ -237,24 +233,25 @@ class CrewApi(val baseUrl: String, private val token: String, val route: Route) 
         call("DELETE", "/api/profiles/$id", null)
     }
 
-    fun logins(): List<AgentLogin> = obj("GET", "/api/logins").optJSONArray("agents").objects().map(AgentLogin::from)
+    fun logins(): List<AgentLogin> = obj("GET", "/api/agents").optJSONArray("agents").objects().map(AgentLogin::from)
 
-    fun startLogin(engine: String): LoginFlow? = LoginFlow.from(JSONObject(call("POST", "/api/logins/$engine", null, readTimeoutMs = 45_000)))
+    fun startLogin(engine: String): LoginFlow? = LoginFlow.from(JSONObject(call("POST", "/api/agents/$engine/login", null, readTimeoutMs = 45_000)))
 
     /** Waits while the agent finishes signing in (up to about a minute and a half). */
     fun submitLoginCode(engine: String, code: String): LoginFlow? =
-        LoginFlow.from(JSONObject(call("POST", "/api/logins/$engine/code", JSONObject().put("code", code), readTimeoutMs = 120_000)))
+        LoginFlow.from(JSONObject(call("POST", "/api/agents/$engine/login/code", JSONObject().put("code", code), readTimeoutMs = 120_000)))
 
     fun cancelLogin(engine: String) {
-        call("DELETE", "/api/logins/$engine", null)
+        call("DELETE", "/api/agents/$engine/login", null)
     }
 
     fun logout(engine: String) {
-        call("POST", "/api/logins/$engine/logout", null, readTimeoutMs = 60_000)
+        call("POST", "/api/agents/$engine/logout", null, readTimeoutMs = 60_000)
     }
 
-    fun setDefault(engine: String, profile: String?) {
-        call("PUT", "/api/logins/$engine/default", JSONObject().put("profile", profile ?: JSONObject.NULL))
+    /** Run an agent on a profile (null: its sign-in account); its chats and routines follow. */
+    fun setAgentProfile(engine: String, profile: String?) {
+        call("PUT", "/api/agents/$engine/profile", JSONObject().put("profile", profile ?: JSONObject.NULL))
     }
 
     fun routines(): List<Routine> = arr("GET", "/api/routines").objects().map(Routine::from)

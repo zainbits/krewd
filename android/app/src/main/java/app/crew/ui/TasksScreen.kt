@@ -100,10 +100,9 @@ val ASK_BAR_HEIGHT = 58.dp
 val ASK_BAR_GAP = 10.dp
 
 /** Every agent with its face and a short note, for the roster and the pickers. */
-/** The agents, one tile each: an agent's profiles (the same agent on a gateway) are not crew members of their own. */
-fun crewMembers(state: UiState): List<CrewMember> = state.engines.filter { it.base == null }.map { engine ->
-    val face = faceOfEngine(engine.id, state.sessions, state.live, state::agentOf)
-    val running = state.sessions.count { state.agentOf(it.engine) == engine.id && it.status == "running" }
+fun crewMembers(state: UiState): List<CrewMember> = state.engines.map { engine ->
+    val face = faceOfEngine(engine.id, state.sessions, state.live)
+    val running = state.sessions.count { it.engine == engine.id && it.status == "running" }
     val note = when {
         face == FaceState.NeedsYou -> "Needs you"
         running == 1 -> "1 running"

@@ -330,16 +330,8 @@ data class EngineInfo(
     val config: List<ConfigOption> = emptyList(),
     /** The agent takes messages into a running turn (ACP `_session/steering`). */
     val steering: Boolean = false,
-    /** For a profile engine ("codex@openrouter"): the agent it runs ("codex"), which itself runs on its own login. */
-    val base: String? = null,
-    /** The gateway profile's name ("OpenRouter"); null for the agent's own login (subscription). */
-    val profileName: String? = null,
-    /** Why this engine cannot start (no key, not signed in), as far as the server can tell. */
+    /** Why the agent cannot run as set up now (its profile has no key, its sign-in account is not signed in). */
     val problem: String? = null,
-    /** Something to know about how it runs now. */
-    val note: String? = null,
-    /** The engine an agent's new tasks start on: its sign-in account, or the default profile picked in Settings. */
-    val preferred: Boolean = false,
 )
 
 /** A gateway profile managed from Settings. The key itself never comes back from the server. */
@@ -350,7 +342,8 @@ data class ProfileInfo(
     val anthropic: String?,
     val keySet: Boolean,
     val keyHint: String?,
-    val engines: List<String>,
+    /** The agents running on it. */
+    val agents: List<String>,
 ) {
     companion object {
         fun from(o: JSONObject) = ProfileInfo(
@@ -360,7 +353,7 @@ data class ProfileInfo(
             anthropic = o.optStringOrNull("anthropic"),
             keySet = o.optBoolean("key_set"),
             keyHint = o.optStringOrNull("key_hint"),
-            engines = o.optJSONArray("engines").strings(),
+            agents = o.optJSONArray("agents").strings(),
         )
     }
 }
@@ -385,15 +378,15 @@ data class LoginFlow(val state: String, val url: String?, val code: String?, val
     }
 }
 
-/** An agent's sign-in account, and the profile its new tasks start on (null: the sign-in account). */
+/** An agent's sign-in account, and the profile it runs on (null: its sign-in account). */
 data class AgentLogin(
     val engine: String,
     val name: String,
     val loggedIn: Boolean?,
     val account: String?,
     val error: String?,
-    val default: String?,
-    val defaultChoices: List<String>,
+    val profile: String?,
+    val profileChoices: List<String>,
     val flow: LoginFlow?,
 ) {
     companion object {
@@ -403,8 +396,8 @@ data class AgentLogin(
             loggedIn = if (o.isNull("logged_in") || !o.has("logged_in")) null else o.optBoolean("logged_in"),
             account = o.optStringOrNull("account"),
             error = o.optStringOrNull("error"),
-            default = o.optStringOrNull("default"),
-            defaultChoices = o.optJSONArray("default_choices").strings(),
+            profile = o.optStringOrNull("profile"),
+            profileChoices = o.optJSONArray("profile_choices").strings(),
             flow = LoginFlow.from(o.optJSONObject("flow")),
         )
     }

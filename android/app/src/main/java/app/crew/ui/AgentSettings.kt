@@ -138,35 +138,6 @@ fun SettingsLine(values: List<Pair<String, String>>, onClick: () -> Unit, modifi
     }
 }
 
-/**
- * How the agent runs: on its sign-in account or on a gateway profile. Each choice is an engine; [choices] starts
- * with the agent itself (its sign-in account). Shows the picked one's problem (no key, not signed in) under it.
- */
-@Composable
-fun ProfilePicker(choices: List<EngineInfo>, selected: String?, enabled: Boolean, onPick: (String) -> Unit) {
-    SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
-        choices.forEachIndexed { i, engine ->
-            SegmentedButton(
-                selected = engine.id == selected,
-                onClick = { if (engine.id != selected) onPick(engine.id) },
-                enabled = enabled,
-                shape = SegmentedButtonDefaults.itemShape(i, choices.size),
-                // "Sign-in": the agent's sign-in account (the full name fits in Settings, not in a three-way row).
-                label = { Text(engine.profileName ?: "Sign-in", maxLines = 1, overflow = TextOverflow.Ellipsis) },
-            )
-        }
-    }
-    val picked = choices.firstOrNull { it.id == selected }
-    (picked?.problem ?: picked?.note)?.let {
-        Text(
-            it,
-            style = MaterialTheme.typography.bodySmall,
-            color = if (picked?.problem != null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(start = 4.dp, top = 6.dp),
-        )
-    }
-}
-
 @Composable
 fun SheetLabel(text: String, modifier: Modifier = Modifier, trailing: String? = null) {
     Row(modifier.fillMaxWidth().padding(top = 18.dp, bottom = 8.dp, start = 4.dp, end = 4.dp)) {

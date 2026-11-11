@@ -1,11 +1,11 @@
-# Crew profiles: gateways an agent can run on instead of its own login. Optional.
-# Copy to ~/.config/crew/profiles.toml and restart Crew.
+# Crew profiles: gateways an agent can run on instead of its own sign-in account. Optional.
+# Usually managed from the app (Settings > Profiles, Settings > Agents); by hand: copy to
+# ~/.config/crew/profiles.toml and restart Crew.
 #
-# - Subscription (each agent's own login: `claude` /login, `codex login`) needs no entry and is the default.
 # - One entry per gateway, never per model: the models come from the gateway's own model list, which the key's
 #   limits narrow (on OpenRouter, the key's guardrail). Change models there, not here.
-# - Each engine with `gateway = "codex"` or `gateway = "claude"` in engines.toml gets one more engine per profile
-#   that has a URL for it, such as "codex@openrouter". The app shows it as a profile of that agent.
+# - Engines with `gateway = "codex"` or `gateway = "claude"` in engines.toml can run on a profile that has a URL
+#   for them. Which one each agent runs on is the [agents] table below; chats and routines follow their agent.
 # - Keys live in ~/.config/crew/keys.env (mode 600) as KEY=value lines, or in key_file. Never here.
 
 [profiles.openrouter]
@@ -20,3 +20,7 @@ anthropic = "https://openrouter.ai/api"     # Messages API, for Claude Code (lis
 # key_file = "~/.config/proxy/env"          # default: keys.env next to this file
 # openai = "http://proxy.example:4100/openai/v1"
 # anthropic = "http://proxy.example:4100/anthropic"
+
+# The profile each agent runs on (an agent not listed: its own sign-in account).
+# [agents]
+# codex = "openrouter"

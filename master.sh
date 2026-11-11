@@ -81,8 +81,8 @@ PY
       while IFS=$'\t' read -r status id detail; do
         [[ -z "$status" ]] && continue
         case "$status" in
-          ok) ok "$( [[ "$id" == *@* ]] && echo profile || echo sign-in ) $id: $detail" ;;
-          warn) warn "$( [[ "$id" == *@* ]] && echo profile || echo sign-in ) $id: $detail" ;;
+          ok) ok "$( [[ "$id" == *" for "* ]] && echo profile || echo agent ) $id: $detail" ;;
+          warn) warn "$( [[ "$id" == *" for "* ]] && echo profile || echo agent ) $id: $detail" ;;
           *) bad "profile $id: $detail" "fix the key or URL in the app (Settings > Profiles), or set CODEX_PATH (AGENTS.md, Profiles)" ;;
         esac
       done <<< "$checked"

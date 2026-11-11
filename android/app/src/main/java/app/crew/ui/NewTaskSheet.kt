@@ -63,8 +63,7 @@ fun NewTaskSheet(state: UiState, viewModel: CrewViewModel, initialEngine: String
     val sheet = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val scope = rememberCoroutineScope()
     val close: () -> Unit = { scope.launch { sheet.hide() }.invokeOnCompletion { onDismiss() } }
-    // Each agent starts on its default profile (Settings > Agents), else its sign-in account; changeable per task.
-    var engineId by remember { mutableStateOf(state.preferredOf(state.agentOf(initialEngine ?: viewModel.lastEngine()))) }
+    var engineId by remember { mutableStateOf(initialEngine ?: viewModel.lastEngine()) }
     val engine = state.engines.firstOrNull { it.id == engineId } ?: state.engines.firstOrNull { it.isDefault } ?: state.engines.firstOrNull()
     val options = ConfigOption.ordered(viewModel.engineConfig(engine?.id))
     // Each agent starts with the owner's last picks for it (model, effort, permission mode, auto-approve).
@@ -129,16 +128,14 @@ fun NewTaskSheet(state: UiState, viewModel: CrewViewModel, initialEngine: String
             )
             PendingFiles(files, onRemove = { viewModel.removeAttachment(NEW_DRAFT, it) })
             if (state.engines.isNotEmpty()) {
-                val agentId = state.agentOf(engine?.id)
                 SheetLabel("Who")
-                CrewPicker(crewMembers(state), agentId, onPick = {
-                    engineId = state.preferredOf(it)
+                CrewPicker(crewMembers(state), engine?.id, onPick = {
+                    engineId = it
                     viewModel.setNewTaskEngine(it)
                 })
-                val profiles = state.profilesOf(agentId)
-                if (profiles.size > 1) {
-                    SheetLabel("Profile")
-                    ProfilePicker(profiles, engine?.id, enabled = true, onPick = { engineId = it })
+                // Set up in Settings > Agents (its sign-in, or the profile it runs on); shown here only when it stops a task.
+                engine?.problem?.let {
+                    Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(start = 4.dp, top = 6.dp))
                 }
             }
             if (engine != null) {

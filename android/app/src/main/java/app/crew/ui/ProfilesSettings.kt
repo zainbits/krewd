@@ -69,8 +69,8 @@ fun ProfilesCard(state: UiState, viewModel: CrewViewModel) {
     SectionCard {
         Text("Profiles", style = MaterialTheme.typography.titleMedium)
         Text(
-            "Gateways your agents can run on instead of their own sign-in, picked per task. The models come from " +
-                "the gateway, so limit them there (for OpenRouter, the key's guardrail).",
+            "Gateways your agents can run on instead of their sign-in account (pick one per agent above). The models " +
+                "come from the gateway, so limit them there (for OpenRouter, the key's guardrail).",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -240,8 +240,9 @@ private fun ProfileEditorSheet(
 }
 
 /**
- * Settings > Agents: each agent's sign-in account (sign in and out here) and the profile its new tasks start on.
- * The sign-in account is one profile among the others; signing in never changes which one is picked.
+ * Settings > Agents: each agent's sign-in account (sign in and out here) and the profile it runs on. The sign-in
+ * account is one choice among the profiles; signing in never changes which one is picked. Chats, routines and new
+ * tasks just name the agent: they follow it.
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -254,7 +255,7 @@ fun SignInsCard(state: UiState, viewModel: CrewViewModel) {
     SectionCard {
         Text("Agents", style = MaterialTheme.typography.titleMedium)
         Text(
-            "Each agent's sign-in account, and the profile its new tasks start on. A chat keeps its own profile: change it in the chat's settings.",
+            "What each agent runs on: its sign-in account or a profile. Every chat and routine with that agent follows the pick.",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -270,7 +271,7 @@ fun SignInsCard(state: UiState, viewModel: CrewViewModel) {
                             null -> "Checking…"
                         },
                         style = MaterialTheme.typography.bodySmall,
-                        color = if (login.loggedIn == false && login.default == null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                        color = if (login.loggedIn == false && login.profile == null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
                 when {
@@ -282,13 +283,13 @@ fun SignInsCard(state: UiState, viewModel: CrewViewModel) {
                     }, enabled = online) { Text("Sign in") }
                 }
             }
-            if (login.defaultChoices.isNotEmpty()) {
-                Text("New tasks start on", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (login.profileChoices.isNotEmpty()) {
+                Text("Runs on", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    (listOf<String?>(null) + login.defaultChoices).forEach { choice ->
+                    (listOf<String?>(null) + login.profileChoices).forEach { choice ->
                         FilterChip(
-                            selected = login.default == choice,
-                            onClick = { if (login.default != choice) viewModel.setDefault(login.engine, choice) },
+                            selected = login.profile == choice,
+                            onClick = { if (login.profile != choice) viewModel.setAgentProfile(login.engine, choice) },
                             enabled = online,
                             label = { Text(choice?.let { id -> state.profiles.profiles.firstOrNull { it.id == id }?.name ?: id } ?: "Sign-in account") },
                         )
@@ -307,7 +308,7 @@ fun SignInsCard(state: UiState, viewModel: CrewViewModel) {
         AlertDialog(
             onDismissRequest = { confirmSignOut = null },
             title = { Text("Sign ${login.name} out?") },
-            text = { Text("Chats on its sign-in account cannot run until you sign in again. Chats on other profiles are not affected.") },
+            text = { Text(if (login.profile == null) "${login.name} runs on its sign-in account, so its chats cannot run until you sign in again or pick a profile." else "${login.name} runs on a profile, so nothing changes for its chats.") },
             confirmButton = { TextButton(onClick = { confirmSignOut = null; viewModel.logout(login.engine) }) { Text("Sign out") } },
             dismissButton = { TextButton(onClick = { confirmSignOut = null }) { Text("Cancel") } },
         )
@@ -379,7 +380,7 @@ private fun SignInSheet(login: AgentLogin, viewModel: CrewViewModel, onDismiss: 
                     TextButton(onClick = { viewModel.cancelLogin(login.engine); onDismiss() }) { Text("Cancel sign-in") }
                 }
                 "done" -> {
-                    Text("Signed in" + (login.account?.let { " as $it" } ?: "") + ". Pick \"Sign-in account\" to run ${login.name} on it.", style = MaterialTheme.typography.bodyLarge)
+                    Text("Signed in" + (login.account?.let { " as $it" } ?: "") + ". Pick \"Sign-in account\" under Runs on to use it for ${login.name}.", style = MaterialTheme.typography.bodyLarge)
                     Button(onClick = onDismiss, modifier = Modifier.fillMaxWidth()) { Text("Done") }
                 }
                 else -> {

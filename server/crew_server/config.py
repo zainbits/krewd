@@ -58,8 +58,6 @@ class Engine:
     command: list[str]
     env: dict[str, str] = field(default_factory=dict)
     gateway: str | None = None  # see GATEWAYS
-    base: str | None = None  # for a profile engine: the engine it runs (its own login is the base itself)
-    profile: Profile | None = None
 
 
 @dataclass(frozen=True)
@@ -74,8 +72,8 @@ class Settings:
     default_engine: str
     profiles: dict[str, Profile] = field(default_factory=dict)
     profiles_file: Path | None = None  # where the app's profile changes are saved; None: not managed from the app
-    # Agent -> profile its new tasks start on; an agent not listed starts on its own sign-in account.
-    defaults: dict[str, str] = field(default_factory=dict)
+    # Agent -> the profile it runs on; an agent not listed runs on its own sign-in account.
+    agent_profiles: dict[str, str] = field(default_factory=dict)
     cdp_port: int = 9222
     data_dir: Path = Path.home() / ".crew"
     max_upload_mb: int = 1024
@@ -156,30 +154,11 @@ def load_profiles(path: Path) -> dict[str, Profile]:
     return profiles
 
 
-def load_defaults(path: Path) -> dict[str, str]:
-    """The `[defaults]` table of profiles.toml: agent id -> profile its new tasks start on."""
+def load_agent_profiles(path: Path) -> dict[str, str]:
+    """The `[agents]` table of profiles.toml: agent id -> the profile it runs on."""
     if not path.is_file():
         return {}
-    return {k: str(v) for k, v in tomllib.loads(path.read_text()).get("defaults", {}).items()}
-
-
-def with_profiles(engines: dict[str, Engine], profiles: dict[str, Profile]) -> dict[str, Engine]:
-    """Each engine, followed by one engine per profile it can use ("codex@openrouter": Codex on OpenRouter)."""
-    out: dict[str, Engine] = {}
-    for engine in engines.values():
-        out[engine.id] = engine
-        for profile in profiles.values():
-            if engine.gateway and profile.url_for(engine.gateway):
-                out[f"{engine.id}@{profile.id}"] = Engine(
-                    id=f"{engine.id}@{profile.id}",
-                    name=f"{engine.name} · {profile.name}",
-                    command=engine.command,
-                    env=engine.env,
-                    gateway=engine.gateway,
-                    base=engine.id,
-                    profile=profile,
-                )
-    return out
+    return {k: str(v) for k, v in tomllib.loads(path.read_text()).get("agents", {}).items() if v}
 
 
 def load_settings() -> Settings:
@@ -190,7 +169,6 @@ def load_settings() -> Settings:
     engines, default_engine = load_engines(Path(os.environ.get("CREW_ENGINES_FILE", CONFIG_DIR / "engines.toml")))
     profiles_file = Path(os.environ.get("CREW_PROFILES_FILE", CONFIG_DIR / "profiles.toml"))
     profiles = load_profiles(profiles_file)
-    engines = with_profiles(engines, profiles)
     return Settings(
         database_url=database_url,
         host=os.environ.get("CREW_HOST", "127.0.0.1,lan"),
@@ -202,7 +180,7 @@ def load_settings() -> Settings:
         default_engine=default_engine,
         profiles=profiles,
         profiles_file=profiles_file,
-        defaults=load_defaults(profiles_file),
+        agent_profiles=load_agent_profiles(profiles_file),
         cdp_port=int(os.environ.get("CREW_CDP_PORT", "9222")),
         data_dir=Path(os.path.expanduser(os.environ.get("CREW_DATA_DIR", "~/.crew"))),
         max_upload_mb=int(os.environ.get("CREW_MAX_UPLOAD_MB", "1024")),

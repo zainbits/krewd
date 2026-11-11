@@ -66,7 +66,7 @@ def _write_private(path: Path, text: str) -> None:
     os.replace(tmp, path)
 
 
-def write_profiles(path: Path, profiles: dict[str, Profile], defaults: dict[str, str] | None = None) -> None:
+def write_profiles(path: Path, profiles: dict[str, Profile], agents: dict[str, str] | None = None) -> None:
     """Save profiles.toml. A key_file is written only when it is not the default keys.env beside the file."""
     def q(value: str) -> str:  # a TOML basic string; JSON's escapes are a subset of TOML's
         return json.dumps(value, ensure_ascii=False)
@@ -83,9 +83,9 @@ def write_profiles(path: Path, profiles: dict[str, Profile], defaults: dict[str,
         if profile.anthropic:
             lines.append(f"anthropic = {q(profile.anthropic)}")
         parts.append("\n".join(lines) + "\n")
-    if defaults:
-        parts.append("# The profile each agent's new tasks start on (an agent not listed: its own sign-in account).\n[defaults]\n"
-                     + "".join(f"{agent} = {q(profile)}\n" for agent, profile in defaults.items()))
+    if agents:
+        parts.append("# The profile each agent runs on (an agent not listed: its own sign-in account).\n[agents]\n"
+                     + "".join(f"{agent} = {q(profile)}\n" for agent, profile in agents.items()))
     _write_private(path, "\n".join(parts))
 
 
@@ -273,9 +273,7 @@ class Gateways:
             raise ProfileError(f"no key for {profile.name}: set {profile.key} in {profile.key_file}")
         return key
 
-    async def models(self, engine: Engine) -> list[dict[str, Any]]:
-        profile = engine.profile
-        assert profile is not None
+    async def models(self, engine: Engine, profile: Profile) -> list[dict[str, Any]]:
         url = profile.url_for(engine.gateway)
         if not url:
             raise ProfileError(f"{profile.name} has no URL for {engine.gateway}")
@@ -308,13 +306,11 @@ class Gateways:
             self._bundled = {cache_key: catalog}
         return self._bundled[cache_key]
 
-    async def codex_catalog(self, engine: Engine) -> dict[str, Any]:
-        return codex_catalog(await self.models(engine), await self.bundled(engine))
+    async def codex_catalog(self, engine: Engine, profile: Profile) -> dict[str, Any]:
+        return codex_catalog(await self.models(engine, profile), await self.bundled(engine))
 
-    async def claude_models(self, engine: Engine) -> list[str]:
+    async def claude_models(self, engine: Engine, profile: Profile) -> list[str]:
         """The model ids Claude Code's gateway discovery will list for this key, in the gateway's order."""
-        profile = engine.profile
-        assert profile is not None
         url = f"{profile.url_for(engine.gateway)}/v1"
         cached = self._models.get((profile.id, url, True))
         if cached and time.monotonic() - cached[0] < MODELS_TTL:
@@ -324,10 +320,8 @@ class Gateways:
             self._models[(profile.id, url, True)] = (time.monotonic(), models)
         return claude_listed(models)
 
-    async def engine_env(self, engine: Engine) -> dict[str, str]:
-        """Environment that points the engine at its profile's gateway (added to the engine's own env)."""
-        profile = engine.profile
-        assert profile is not None
+    async def engine_env(self, engine: Engine, profile: Profile) -> dict[str, str]:
+        """Environment that points the engine at a profile's gateway (added to the engine's own env)."""
         key = self.key(profile)
         url = profile.url_for(engine.gateway)
         if engine.gateway == "claude":
@@ -338,12 +332,12 @@ class Gateways:
                 "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY": "1",
             }
             try:
-                models = await self.claude_models(engine)
+                models = await self.claude_models(engine, profile)
             except ProfileError:  # the gateway may not list models; Claude Code's own aliases still apply
                 models = []
             return env | claude_defaults(models)
         if engine.gateway == "codex":
-            catalog = await self.codex_catalog(engine)
+            catalog = await self.codex_catalog(engine, profile)
             if not catalog["models"]:
                 raise ProfileError(f"{profile.name} offers no models to this key")
             provider = f"crew-{profile.id}"
@@ -359,53 +353,56 @@ class Gateways:
             if model:
                 config["model"] = model
             return {profile.key: key, "MODEL_PROVIDER": provider, "CODEX_CONFIG": json.dumps(config)}
-        raise ProfileError(f"engine {engine.base} cannot use gateways")
+        raise ProfileError(f"engine {engine.id} cannot use gateways")
 
-    def problem(self, engine: Engine) -> str | None:
+    def problem(self, profile: Profile) -> str | None:
         """Why a profile engine cannot start, as far as Crew can tell without starting it."""
-        if engine.profile and not engine.profile.read_key():
-            return f"No key: set {engine.profile.key} in {engine.profile.key_file}"
+        if not profile.read_key():
+            return f"No key for {profile.name}: set it under Settings > Profiles"
         return None
 
 
-async def check(engines: dict[str, Engine], defaults: dict[str, str] | None = None) -> list[tuple[str, str, str]]:
-    """(status, engine id, detail) for every agent's sign-in and every profile engine: what doctor shows."""
+async def check(engines: dict[str, Engine], profiles: dict[str, Profile],
+                agent_profiles: dict[str, str]) -> list[tuple[str, str, str]]:
+    """(status, label, detail) for each agent (what it runs on, its sign-in) and each profile it could use."""
     from .logins import Logins
 
     gateways = Gateways(port=0)
-    rows = []
     logins = Logins()
+    rows = []
     for engine in engines.values():
-        if engine.profile or not engine.gateway:
+        if not engine.gateway:
             continue
         status = await logins.check(engine)
-        default = (defaults or {}).get(engine.id)
-        starts = f"new tasks start on {default}" if default else "new tasks start on its sign-in account"
-        if status["logged_in"]:
-            rows.append(("ok", engine.id, "signed in" + (f" ({status['account']})" if status["account"] else "") + f"; {starts}"))
-        elif default:
-            rows.append(("ok", engine.id, f"not signed in; {starts}"))
+        signed = "signed in" + (f" ({status['account']})" if status["account"] else "") if status["logged_in"] else "not signed in"
+        profile = profiles.get(agent_profiles.get(engine.id, ""))
+        if profile and profile.url_for(engine.gateway):
+            rows.append(("ok", engine.id, f"runs on {profile.name}; sign-in account: {signed}"))
+        elif status["logged_in"]:
+            rows.append(("ok", engine.id, f"runs on its sign-in account, {signed}"))
         else:
-            rows.append(("warn", engine.id, f"not signed in, but {starts}: sign in, or pick another default (app: Settings > Agents)"))
-    for engine in engines.values():
-        if not engine.profile:
-            continue
-        try:
-            gateways.key(engine.profile)
-            if engine.gateway == "codex":
-                catalog = await gateways.codex_catalog(engine)
-                names = [m["slug"] for m in catalog["models"] if m.get("visibility", "list") == "list"]
-                if not names:
-                    raise ProfileError("the gateway offers no models to this key")
-                rows.append(("ok", engine.id, f"{len(names)} models: {', '.join(names[:4])}{' ...' if len(names) > 4 else ''}"))
-            else:
-                kept = await gateways.claude_models(engine)
-                if kept:
-                    rows.append(("ok", engine.id, f"{len(kept)} models: {', '.join(kept[:4])}{' ...' if len(kept) > 4 else ''}"))
+            rows.append(("warn", engine.id, "runs on its sign-in account, which is not signed in: sign in or pick a profile (app: Settings > Agents)"))
+    for profile in profiles.values():
+        for engine in engines.values():
+            if not engine.gateway or not profile.url_for(engine.gateway):
+                continue
+            label = f"{profile.id} for {engine.id}"
+            try:
+                gateways.key(profile)
+                if engine.gateway == "codex":
+                    catalog = await gateways.codex_catalog(engine, profile)
+                    names = [m["slug"] for m in catalog["models"] if m.get("visibility", "list") == "list"]
+                    if not names:
+                        raise ProfileError("the gateway offers no models to this key")
+                    rows.append(("ok", label, f"{len(names)} models: {', '.join(names[:4])}{' ...' if len(names) > 4 else ''}"))
                 else:
-                    rows.append(("warn", engine.id, "no models Claude Code can list for this key (it shows only its aliases)"))
-        except ProfileError as exc:
-            rows.append(("bad", engine.id, str(exc)))
+                    kept = await gateways.claude_models(engine, profile)
+                    if kept:
+                        rows.append(("ok", label, f"{len(kept)} models: {', '.join(kept[:4])}{' ...' if len(kept) > 4 else ''}"))
+                    else:
+                        rows.append(("warn", label, "no models Claude Code can list for this key (it shows only its aliases)"))
+            except ProfileError as exc:
+                rows.append(("bad", label, str(exc)))
     return rows
 
 
@@ -413,7 +410,7 @@ def main() -> None:
     """`python -m crew_server.profiles check`: one tab-separated line per profile engine, for doctor."""
     from pathlib import Path
 
-    from .config import CONFIG_DIR, load_defaults, load_engines, load_env_file, load_profiles, with_profiles
+    from .config import CONFIG_DIR, load_agent_profiles, load_engines, load_env_file, load_profiles
 
     load_env_file()
     engines, _ = load_engines(Path(os.environ.get("CREW_ENGINES_FILE", CONFIG_DIR / "engines.toml")))
@@ -421,7 +418,7 @@ def main() -> None:
     profiles = load_profiles(path)
     if len(sys.argv) < 2 or sys.argv[1] != "check":
         sys.exit("usage: python -m crew_server.profiles check")
-    for status, engine_id, detail in asyncio.run(check(with_profiles(engines, profiles), load_defaults(path))):
+    for status, engine_id, detail in asyncio.run(check(engines, profiles, load_agent_profiles(path))):
         print(status, engine_id, detail, sep="\t")
 
 
