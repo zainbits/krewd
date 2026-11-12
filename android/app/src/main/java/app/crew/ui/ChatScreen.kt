@@ -22,7 +22,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.only
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
@@ -35,6 +34,7 @@ import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
@@ -44,12 +44,11 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.InputChip
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TextField
-import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -64,6 +63,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
@@ -124,9 +126,12 @@ fun ChatScreen(state: UiState, viewModel: CrewViewModel) {
     }
 
     val bars = WindowInsets.statusBars.union(WindowInsets.displayCutout).asPaddingValues()
-    val bottomInsets = WindowInsets.ime.union(WindowInsets.navigationBars).asPaddingValues()
     var settingsOpen by rememberSaveable(state.openSessionId) { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
+    val density = LocalDensity.current
+    // Height of everything pinned at the bottom (composer, chips, keyboard), measured, so the last message
+    // always scrolls clear of the composer however tall it grows.
+    var bottomStack by remember { mutableStateOf(ShellDimensions.COMPOSER_MIN_HEIGHT * 2) }
     Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surface)) {
         LazyColumn(
             state = listState,
@@ -136,11 +141,7 @@ fun ChatScreen(state: UiState, viewModel: CrewViewModel) {
                 end = ShellDimensions.CONTENT_HORIZONTAL_PADDING,
                 top = bars.calculateTopPadding() + ShellDimensions.TITLE_PILL_TOP_GAP +
                     ShellDimensions.TITLE_PILL_HEIGHT + ShellDimensions.CONTENT_CLEARANCE,
-                bottom = bottomInsets.calculateBottomPadding() + ShellDimensions.COMPOSER_MIN_HEIGHT +
-                    ShellDimensions.COMPOSER_MARGIN * 2 + ShellDimensions.CONTENT_CLEARANCE +
-                    (if (busy) ACTIVITY_HEIGHT else 0.dp) +
-                    // room for the "Add to chat" tab chips above the composer
-                    (if (session != null && state.draftTabs[session.id].orEmpty().isNotEmpty()) ShellDimensions.AGENT_CHIPS_HEIGHT else 0.dp),
+                bottom = bottomStack + ShellDimensions.CONTENT_CLEARANCE,
             ),
             reverseLayout = true,
             verticalArrangement = Arrangement.spacedBy(10.dp, Alignment.Bottom),
@@ -159,8 +160,7 @@ fun ChatScreen(state: UiState, viewModel: CrewViewModel) {
                 label = listOfNotNull(state.engine(session.engine)?.name, tab?.host?.ifBlank { null }).joinToString(" · "),
                 viewModel = viewModel,
                 top = bars.calculateTopPadding() + ShellDimensions.TITLE_PILL_TOP_GAP + ShellDimensions.TITLE_PILL_HEIGHT,
-                bottom = bottomInsets.calculateBottomPadding() + ShellDimensions.COMPOSER_MIN_HEIGHT +
-                    ShellDimensions.COMPOSER_MARGIN * 2 + (if (busy) ACTIVITY_HEIGHT else 0.dp),
+                bottom = bottomStack,
                 onClose = { viewModel.hidePip(session.id, pipTab) },
                 onOpen = { viewModel.openBrowserAt(pipTab) },
             )
@@ -172,18 +172,10 @@ fun ChatScreen(state: UiState, viewModel: CrewViewModel) {
         Column(
             Modifier
                 .align(Alignment.BottomCenter)
+                .onSizeChanged { bottomStack = with(density) { it.height.toDp() } }
                 .windowInsetsPadding(WindowInsets.ime.union(WindowInsets.navigationBars))
                 .padding(ShellDimensions.COMPOSER_MARGIN),
         ) {
-            if (session != null && busy) {
-                ActivityLine(
-                    look = lookFor(session.engine, state.engines),
-                    face = faceOf(session, state.live[session.id]),
-                    live = state.live[session.id],
-                    onClick = { scope.launch { listState.animateScrollToItem(0) } },
-                    modifier = Modifier.padding(bottom = 8.dp),
-                )
-            }
             if (session != null) {
                 val files = state.draft(session.id)
                 PendingFiles(files, onRemove = { viewModel.removeAttachment(session.id, it) }, modifier = Modifier.padding(start = 4.dp, bottom = 4.dp))
@@ -203,12 +195,13 @@ fun ChatScreen(state: UiState, viewModel: CrewViewModel) {
                     }
                 }
                 val pick = rememberFilePicker { viewModel.attach(session.id, it) }
+                val live = state.live[session.id]
                 Composer(
-                    look = lookFor(session.engine, state.engines),
-                    face = if (busy) faceOf(session, state.live[session.id]) else FaceState.Idle,
-                    autoApprove = session.autoApprove,
-                    onAvatar = { settingsOpen = true },
                     busy = busy,
+                    steps = if (busy) live?.steps else null,
+                    onSteps = { scope.launch { listState.animateScrollToItem(0) } },
+                    contextUsed = session.contextUsed,
+                    contextSize = session.contextSize,
                     steering = state.engine(session.engine)?.steering == true,
                     files = files,
                     hasTabs = tabs.isNotEmpty(),
@@ -277,45 +270,6 @@ private fun ChatTopBar(state: UiState, viewModel: CrewViewModel, onSettings: () 
     }
 }
 
-/** Height the activity line takes above the composer, gap included. */
-private val ACTIVITY_HEIGHT = 52.dp
-
-/** While a turn runs: the agent's face, what it is doing, the time and steps so far. Tap to jump to the end. */
-@Composable
-private fun ActivityLine(look: CrewLook, face: FaceState, live: app.crew.LiveInfo?, onClick: () -> Unit, modifier: Modifier = Modifier) {
-    Surface(
-        onClick = onClick,
-        shape = RoundedCornerShape(20.dp),
-        color = MaterialTheme.colorScheme.surfaceContainerHigh,
-        shadowElevation = 2.dp,
-        modifier = modifier.fillMaxWidth(),
-    ) {
-        Row(Modifier.padding(start = 12.dp, end = 14.dp, top = 9.dp, bottom = 9.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            CrewFace(look, face, 24.dp)
-            Text(
-                live?.activity ?: "Working",
-                style = MaterialTheme.typography.labelLarge,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f),
-            )
-            if (live != null) {
-                Elapsed(live.since)
-                if (live.steps > 0) {
-                    Surface(shape = RoundedCornerShape(10.dp), color = MaterialTheme.colorScheme.surfaceContainerHighest) {
-                        Text(
-                            if (live.steps == 1) "1 step" else "${live.steps} steps",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
-                        )
-                    }
-                }
-            }
-        }
-    }
-}
-
 /** How a message goes while a turn runs: steer into it, queue after it, or stop it and send. */
 private enum class Delivery(val id: String, val label: String, val hint: String) {
     Steer("steer", "Steer", "Add it to the running turn now"),
@@ -323,13 +277,19 @@ private enum class Delivery(val id: String, val label: String, val hint: String)
     Interrupt("interrupt", "Interrupt", "Stop this turn, then send"),
 }
 
+/**
+ * Two rows, like the Claude app: the message on top (grows up to a few lines, then scrolls), and a row of
+ * controls under it: attach and, while a turn runs, its step count on the left; how a message goes while a
+ * turn runs, the context ring and send (or stop) on the right. The agent, model and settings live in the
+ * title bar only.
+ */
 @Composable
 private fun Composer(
-    look: CrewLook,
-    face: FaceState,
-    autoApprove: Boolean,
-    onAvatar: () -> Unit,
     busy: Boolean,
+    steps: Int?,
+    onSteps: () -> Unit,
+    contextUsed: Long?,
+    contextSize: Long?,
     steering: Boolean,
     files: List<PendingFile>,
     hasTabs: Boolean,
@@ -344,109 +304,197 @@ private fun Composer(
     var deliveryMenu by remember { mutableStateOf(false) }
     val uploading = files.any { it.uploading }
     val ready = files.any { it.uploadId != null } || hasTabs
+    val hasDraft = text.isNotBlank() || files.isNotEmpty() || hasTabs
+    val colors = MaterialTheme.colorScheme
     Surface(
         modifier = modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(28.dp),
-        color = MaterialTheme.colorScheme.surfaceContainerHigh,
-        border = androidx.compose.foundation.BorderStroke(ShellDimensions.PILL_BORDER_WIDTH, MaterialTheme.colorScheme.outlineVariant),
+        shape = RoundedCornerShape(26.dp),
+        color = colors.surfaceContainerHigh,
+        border = androidx.compose.foundation.BorderStroke(ShellDimensions.PILL_BORDER_WIDTH, colors.outlineVariant),
         shadowElevation = 2.dp,
     ) {
-        Row(verticalAlignment = Alignment.Bottom, modifier = Modifier.padding(start = 8.dp, end = 6.dp, top = 4.dp, bottom = 4.dp)) {
-            Box(
-                Modifier
-                    .align(Alignment.CenterVertically)
-                    .clip(CircleShape)
-                    .clickable(onClick = onAvatar)
-                    .padding(2.dp),
-            ) {
-                CrewFace(look, face, 38.dp, description = "Chat settings")
-                Box(
-                    Modifier
-                        .align(Alignment.BottomEnd)
-                        .offset(x = 3.dp, y = 3.dp)
-                        .size(18.dp)
-                        .background(MaterialTheme.colorScheme.surfaceContainerHigh, CircleShape),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Icon(
-                        painterResource(if (autoApprove) R.drawable.ic_bolt_24 else R.drawable.ic_approval_24),
-                        contentDescription = if (autoApprove) "Auto-approve on" else "You approve each step",
-                        tint = app.crew.LocalCrewColors.current.needs,
-                        modifier = Modifier.size(12.dp),
-                    )
-                }
-            }
-            TextField(
+        Column(Modifier.padding(start = 6.dp, end = 6.dp, top = 4.dp, bottom = 6.dp)) {
+            BasicTextField(
                 value = text,
                 onValueChange = { text = it },
-                placeholder = { Text(if (busy) "Steer the agent…" else "Reply…") },
-                modifier = Modifier.weight(1f),
-                maxLines = 6,
-                colors = TextFieldDefaults.colors(
-                    focusedContainerColor = Color.Transparent,
-                    unfocusedContainerColor = Color.Transparent,
-                    focusedIndicatorColor = Color.Transparent,
-                    unfocusedIndicatorColor = Color.Transparent,
-                ),
-            )
-            if (busy && (text.isNotBlank() || files.isNotEmpty() || hasTabs)) {
-                Box(Modifier.align(Alignment.CenterVertically)) {
-                    Surface(
-                        onClick = { deliveryMenu = true },
-                        shape = RoundedCornerShape(16.dp),
-                        color = MaterialTheme.colorScheme.secondaryContainer,
-                    ) {
-                        Text(
-                            delivery.label + " ▾",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSecondaryContainer,
-                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
-                        )
+                textStyle = MaterialTheme.typography.bodyLarge.copy(color = colors.onSurface),
+                cursorBrush = SolidColor(colors.primary),
+                maxLines = 8,
+                modifier = Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 12.dp, bottom = 8.dp),
+                decorationBox = { field ->
+                    Box {
+                        if (text.isEmpty()) {
+                            Text(
+                                if (busy) "Steer the agent…" else "Reply to Crew…",
+                                style = MaterialTheme.typography.bodyLarge,
+                                color = colors.onSurfaceVariant,
+                            )
+                        }
+                        field()
                     }
-                    DropdownMenu(expanded = deliveryMenu, onDismissRequest = { deliveryMenu = false }) {
-                        Text(
-                            "While the task is running",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
-                        )
-                        Delivery.entries.filter { it != Delivery.Steer || steering }.forEach { option ->
-                            DropdownMenuItem(
-                                text = {
-                                    Column {
-                                        Text(option.label, fontWeight = if (option == delivery) FontWeight.SemiBold else FontWeight.Normal)
-                                        Text(option.hint, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                    }
-                                },
-                                leadingIcon = { Text(if (option == delivery) "✓" else " ", color = MaterialTheme.colorScheme.primary) },
-                                onClick = {
-                                    delivery = option
-                                    deliveryMenu = false
-                                },
+                },
+            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                IconButton(onClick = onAttach) {
+                    Icon(painterResource(R.drawable.ic_add_24), contentDescription = "Attach files")
+                }
+                if (steps != null) {
+                    Spacer(Modifier.width(2.dp))
+                    Surface(onClick = onSteps, shape = RoundedCornerShape(12.dp), color = colors.surfaceContainerHighest) {
+                        Row(
+                            Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            CircularProgressIndicator(Modifier.size(10.dp), strokeWidth = 1.5.dp, color = colors.onSurfaceVariant)
+                            Text(
+                                if (steps == 1) "1 step" else "$steps steps",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = colors.onSurfaceVariant,
                             )
                         }
                     }
                 }
-            }
-            IconButton(onClick = onAttach) {
-                Icon(painterResource(R.drawable.ic_attach_24), contentDescription = "Attach files")
-            }
-            if (busy && text.isBlank() && files.isEmpty() && !hasTabs) {
-                IconButton(onClick = onStop) {
-                    Icon(painterResource(R.drawable.ic_stop_24), contentDescription = "Stop")
+                Spacer(Modifier.weight(1f))
+                if (busy && hasDraft) {
+                    Box {
+                        Surface(onClick = { deliveryMenu = true }, shape = RoundedCornerShape(16.dp), color = colors.secondaryContainer) {
+                            Text(
+                                delivery.label + " ▾",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = colors.onSecondaryContainer,
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
+                            )
+                        }
+                        DropdownMenu(expanded = deliveryMenu, onDismissRequest = { deliveryMenu = false }) {
+                            Text(
+                                "While the task is running",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = colors.onSurfaceVariant,
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+                            )
+                            Delivery.entries.filter { it != Delivery.Steer || steering }.forEach { option ->
+                                DropdownMenuItem(
+                                    text = {
+                                        Column {
+                                            Text(option.label, fontWeight = if (option == delivery) FontWeight.SemiBold else FontWeight.Normal)
+                                            Text(option.hint, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+                                        }
+                                    },
+                                    leadingIcon = { Text(if (option == delivery) "✓" else " ", color = colors.primary) },
+                                    onClick = {
+                                        delivery = option
+                                        deliveryMenu = false
+                                    },
+                                )
+                            }
+                        }
+                    }
+                    Spacer(Modifier.width(6.dp))
                 }
-            } else {
-                IconButton(
+                if (contextUsed != null && contextSize != null && contextSize > 0) {
+                    ContextRing(contextUsed, contextSize)
+                    Spacer(Modifier.width(6.dp))
+                }
+                val stop = busy && !hasDraft
+                val enabled = stop || ((text.isNotBlank() || ready) && !uploading)
+                Surface(
                     onClick = {
-                        onSend(text.trim(), if (busy) delivery.id else null)
-                        text = ""
+                        if (stop) {
+                            onStop()
+                        } else {
+                            onSend(text.trim(), if (busy) delivery.id else null)
+                            text = ""
+                        }
                     },
-                    enabled = (text.isNotBlank() || ready) && !uploading,
+                    enabled = enabled,
+                    shape = CircleShape,
+                    color = if (enabled) colors.primary else colors.surfaceContainerHighest,
+                    contentColor = if (enabled) colors.onPrimary else colors.onSurfaceVariant.copy(alpha = 0.6f),
+                    modifier = Modifier.size(40.dp),
                 ) {
-                    Icon(painterResource(R.drawable.ic_send_24), contentDescription = if (uploading) "Uploading" else "Send")
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(
+                            painterResource(if (stop) R.drawable.ic_stop_24 else R.drawable.ic_send_24),
+                            contentDescription = if (stop) "Stop" else if (uploading) "Uploading" else "Send",
+                            modifier = Modifier.size(20.dp),
+                        )
+                    }
                 }
             }
         }
+    }
+}
+
+/** How full the agent's context window is: a small ring with the percentage; tap for the exact tokens. */
+@Composable
+private fun ContextRing(used: Long, size: Long) {
+    var open by remember { mutableStateOf(false) }
+    val fraction = (used.toFloat() / size).coerceIn(0f, 1f)
+    val percent = (fraction * 100).toInt()
+    val colors = MaterialTheme.colorScheme
+    val tone = when {
+        fraction >= 0.9f -> colors.error
+        fraction >= 0.7f -> app.crew.LocalCrewColors.current.needs
+        else -> colors.primary
+    }
+    Box {
+        Box(
+            Modifier.size(40.dp).clip(CircleShape).clickable { open = true },
+            contentAlignment = Alignment.Center,
+        ) {
+            CircularProgressIndicator(
+                progress = { fraction },
+                modifier = Modifier.size(28.dp),
+                color = tone,
+                trackColor = colors.surfaceContainerHighest,
+                strokeWidth = 2.5.dp,
+                gapSize = 0.dp,
+                strokeCap = StrokeCap.Round,
+            )
+            Text(
+                "$percent",
+                style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.sp, lineHeight = 9.sp),
+                fontWeight = FontWeight.SemiBold,
+                color = colors.onSurface,
+            )
+        }
+        DropdownMenu(
+            expanded = open,
+            onDismissRequest = { open = false },
+            shape = RoundedCornerShape(20.dp),
+            containerColor = colors.surfaceContainerHighest,
+        ) {
+            Column(Modifier.padding(horizontal = 18.dp, vertical = 10.dp).widthIn(min = 220.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Row(verticalAlignment = Alignment.Bottom) {
+                    Text("Context", style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
+                    Text("$percent%", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, color = tone)
+                }
+                LinearProgressIndicator(
+                    progress = { fraction },
+                    modifier = Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(3.dp)),
+                    color = tone,
+                    trackColor = colors.surfaceContainer,
+                    gapSize = 0.dp,
+                    drawStopIndicator = {},
+                )
+                TokenLine("Used", used)
+                TokenLine("Remaining", (size - used).coerceAtLeast(0))
+                HorizontalDivider(color = colors.outlineVariant)
+                TokenLine("Window", size)
+            }
+        }
+    }
+}
+
+@Composable
+private fun TokenLine(label: String, tokens: Long) {
+    Row(Modifier.fillMaxWidth()) {
+        Text(label, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.weight(1f))
+        Text(
+            "%,d".format(tokens),
+            style = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
+        )
     }
 }
 

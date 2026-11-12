@@ -150,7 +150,6 @@ def run_prompt(
     run_id: str,
     trigger: str,
     now: datetime,
-    first_run: bool,
     triggers: list[tuple[str, str | None]] | None = None,
     attempt: int = 1,
     max_attempts: int = 1,
@@ -179,10 +178,10 @@ def run_prompt(
         lines.append(f"Attempt {attempt} of {max_attempts}.")
     if reason:
         lines.append(f"This is the follow-up you asked for in the last attempt: {reason}")
-    if first_run:
-        lines.append("This is the routine's own chat: every run comes here, so later runs see this one.")
-    else:
-        lines.append("This is the routine's own chat: earlier runs and the owner's replies are above.")
+    lines.append(
+        "This run starts in a fresh session: earlier runs are not in your context. What they learned is in the "
+        "notes below, so keep the notes up to date."
+    )
     rid = routine["id"][:8]
     lines += [
         "",

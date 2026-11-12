@@ -471,14 +471,20 @@ async def test_routine_has_its_own_chat_and_runs_into_it(hub):
     assert user["payload"]["purpose"] == "routine" and user["payload"]["meta"]["run_id"] == run["id"]
     assert "Fill the timesheet on Fridays." in user["payload"]["text"]
     assert "This month ends on" in user["payload"]["text"]
+    assert "fresh session" in user["payload"]["text"]
+    first_agent = await hub.pool.fetchval("select agent_session from sessions where id = $1", sid)
+    assert first_agent
 
-    # A second run goes into the same chat, with the edited instructions as a new version.
+    # A second run goes into the same chat, with the edited instructions as a new version,
+    # in a fresh agent session: the last run's one is ended, so the context does not grow run after run.
     edited = await hub.update_routine(rid, {"instructions": "Fill it and ask me to review."}, note="review first")
     assert edited["version"] == 2
     await hub.run_routine(rid)
     await wait_run(hub, rid, "done")
     users = [e for e in await hub.events(0, sid) if e["kind"] == "user"]
     assert len(users) == 2 and "ask me to review" in users[1]["payload"]["text"]
+    second_agent = await hub.pool.fetchval("select agent_session from sessions where id = $1", sid)
+    assert second_agent and second_agent != first_agent
     assert len(await hub.list_sessions()) == 1
     versions = await hub.routine_versions(rid)
     assert [v["version"] for v in versions] == [2, 1] and versions[0]["note"] == "review first"

@@ -1201,6 +1201,12 @@ class Hub:
         usage = None
         carry = None
         try:
+            if purpose == "routine" and rt.agent_session:
+                # Every run starts in a fresh agent session: a routine's context does not grow run after run.
+                # The last run's session stays until here, so the owner can follow up on it in the chat.
+                # What runs learn lives in the routine's notes, which every run's prompt carries.
+                await self._drop_agent_session(rt)
+                await self.emit_session(rt.id)
             proc = await self._ensure_loaded(rt)
             if rt.cancel_requested:
                 raise _Cancelled()
@@ -1288,7 +1294,12 @@ class Hub:
             )
             await self.emit_session(rt.id)
         elif kind == "usage_update":
-            rt.usage = {key: update[key] for key in ("used", "size", "cost") if key in update}
+            usage = {key: update[key] for key in ("used", "size", "cost") if key in update}
+            if usage != rt.usage:
+                # Saved and sent at once, so the app's context ring moves during a turn, not only at its end.
+                rt.usage = usage
+                await self.pool.execute("update sessions set usage = $2 where id = $1", rt.id, usage)
+                await self.emit_session(rt.id)
             model = _reported_model(update.get("_meta"))
             if model:
                 changed = await self.pool.fetchval(
@@ -1463,27 +1474,34 @@ class Hub:
             if not summary:
                 await self.emit(rt.id, "compact", {"how": how, "ok": False})
                 return
-            old = rt.agent_session
-            proc = self.procs.get(rt.engine)
-            if old:
-                self.by_agent_session.pop((rt.engine, old), None)
-                caps = (proc.capabilities.get("sessionCapabilities") or {}) if proc and proc.alive else {}
-                for method in ("close", "delete"):
-                    if method in caps:
-                        try:
-                            await proc.request(f"session/{method}", {"sessionId": old}, timeout=30)
-                            break
-                        except AcpError:
-                            continue
-            rt.agent_session = None
-            rt.tools.clear()
             carry = ("Handover from the earlier part of this chat, which was compacted (written by the agent before "
                      "the reset):\n\n" + summary)
-            await self.pool.execute(
-                "update sessions set agent_session = null, carry = $2, usage = null where id = $1", rt.id, carry
-            )
-            rt.usage = None
+            await self._drop_agent_session(rt, carry)
         await self.emit(rt.id, "compact", {"how": how, "ok": True})
+
+    async def _drop_agent_session(self, rt: Runtime, carry: str | None = None) -> None:
+        """End the chat's agent session, so its next turn starts a fresh one (empty context).
+
+        The chat and its history stay; only the agent forgets. `carry` is put in front of the next prompt.
+        """
+        old = rt.agent_session
+        proc = self.procs.get(rt.engine)
+        if old:
+            self.by_agent_session.pop((rt.engine, old), None)
+            caps = (proc.capabilities.get("sessionCapabilities") or {}) if proc and proc.alive else {}
+            for method in ("close", "delete"):
+                if method in caps:
+                    try:
+                        await proc.request(f"session/{method}", {"sessionId": old}, timeout=30)
+                        break
+                    except AcpError:
+                        continue
+        rt.agent_session = None
+        rt.tools.clear()
+        await self.pool.execute(
+            "update sessions set agent_session = null, carry = $2, usage = null where id = $1", rt.id, carry
+        )
+        rt.usage = None
 
     # switching agents in one chat
 
@@ -2079,11 +2097,10 @@ class Hub:
             await self._routine_changed(row["id"])
             return await self._run_json(run_id)
         message_id = uuid.uuid4()
-        first = not await self.pool.fetchval("select 1 from routine_runs where session_id = $1 limit 1", session_id)
         all_cron = [t for t in await self._triggers(row["id"]) if t["kind"] == "cron"]
         routine = db.routine_json(row)
         text = rtn.run_prompt(
-            routine, str(run_id), trigger, datetime.now(UTC), first,
+            routine, str(run_id), trigger, datetime.now(UTC),
             triggers=[(f["trigger"]["name"], rtn.describe(f["trigger"]["schedule"] or "") if f["trigger"]["schedule"]
                        else None) for f in fired if f["trigger"]["name"] in names],
             attempt=lead["attempt"], max_attempts=lead["max"], reason=lead["reason"], notes=row["notes"],
