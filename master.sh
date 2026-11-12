@@ -141,8 +141,11 @@ PY
     || warn "$workdir/AGENTS.md has an older Crew section (no routines)" "replace it with deploy/agents-section.md"
   [[ "$(readlink -f "$HOME/.local/bin/crew" 2>/dev/null)" == "$(readlink -f "$REPO/deploy/crew-cli.sh")" ]] && ok "crew command (~/.local/bin/crew)" \
     || warn "the crew command is not installed" "./master.sh setup (links ~/.local/bin/crew to deploy/crew-cli.sh)"
-  [[ -e "$HOME/.claude/skills/browser-harness" || -e "$HOME/.agents/skills/browser-harness" ]] && ok "browser-harness skill is installed" \
-    || warn "browser-harness skill not found in ~/.agents/skills or ~/.claude/skills" "AGENTS.md, new machine step 5"
+  [[ -e "$HOME/.agents/skills/browser-harness" ]] && ok "browser-harness skill is installed" \
+    || warn "browser-harness skill not found in ~/.agents/skills" "AGENTS.md, new machine step 5"
+  [[ -d "$HOME/.agents/skills" && "$(readlink -f "$HOME/.claude/skills" 2>/dev/null)" == "$(readlink -f "$HOME/.agents/skills")" ]] \
+    && ok "Claude Code shares ~/.agents/skills (~/.claude/skills links to it)" \
+    || warn "~/.claude/skills is not a link to ~/.agents/skills, so Claude misses shared skills" "AGENTS.md, new machine step 5"
 
   say ""
   if ((FAILS)); then say "${R}$FAILS problem(s)${N}, $WARNS warning(s)."; else say "${G}All good${N} ($WARNS warning(s))."; fi

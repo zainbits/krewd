@@ -104,7 +104,8 @@ Prerequisites that `master.sh` checks but does not install:
    - Codex: install an ACP adapter such as `codex-acp`, then add it to `engines.toml`.
 5. Brave and browser-harness.
    - Install browser-harness with `uv tool install browser-harness`.
-   - Put its skill in `~/.agents/skills/browser-harness/` and symlink it into `~/.claude/skills/`.
+   - Put its skill in `~/.agents/skills/browser-harness/`.
+   - Skills live in one place, `~/.agents/skills`. Codex and OpenCode read it already; Claude Code reads only `~/.claude/skills`, so make that a link to the whole folder: `ln -s ../.agents/skills ~/.claude/skills` (move an existing `~/.claude/skills` aside first). A skill added to `~/.agents/skills` then reaches every engine.
    - Turn telemetry off. The engine environment in `engines.toml` already sets `BH_TELEMETRY=0`.
 6. The agents' instructions: append `deploy/agents-section.md` to `$CREW_WORKDIR/AGENTS.md`, which is `~/AGENTS.md` by default.
 7. Profiles and sign-ins: add `gateway` (and `CODEX_PATH` for Codex) to the engines in `engines.toml`, restart, then sign the agents in, add gateways and pick what each agent runs on from the app (Settings > Agents, Settings > Profiles). By hand instead: `deploy/profiles.example.toml` to `~/.config/crew/profiles.toml`, keys in `~/.config/crew/keys.env` (mode 600).
@@ -120,7 +121,7 @@ Then run `./master.sh setup`. It creates the config, installs the Python environ
 - Stay agent-agnostic. Talk to agents only over ACP, and never build on one vendor's remote or mobile product.
   - Engines come from `engines.toml`.
   - Model, effort and mode come from the agent's own ACP `configOptions`. Never hard-code model names.
-  - Agent instructions live in `AGENTS.md` files, and skills in `~/.agents/skills`, symlinked for Claude Code.
+  - Agent instructions live in `AGENTS.md` files, and skills in `~/.agents/skills` (`~/.claude/skills` is a link to it). Never install a skill into one engine's own folder.
 - Secrets: never print, log or commit database URLs, passwords or the token. `doctor` reports only whether they are set.
 - Every long-running process runs in a named tmux session the owner can attach to. Use sudo only in a tmux session where the owner types the password.
 - A release bumps `VERSION` and nothing else that holds a version.
