@@ -575,6 +575,11 @@ async def test_compact_uses_the_agents_own_command(hub):
             break
         await asyncio.sleep(0.05)
     assert (await hub.get_session(sid))["compact"] == "native"
+    # The composer's suggestions: the agent's own commands with their descriptions, for the chat and the engine.
+    expected = [{"name": "compact", "description": "compact", "hint": None},
+                {"name": "review", "description": "review", "hint": None}]
+    assert (await hub.get_session(sid))["commands"] == expected
+    assert next(e for e in hub.engines() if e["id"] == "native")["commands"] == expected
     agent_session = await hub.pool.fetchval("select agent_session from sessions where id = $1", sid)
     await hub.compact(sid)
     event = await wait_for(hub, sid, "compact")
@@ -818,3 +823,14 @@ async def test_switch_api_and_transcript(hub):
         await wait_for(hub, uuid.UUID(sid), "switch")
         r = await client.get(f"/api/sessions/{sid}/transcript?last=2", headers=h)
         assert r.status_code == 200 and len(r.json()) == 2 and r.json()[-1]["from"] == "Crew"
+
+
+def test_command_list_reads_acp_entries_and_old_names():
+    raw = [{"name": "review", "description": "Review code", "input": {"hint": "branch"}}, "compact",
+           {"name": "__internal"}, {"name": ""}, {"description": "no name"}, {"name": "Agents", "description": None}]
+    assert db.command_list(raw) == [
+        {"name": "Agents", "description": "", "hint": None},
+        {"name": "compact", "description": "", "hint": None},
+        {"name": "review", "description": "Review code", "hint": "branch"},
+    ]
+    assert db.command_names(None) == set()

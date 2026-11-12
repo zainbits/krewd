@@ -41,7 +41,9 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.crew.Connection
@@ -81,6 +83,11 @@ fun NewTaskSheet(state: UiState, viewModel: CrewViewModel, initialEngine: String
     var settingsOpen by remember { mutableStateOf(false) }
     val online = state.connection is Connection.Online
     val text = state.newTaskText
+    // The field keeps its own cursor; the text itself lives in the view model (saved prompts set it too).
+    var field by remember { mutableStateOf(TextFieldValue(text, TextRange(text.length))) }
+    if (field.text != text) field = TextFieldValue(text, TextRange(text.length))
+    val query = if (field.selection.collapsed) commandQuery(field.text, field.selection.start) else null
+    val matches = remember(engine?.commands, query) { matchCommands(engine?.commands.orEmpty(), query) }
     val files = state.draft(NEW_DRAFT)
     val pickFiles = rememberFilePicker { viewModel.attach(NEW_DRAFT, it) }
     val focus = remember { FocusRequester() }
@@ -111,9 +118,18 @@ fun NewTaskSheet(state: UiState, viewModel: CrewViewModel, initialEngine: String
                 else -> {}
             }
             Text("Ask Crew", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(start = 4.dp, top = 2.dp))
+            if (query != null) {
+                CommandSuggestions(matches, onPick = {
+                    field = applyCommand(field, query, it)
+                    viewModel.setNewTaskText(field.text)
+                }, Modifier.padding(top = 6.dp))
+            }
             TextField(
-                value = text,
-                onValueChange = viewModel::setNewTaskText,
+                value = field,
+                onValueChange = {
+                    field = it
+                    viewModel.setNewTaskText(it.text)
+                },
                 placeholder = { Text("What should Crew do?", fontSize = 22.sp) },
                 textStyle = MaterialTheme.typography.headlineSmall.copy(fontWeight = FontWeight.Medium, lineHeight = 30.sp),
                 minLines = 3,

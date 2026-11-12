@@ -39,6 +39,29 @@ SESSION_COLUMNS = (
 )
 
 
+def command_list(raw: Any) -> list[dict[str, Any]]:
+    """An agent's slash commands and skills as `[{name, description, hint}]`, sorted by name.
+
+    Takes ACP `availableCommands` entries or what Crew stored before (names only). Names starting with `__` are the
+    agent's internal entries and are left out.
+    """
+    out: dict[str, dict[str, Any]] = {}
+    for item in raw or []:
+        entry = {"name": item} if isinstance(item, str) else item if isinstance(item, dict) else {}
+        name = entry.get("name")
+        if not isinstance(name, str) or not name.strip() or name.startswith("__"):
+            continue
+        hint = entry.get("hint")
+        if hint is None and isinstance(entry.get("input"), dict):
+            hint = entry["input"].get("hint")
+        out[name] = {"name": name, "description": entry.get("description") or "", "hint": hint or None}
+    return [out[name] for name in sorted(out, key=str.lower)]
+
+
+def command_names(raw: Any) -> set[str]:
+    return {c["name"] for c in command_list(raw)}
+
+
 def session_json(row: asyncpg.Record, pending_approvals: int = 0) -> dict[str, Any]:
     # One answer for the current mode: the agent's mode config option when it has one, else the mode column.
     options = row["config_options"] or []
@@ -66,7 +89,9 @@ def session_json(row: asyncpg.Record, pending_approvals: int = 0) -> dict[str, A
         "browser_tab": row["browser_tab"],
         "routine_id": str(row["routine_id"]) if row["routine_id"] else None,
         # How Compact works here: the agent's own /compact, or Crew's handover to a fresh agent session.
-        "compact": "native" if "compact" in (row["commands"] or []) else "handover",
+        "compact": "native" if "compact" in command_names(row["commands"]) else "handover",
+        # The agent's own slash commands and skills (ACP available_commands_update), for the composer's suggestions.
+        "commands": command_list(row["commands"]),
         "pending_approvals": pending_approvals,
         "created_at": row["created_at"].isoformat(),
         "updated_at": row["updated_at"].isoformat(),

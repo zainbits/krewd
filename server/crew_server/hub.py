@@ -278,6 +278,7 @@ class Hub:
                 "config_options": info.get("config_options") or [],
                 "modes": info.get("modes"),
                 "steering": bool(info.get("steering")),
+                "commands": db.command_list(info.get("commands")),
                 "profile": profile.id if profile else None,  # None: its own sign-in account (or no gateway kind)
                 "problem": problem,
             })
@@ -330,6 +331,13 @@ class Hub:
                 await self._remember_engine(
                     engine_id, config_options=normalise_config(result.get("configOptions")), modes=result.get("modes")
                 )
+                # Some agents (OpenCode) list their commands and skills only after answering session/new.
+                for _ in range(30):
+                    if self.closing or (self.engine_info.get(engine_id) or {}).get("commands") is not None:
+                        break
+                    await asyncio.sleep(0.1)
+                if self.closing:
+                    return
                 caps = proc.capabilities.get("sessionCapabilities") or {}
                 for method in ("delete", "close"):
                     if method in caps:
@@ -1272,6 +1280,10 @@ class Hub:
             return
         rt = self._session_for(engine_id, params.get("sessionId"))
         if rt is None:
+            update = params.get("update") or {}
+            if update.get("sessionUpdate") == "available_commands_update":
+                # From a probe or another session Crew does not track: still the engine's current list.
+                await self._remember_engine(engine_id, commands=db.command_list(update.get("availableCommands")))
             return
         update = params.get("update") or {}
         kind = update.get("sessionUpdate")
@@ -1310,13 +1322,13 @@ class Hub:
                 if changed:
                     await self.emit_session(rt.id)
         elif kind == "available_commands_update":
-            names = sorted({c.get("name") for c in update.get("availableCommands") or [] if c.get("name")})
+            commands = db.command_list(update.get("availableCommands"))
             changed = await self.pool.fetchval(
                 "update sessions set commands = $2 where id = $1 and commands is distinct from $2 returning id",
                 rt.id,
-                names,
+                commands,
             )
-            await self._remember_engine(engine_id, commands=names)
+            await self._remember_engine(engine_id, commands=commands)
             if changed:
                 await self.emit_session(rt.id)
         elif kind == "config_option_update" and update.get("configOptions") is not None:
@@ -1339,6 +1351,10 @@ class Hub:
             raise MethodNotFound(method)
         rt = self._session_for(engine_id, params.get("sessionId"))
         if rt is None:
+            update = params.get("update") or {}
+            if update.get("sessionUpdate") == "available_commands_update":
+                # From a probe or another session Crew does not track: still the engine's current list.
+                await self._remember_engine(engine_id, commands=db.command_list(update.get("availableCommands")))
             return {"outcome": {"outcome": "cancelled"}}
         await self._flush_text(rt)
         call = params.get("toolCall") or {}
@@ -1459,7 +1475,7 @@ class Hub:
         )
         if waiting:
             return db.message_json(waiting)
-        how = "native" if "compact" in (row["commands"] or []) else "handover"
+        how = "native" if "compact" in db.command_names(row["commands"]) else "handover"
         text = "/compact" if how == "native" else HANDOVER_PROMPT
         return await self.send(
             session_id, text, delivery="queue", purpose="compact", meta={"how": how}, preview="Compacting the context"

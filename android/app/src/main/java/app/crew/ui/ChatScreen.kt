@@ -73,6 +73,7 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -86,6 +87,7 @@ import app.crew.CrewViewModel
 import app.crew.R
 import app.crew.UiState
 import app.crew.constants.ShellDimensions
+import app.crew.data.AgentCommand
 import app.crew.data.ApprovalItem
 import app.crew.data.ChatItem
 import app.crew.data.FilesItem
@@ -203,6 +205,7 @@ fun ChatScreen(state: UiState, viewModel: CrewViewModel) {
                     contextUsed = session.contextUsed,
                     contextSize = session.contextSize,
                     steering = state.engine(session.engine)?.steering == true,
+                    commands = session.commands.ifEmpty { state.engine(session.engine)?.commands.orEmpty() },
                     files = files,
                     hasTabs = tabs.isNotEmpty(),
                     onSend = viewModel::send,
@@ -291,6 +294,7 @@ private fun Composer(
     contextUsed: Long?,
     contextSize: Long?,
     steering: Boolean,
+    commands: List<AgentCommand>,
     files: List<PendingFile>,
     hasTabs: Boolean,
     onSend: (String, String?) -> Unit,
@@ -298,7 +302,10 @@ private fun Composer(
     onAttach: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    var text by rememberSaveable { mutableStateOf("") }
+    var value by rememberSaveable(stateSaver = TextFieldValue.Saver) { mutableStateOf(TextFieldValue("")) }
+    val text = value.text
+    val query = if (value.selection.collapsed) commandQuery(text, value.selection.start) else null
+    val matches = remember(commands, query) { matchCommands(commands, query) }
     // Steer where the agent supports it, otherwise queue. Queue and interrupt work with every agent.
     var delivery by rememberSaveable(steering) { mutableStateOf(if (steering) Delivery.Steer else Delivery.Queue) }
     var deliveryMenu by remember { mutableStateOf(false) }
@@ -314,9 +321,12 @@ private fun Composer(
         shadowElevation = 2.dp,
     ) {
         Column(Modifier.padding(start = 6.dp, end = 6.dp, top = 4.dp, bottom = 6.dp)) {
+            if (query != null) {
+                CommandSuggestions(matches, onPick = { value = applyCommand(value, query, it) }, Modifier.padding(top = 2.dp))
+            }
             BasicTextField(
-                value = text,
-                onValueChange = { text = it },
+                value = value,
+                onValueChange = { value = it },
                 textStyle = MaterialTheme.typography.bodyLarge.copy(color = colors.onSurface),
                 cursorBrush = SolidColor(colors.primary),
                 maxLines = 8,
@@ -404,7 +414,7 @@ private fun Composer(
                             onStop()
                         } else {
                             onSend(text.trim(), if (busy) delivery.id else null)
-                            text = ""
+                            value = TextFieldValue("")
                         }
                     },
                     enabled = enabled,

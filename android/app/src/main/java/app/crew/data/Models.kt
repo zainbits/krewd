@@ -103,6 +103,8 @@ data class SessionInfo(
     val routineId: String? = null,
     /** How Compact works here: "native" (the agent's own /compact) or "handover" (a fresh agent session). */
     val compact: String = "handover",
+    /** The agent's own slash commands and skills, suggested in the composer. */
+    val commands: List<AgentCommand> = emptyList(),
 ) {
     val contextPercent: Int? get() = if (contextUsed != null && contextSize != null && contextSize > 0) (contextUsed * 100 / contextSize).toInt() else null
 
@@ -137,6 +139,7 @@ data class SessionInfo(
                 },
                 routineId = o.optStringOrNull("routine_id"),
                 compact = o.optString("compact", "handover"),
+                commands = AgentCommand.list(o.optJSONArray("commands")),
             )
         }
     }
@@ -332,7 +335,24 @@ data class EngineInfo(
     val steering: Boolean = false,
     /** Why the agent cannot run as set up now (its profile has no key, its sign-in account is not signed in). */
     val problem: String? = null,
+    /** What the agent last listed as its slash commands and skills, for a new task before its chat exists. */
+    val commands: List<AgentCommand> = emptyList(),
 )
+
+/**
+ * One of an agent's own slash commands or skills (ACP `available_commands_update`). Codex names its skills `$name`;
+ * everything else is typed as `/name`. A pick is sent as plain text and the agent runs it.
+ */
+data class AgentCommand(val name: String, val description: String, val hint: String?) {
+    val label: String get() = if (name.startsWith("$")) name else "/$name"
+
+    companion object {
+        fun list(a: JSONArray?): List<AgentCommand> = a.objects().mapNotNull {
+            val name = it.optString("name")
+            if (name.isBlank()) null else AgentCommand(name, it.optString("description"), it.optStringOrNull("hint"))
+        }
+    }
+}
 
 /** A gateway profile managed from Settings. The key itself never comes back from the server. */
 data class ProfileInfo(

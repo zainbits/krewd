@@ -134,6 +134,7 @@ class CrewApi(val baseUrl: String, private val token: String, val route: Route) 
                     config = ConfigOption.list(it.optJSONArray("config_options")),
                     steering = it.optBoolean("steering"),
                     problem = it.optStringOrNull("problem"),
+                    commands = AgentCommand.list(it.optJSONArray("commands")),
                 )
             },
             workdir = o.optString("workdir"),
