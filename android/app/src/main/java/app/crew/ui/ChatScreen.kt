@@ -73,6 +73,7 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -108,6 +109,8 @@ fun ChatScreen(state: UiState, viewModel: CrewViewModel) {
     val items = state.timeline + (session?.let { viewModel.localRows(it.id) } ?: emptyList())
     val rows = items.asReversed()
     val busy = session?.isBusy == true
+    // The chat agent's own commands and skills: suggested in the composer, shown as pills in messages.
+    val commands = session?.let { s -> s.commands.ifEmpty { state.engine(s.engine)?.commands.orEmpty() } }.orEmpty()
     val rowCount = items.size
     val lastLength = (items.lastOrNull() as? TextItem)?.text?.length ?: 0
 
@@ -148,7 +151,7 @@ fun ChatScreen(state: UiState, viewModel: CrewViewModel) {
             reverseLayout = true,
             verticalArrangement = Arrangement.spacedBy(10.dp, Alignment.Bottom),
         ) {
-            items(rows, key = { it.key }) { item -> ChatRow(item, viewModel, session?.isBusy == true) }
+            items(rows, key = { it.key }) { item -> ChatRow(item, viewModel, session?.isBusy == true, commands) }
             if (state.timelineLoading && rows.isEmpty()) {
                 item(key = "loading") { CircularProgressIndicator(Modifier.padding(24.dp)) }
             }
@@ -205,7 +208,7 @@ fun ChatScreen(state: UiState, viewModel: CrewViewModel) {
                     contextUsed = session.contextUsed,
                     contextSize = session.contextSize,
                     steering = state.engine(session.engine)?.steering == true,
-                    commands = session.commands.ifEmpty { state.engine(session.engine)?.commands.orEmpty() },
+                    commands = commands,
                     files = files,
                     hasTabs = tabs.isNotEmpty(),
                     onSend = viewModel::send,
@@ -306,6 +309,11 @@ private fun Composer(
     val text = value.text
     val query = if (value.selection.collapsed) commandQuery(text, value.selection.start) else null
     val matches = remember(commands, query) { matchCommands(commands, query) }
+    // The agent's own commands and skills show as pills, so they read apart from plain text.
+    var layout by remember { mutableStateOf<TextLayoutResult?>(null) }
+    val ranges = remember(text, commands) { commandRanges(text, commands) }
+    val ink = MaterialTheme.colorScheme.primary
+    val highlight = remember(commands, ink) { CommandHighlight(commands, ink) }
     // Steer where the agent supports it, otherwise queue. Queue and interrupt work with every agent.
     var delivery by rememberSaveable(steering) { mutableStateOf(if (steering) Delivery.Steer else Delivery.Queue) }
     var deliveryMenu by remember { mutableStateOf(false) }
@@ -327,6 +335,8 @@ private fun Composer(
             BasicTextField(
                 value = value,
                 onValueChange = { value = it },
+                visualTransformation = highlight,
+                onTextLayout = { layout = it },
                 textStyle = MaterialTheme.typography.bodyLarge.copy(color = colors.onSurface),
                 cursorBrush = SolidColor(colors.primary),
                 maxLines = 8,
@@ -340,7 +350,7 @@ private fun Composer(
                                 color = colors.onSurfaceVariant,
                             )
                         }
-                        field()
+                        Box(Modifier.commandPills(layout, ranges, ink.copy(alpha = 0.16f))) { field() }
                     }
                 },
             )
@@ -509,13 +519,13 @@ private fun TokenLine(label: String, tokens: Long) {
 }
 
 @Composable
-private fun ChatRow(item: ChatItem, viewModel: CrewViewModel, busy: Boolean) {
+private fun ChatRow(item: ChatItem, viewModel: CrewViewModel, busy: Boolean, commands: List<AgentCommand>) {
     when (item) {
         is UserItem -> when (item.purpose) {
             "routine" -> RoutineRunRow(item)
             "compact" -> CompactRow(item)
             "switch" -> SwitchPendingRow(item, viewModel.state.value.engine(item.switchTo)?.name ?: item.switchTo ?: "another agent")
-            else -> UserRow(item, busy, onResend = { item.clientId?.let(viewModel::resend) })
+            else -> UserRow(item, busy, commands, onResend = { item.clientId?.let(viewModel::resend) })
         }
         is TextItem -> if (item.isThought) ThoughtRow(item.text) else SelectionContainer { Markdown(item.text) }
         is ToolItem -> ToolRow(item, viewModel::toolImage)
@@ -546,7 +556,7 @@ private fun ChatRow(item: ChatItem, viewModel: CrewViewModel, busy: Boolean) {
 }
 
 @Composable
-private fun UserRow(item: UserItem, busy: Boolean, onResend: () -> Unit) {
+private fun UserRow(item: UserItem, busy: Boolean, commands: List<AgentCommand>, onResend: () -> Unit) {
     val failed = item.state == "failed"
     val onBubble = if (failed) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onPrimaryContainer
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
@@ -567,7 +577,16 @@ private fun UserRow(item: UserItem, busy: Boolean, onResend: () -> Unit) {
                     }
                 }
                 if (item.text.isNotBlank()) {
-                    SelectionContainer { Text(item.text, color = onBubble) }
+                    val ranges = remember(item.text, commands) { commandRanges(item.text, commands) }
+                    var laid by remember { mutableStateOf<TextLayoutResult?>(null) }
+                    SelectionContainer {
+                        Text(
+                            highlightCommands(item.text, ranges, onBubble),
+                            color = onBubble,
+                            onTextLayout = { laid = it },
+                            modifier = Modifier.commandPills(laid, ranges, onBubble.copy(alpha = 0.13f)),
+                        )
+                    }
                 }
                 if (item.attachments.isNotEmpty()) SentFiles(item.attachments, onBubble)
                 DeliveryLine(item, busy, onBubble)

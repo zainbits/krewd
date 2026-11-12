@@ -196,6 +196,7 @@ class Hub:
         self.scheduler: asyncio.Task | None = None
         self.gateways = Gateways(settings.port)
         self.probe_failed: dict[str, float] = {}  # engine id -> when its last probe failed
+        self.probe_tasks: set[asyncio.Task[None]] = set()  # probes in flight, stopped on close
         self.restart_after_turn: set[str] = set()  # agents whose profile changed during a turn
         self.restarted: dict[str, float] = {}  # agent -> when its process was last stopped on purpose
         self.listed_on: dict[str, str] = {}  # agent -> the profile ("" its sign-in account) its options were listed on
@@ -233,6 +234,9 @@ class Hub:
         if self.scheduler:
             self.scheduler.cancel()
             await asyncio.gather(self.scheduler, return_exceptions=True)
+        for task in list(self.probe_tasks):
+            task.cancel()
+        await asyncio.gather(*self.probe_tasks, return_exceptions=True)
         workers = [rt.worker for rt in self.runtimes.values() if rt.worker]
         for worker in workers:
             worker.cancel()
@@ -271,7 +275,9 @@ class Hub:
             problem = self._problem(engine)
             if unknown and retry and engine.id not in self.probing and not self.closing and not problem:
                 self.probing.add(engine.id)
-                asyncio.create_task(self._probe(engine.id))
+                task = asyncio.create_task(self._probe(engine.id))
+                self.probe_tasks.add(task)
+                task.add_done_callback(self.probe_tasks.discard)
             listing.append({
                 "id": engine.id,
                 "name": engine.name,
@@ -333,7 +339,7 @@ class Hub:
                 await self._remember_engine(
                     engine_id, config_options=normalise_config(result.get("configOptions")), modes=result.get("modes")
                 )
-                # Some agents (OpenCode) list their commands and skills only after answering session/new.
+                # An agent may list its commands and skills only after answering session/new.
                 for _ in range(30):
                     if self.closing or (self.engine_info.get(engine_id) or {}).get("commands") is not None:
                         break

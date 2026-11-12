@@ -56,7 +56,6 @@ data class CrewLook(val body: FaceBody, val color: Color)
 
 private val Coral = Color(0xFFFFB4A1)
 private val Mint = Color(0xFF8FD9C0)
-private val Lilac = Color(0xFFCDB8FF)
 private val EXTRA = listOf(Color(0xFFA8C8FF), Color(0xFFF2D27A), Color(0xFFF5B0C8), Color(0xFF9EE0E8))
 val FaceEyes = Color(0xFF16181D)
 
@@ -67,7 +66,6 @@ fun lookFor(engineId: String?, engines: List<EngineInfo>): CrewLook {
     return when {
         "claude" in name -> CrewLook(FaceBody.Round, Coral)
         "codex" in name || "openai" in name -> CrewLook(FaceBody.Square, Mint)
-        "opencode" in name -> CrewLook(FaceBody.Egg, Lilac)
         else -> {
             val i = engines.indexOfFirst { it.id == engineId }.coerceAtLeast(0)
             CrewLook(FaceBody.entries[i % FaceBody.entries.size], EXTRA[i % EXTRA.size])

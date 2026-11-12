@@ -25,8 +25,6 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TextField
-import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -42,6 +40,10 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.TextRange
+import androidx.compose.foundation.layout.Box
+import androidx.compose.ui.text.TextLayoutResult
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
@@ -124,23 +126,37 @@ fun NewTaskSheet(state: UiState, viewModel: CrewViewModel, initialEngine: String
                     viewModel.setNewTaskText(field.text)
                 }, Modifier.padding(top = 6.dp))
             }
-            TextField(
+            val colors = MaterialTheme.colorScheme
+            val ink = colors.primary
+            val commands = engine?.commands.orEmpty()
+            val highlight = remember(commands, ink) { CommandHighlight(commands, ink) }
+            val ranges = remember(field.text, commands) { commandRanges(field.text, commands) }
+            var layout by remember { mutableStateOf<TextLayoutResult?>(null) }
+            BasicTextField(
                 value = field,
                 onValueChange = {
                     field = it
                     viewModel.setNewTaskText(it.text)
                 },
-                placeholder = { Text("What should Crew do?", fontSize = 22.sp) },
-                textStyle = MaterialTheme.typography.headlineSmall.copy(fontWeight = FontWeight.Medium, lineHeight = 30.sp),
+                visualTransformation = highlight,
+                onTextLayout = { layout = it },
+                textStyle = MaterialTheme.typography.headlineSmall.copy(
+                    fontWeight = FontWeight.Medium,
+                    lineHeight = 30.sp,
+                    color = colors.onSurface,
+                ),
+                cursorBrush = SolidColor(colors.primary),
                 minLines = 3,
                 maxLines = 8,
-                colors = TextFieldDefaults.colors(
-                    focusedContainerColor = Color.Transparent,
-                    unfocusedContainerColor = Color.Transparent,
-                    focusedIndicatorColor = Color.Transparent,
-                    unfocusedIndicatorColor = Color.Transparent,
-                ),
                 modifier = Modifier.fillMaxWidth().focusRequester(focus),
+                decorationBox = { inner ->
+                    Box(Modifier.padding(horizontal = 16.dp, vertical = 16.dp)) {
+                        if (field.text.isEmpty()) {
+                            Text("What should Crew do?", fontSize = 22.sp, color = colors.onSurfaceVariant)
+                        }
+                        Box(Modifier.commandPills(layout, ranges, ink.copy(alpha = 0.16f))) { inner() }
+                    }
+                },
             )
             PendingFiles(files, onRemove = { viewModel.removeAttachment(NEW_DRAFT, it) })
             if (state.engines.isNotEmpty()) {

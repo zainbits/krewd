@@ -71,7 +71,7 @@ One chat can move between agents (Claude Code, Codex, any ACP agent) and stays o
 
 ## Compact
 
-Where the agent advertises a `compact` slash command (Claude Code and Codex do), Crew sends `/compact` as the next prompt and the agent keeps its session. Otherwise (OpenCode) the agent is asked for a handover summary; Crew then closes that agent session, opens a fresh one in the same chat, and puts the handover in front of the next message. The chat history in Crew is never changed. `usage` is cleared after a handover.
+Where the agent advertises a `compact` slash command (Claude Code and Codex do), Crew sends `/compact` as the next prompt and the agent keeps its session. Otherwise the agent is asked for a handover summary; Crew then closes that agent session, opens a fresh one in the same chat, and puts the handover in front of the next message. The chat history in Crew is never changed. `usage` is cleared after a handover.
 
 ## Routines
 

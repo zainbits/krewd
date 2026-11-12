@@ -16,6 +16,18 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextLayoutResult
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.input.OffsetMapping
+import androidx.compose.ui.text.input.TransformedText
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -41,7 +53,7 @@ fun commandQuery(text: String, cursor: Int): CommandQuery? {
     }
 }
 
-/** The agent's commands that fit [query]: names starting with it first, then names or descriptions containing it. */
+/** The agent's commands that fit [query]: names starting with it first, then names containing it. */
 fun matchCommands(commands: List<AgentCommand>, query: CommandQuery?): List<AgentCommand> {
     if (query == null) return emptyList()
     val sigil = query.token.first()
@@ -50,7 +62,7 @@ fun matchCommands(commands: List<AgentCommand>, query: CommandQuery?): List<Agen
     val name = { c: AgentCommand -> c.label.drop(1).lowercase() }
     val starts = own.filter { name(it).startsWith(typed) }
     val contains = if (typed.isEmpty()) emptyList() else own.filter {
-        it !in starts && (name(it).contains(typed) || it.description.lowercase().contains(typed))
+        it !in starts && name(it).contains(typed)
     }
     val found = starts + contains
     // Typed out in full: nothing left to suggest.
@@ -109,3 +121,65 @@ fun CommandSuggestions(matches: List<AgentCommand>, onPick: (AgentCommand) -> Un
         }
     }
 }
+
+private val WORD = Regex("\\S+")
+
+/**
+ * Where the agent will take the text as one of its commands or skills, the same rule the agents use: one of its own
+ * `/name` opening the message, or one of its `$name` (Codex skills) anywhere. Everything else is plain text.
+ */
+fun commandRanges(text: String, commands: List<AgentCommand>): List<IntRange> {
+    if (commands.isEmpty() || ('/' !in text && '$' !in text)) return emptyList()
+    val labels = commands.mapTo(HashSet()) { it.label }
+    return WORD.findAll(text).mapNotNull { match ->
+        val word = match.value.trimEnd('.', ',', ';', ':', '!', '?', ')', '"', '\'')
+        val start = match.range.first
+        val known = word in labels && when (word.first()) {
+            '/' -> text.substring(0, start).isBlank()
+            '$' -> true
+            else -> false
+        }
+        if (known) start until start + word.length else null
+    }.toList()
+}
+
+/** [text] with [ranges] in the command ink. */
+fun highlightCommands(text: String, ranges: List<IntRange>, ink: Color): AnnotatedString = buildAnnotatedString {
+    append(text)
+    ranges.forEach { addStyle(SpanStyle(color = ink, fontWeight = FontWeight.SemiBold), it.first, it.last + 1) }
+}
+
+/** Colours the agent's commands in a text field as they are typed; the pill behind them is [commandPills]. */
+data class CommandHighlight(val commands: List<AgentCommand>, val ink: Color) : VisualTransformation {
+    override fun filter(text: AnnotatedString): TransformedText =
+        TransformedText(highlightCommands(text.text, commandRanges(text.text, commands), ink), OffsetMapping.Identity)
+}
+
+/** A soft rounded pill behind each of [ranges] of the text laid out in [layout] (one per line it spans). */
+fun Modifier.commandPills(layout: TextLayoutResult?, ranges: List<IntRange>, fill: Color): Modifier =
+    if (ranges.isEmpty()) this else drawBehind {
+        val laid = layout ?: return@drawBehind
+        val length = laid.layoutInput.text.length
+        val padX = 4.dp.toPx()
+        val padY = 1.dp.toPx()
+        for (range in ranges) {
+            if (range.last >= length) continue
+            val firstLine = laid.getLineForOffset(range.first)
+            val lastLine = laid.getLineForOffset(range.last)
+            for (line in firstLine..lastLine) {
+                val from = if (line == firstLine) range.first else laid.getLineStart(line)
+                val to = if (line == lastLine) range.last else laid.getLineEnd(line, visibleEnd = true) - 1
+                if (to < from) continue
+                val left = laid.getBoundingBox(from).left
+                val right = laid.getBoundingBox(to).right
+                val top = laid.getLineTop(line) + padY
+                val height = laid.getLineBottom(line) - laid.getLineTop(line) - 2 * padY
+                drawRoundRect(
+                    fill,
+                    topLeft = Offset(left - padX, top),
+                    size = Size(right - left + 2 * padX, height),
+                    cornerRadius = CornerRadius(height / 2, height / 2),
+                )
+            }
+        }
+    }

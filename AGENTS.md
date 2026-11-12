@@ -90,7 +90,6 @@ Each agent runs on one thing at a time: its own sign-in account (the owner's sub
 - CLIs: Codex from `CODEX_PATH`; Claude Code from `CLAUDE_PATH`, else the `claude` beside the engine's command (the standalone claude-agent-acp ships one), else `claude` on PATH.
 - The global configs must not point at a gateway (`env` in `~/.claude/settings.json`, `model_provider` in `~/.codex/config.toml`): Claude Code's settings env would override the profile Crew gives it.
 - `./master.sh doctor` shows what each agent runs on and its sign-in, and checks every profile with every agent that can use it by asking the gateway for the key's models (no tokens spent).
-- OpenCode keeps its own providers in its own config; it has no Crew profiles.
 
 ## Setting up a new machine
 
@@ -105,7 +104,7 @@ Prerequisites that `master.sh` checks but does not install:
 5. Brave and browser-harness.
    - Install browser-harness with `uv tool install browser-harness`.
    - Put its skill in `~/.agents/skills/browser-harness/`.
-   - Skills live in one place, `~/.agents/skills`. Codex and OpenCode read it already; Claude Code reads only `~/.claude/skills`, so make that a link to the whole folder: `ln -s ../.agents/skills ~/.claude/skills` (move an existing `~/.claude/skills` aside first). A skill added to `~/.agents/skills` then reaches every engine.
+   - Skills live in one place, `~/.agents/skills`. Codex reads it already; Claude Code reads only `~/.claude/skills`, so make that a link to the whole folder: `ln -s ../.agents/skills ~/.claude/skills` (move an existing `~/.claude/skills` aside first). A skill added to `~/.agents/skills` then reaches every engine.
    - Turn telemetry off. The engine environment in `engines.toml` already sets `BH_TELEMETRY=0`.
 6. The agents' instructions: append `deploy/agents-section.md` to `$CREW_WORKDIR/AGENTS.md`, which is `~/AGENTS.md` by default.
 7. Profiles and sign-ins: add `gateway` (and `CODEX_PATH` for Codex) to the engines in `engines.toml`, restart, then sign the agents in, add gateways and pick what each agent runs on from the app (Settings > Agents, Settings > Profiles). By hand instead: `deploy/profiles.example.toml` to `~/.config/crew/profiles.toml`, keys in `~/.config/crew/keys.env` (mode 600).
