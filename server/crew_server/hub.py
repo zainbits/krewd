@@ -213,7 +213,9 @@ class Hub:
         for row in await self.pool.fetch("select * from engines"):
             self.engine_info[row["id"]] = {
                 "agent": row["agent"], "config_options": row["config_options"] or [], "modes": row["modes"],
-                "steering": row["steering"], "commands": row["commands"],
+                # Lists saved before 0.13 hold names only: None asks the agent again, for the descriptions.
+                "steering": row["steering"],
+                "commands": None if any(isinstance(c, str) for c in row["commands"] or []) else row["commands"],
             }
         await self._recover()
         # Messages stored before a restart still run, in order.
@@ -261,7 +263,7 @@ class Hub:
         listing = []
         for engine in self.settings.engines.values():
             info = self.engine_info.get(engine.id) or {}
-            unknown = not info.get("config_options") or info.get("steering") is None
+            unknown = not info.get("config_options") or info.get("steering") is None or info.get("commands") is None
             profile = self._profile_of(engine)
             if engine.gateway and self.listed_on.get(engine.id) != (profile.id if profile else ""):
                 unknown = True  # its models were listed on another profile (or before this start): ask again
@@ -338,6 +340,8 @@ class Hub:
                     await asyncio.sleep(0.1)
                 if self.closing:
                     return
+                if (self.engine_info.get(engine_id) or {}).get("commands") is None:
+                    await self._remember_engine(engine_id, commands=[])  # lists none: do not probe again for them
                 caps = proc.capabilities.get("sessionCapabilities") or {}
                 for method in ("delete", "close"):
                     if method in caps:
