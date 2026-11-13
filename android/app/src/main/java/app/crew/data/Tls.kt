@@ -53,6 +53,37 @@ object Tls {
         return conn
     }
 
+    /**
+     * Pairing a new phone that has no pin yet: any certificate is accepted for that one exchange, and the pin of the
+     * one seen is recorded. Nothing secret goes over it (public keys and signatures), and the phone signs the pin it
+     * saw, so the server refuses the pairing if someone in between showed another certificate.
+     */
+    class Capture {
+        @Volatile var pin: String? = null
+        @Volatile var trustedBySystem: Boolean = false
+    }
+
+    fun openCapturing(url: String, capture: Capture): HttpURLConnection {
+        val conn = URL(url).openConnection() as HttpURLConnection
+        if (conn is HttpsURLConnection) {
+            val trust = object : X509TrustManager {
+                override fun checkServerTrusted(chain: Array<out X509Certificate>, authType: String) {
+                    if (chain.isEmpty()) throw CertificateException("no certificate")
+                    capture.pin = pinOf(chain[0])
+                    capture.trustedBySystem = runCatching { system.checkServerTrusted(chain, authType) }.isSuccess
+                }
+                override fun checkClientTrusted(chain: Array<out X509Certificate>, authType: String) =
+                    throw CertificateException("not a server")
+                override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
+            }
+            conn.sslSocketFactory = SSLContext.getInstance("TLS").apply { init(null, arrayOf(trust), null) }.socketFactory
+            conn.hostnameVerifier = HostnameVerifier { host, session ->
+                !capture.trustedBySystem || HttpsURLConnection.getDefaultHostnameVerifier().verify(host, session)
+            }
+        }
+        return conn
+    }
+
     /** After a request: was the server the pinned one, one an authority vouches for, or plain HTTP? */
     fun verifiedBy(conn: HttpURLConnection, pin: String): Verified {
         if (conn !is HttpsURLConnection) return Verified.Plain

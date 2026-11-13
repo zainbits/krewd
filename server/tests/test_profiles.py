@@ -287,7 +287,7 @@ async def managed(tmp_path, gateway, fake_codex, fake_claude):
     pool = await db.connect(DATABASE_URL)
     await pool.execute(
         "drop table if exists session_agents, routine_triggers, routine_runs, routine_versions, routines, messages, events, approvals, sessions,"
-        " engines, schema_version cascade"
+        " engines, devices, app_prefs, schema_version cascade"
     )
     engines, _ = setup(tmp_path, gateway, fake_codex, claude=fake_claude)
     settings = Settings(

@@ -43,6 +43,16 @@ class MainActivity : ComponentActivity() {
         viewModel.inForeground = true
     }
 
+    override fun onResume() {
+        super.onResume()
+        viewModel.activity = java.lang.ref.WeakReference(this)
+    }
+
+    override fun onPause() {
+        if (viewModel.activity?.get() === this) viewModel.activity = null
+        super.onPause()
+    }
+
     override fun onStop() {
         viewModel.inForeground = false
         super.onStop()

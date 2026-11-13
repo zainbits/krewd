@@ -10,7 +10,7 @@ import asyncpg
 
 SCHEMA_VERSION = 6
 MIGRATIONS = {1: "schema.sql", 2: "schema_v2.sql", 3: "schema_v3.sql", 4: "schema_v4.sql", 5: "schema_v5.sql",
-              6: "schema_v6.sql"}
+              6: "schema_v6.sql", 7: "schema_v7.sql"}
 
 
 async def _init_connection(conn: asyncpg.Connection) -> None:

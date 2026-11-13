@@ -18,6 +18,16 @@ import app.crew.data.ChatItem
 import app.crew.data.ConfigOption
 import app.crew.data.ConnectionSettings
 import app.crew.data.CrewApi
+import app.crew.data.Credentials
+import app.crew.data.Device
+import app.crew.data.Keys
+import app.crew.data.Presence
+import app.crew.data.PresenceCancelled
+import app.crew.data.SecretAsk
+import app.crew.data.Tls
+import app.crew.data.U2f
+import app.crew.data.objects
+import app.crew.data.optStringOrNull
 import app.crew.data.Discovery
 import app.crew.data.EngineDefaults
 import app.crew.data.EngineInfo
@@ -91,6 +101,12 @@ data class UiState(
     val engines: List<EngineInfo> = emptyList(),
     val sessions: List<SessionInfo> = emptyList(),
     val approvals: List<Approval> = emptyList(),
+    /** Sign-in requests from agents waiting for the owner (the values never pass through the agent). */
+    val secrets: List<SecretAsk> = emptyList(),
+    /** Settings > Security: the owner's phones; null until loaded. */
+    val devices: List<Device>? = null,
+    /** While pairing or removing a phone: what the owner should do now ("Hold your security key..."). */
+    val securityStep: String? = null,
     val navTab: Int = NavTab.TASKS,
     val openSessionId: String? = null,
     /** The chat opened last: "Add to chat" goes there first. */
@@ -169,6 +185,15 @@ class CrewViewModel(private val app: Application) {
     val state: StateFlow<UiState> = _state.asStateFlow()
 
     @Volatile private var api: CrewApi? = null
+    @Volatile private var creds: Credentials = Credentials.of(prefs.load())
+
+    /** The activity in front, for the fingerprint prompt and the security key's NFC tap. */
+    @Volatile var activity: java.lang.ref.WeakReference<android.app.Activity>? = null
+
+    init {
+        // The app's own picks are kept on the server too, so a new phone starts where the old one was.
+        prefs.onChange = { key, value -> api?.let { client -> scope.launch(Dispatchers.IO) { runCatching { client.setPref(key, value) } } } }
+    }
     private var loop: Job? = null
     private var timeline: Timeline? = null
     private val pendingLive = ArrayList<Event>()
@@ -192,6 +217,7 @@ class CrewViewModel(private val app: Application) {
     fun connect() {
         loop?.cancel()
         val settings = _state.value.settings
+        if (settings.token != creds.token || settings.deviceId != creds.deviceId) creds = Credentials.of(settings)
         if (!settings.configured) {
             _state.update { it.copy(connection = Connection.NotSetUp) }
             return
@@ -209,13 +235,15 @@ class CrewViewModel(private val app: Application) {
     fun openConnectLink(uri: android.net.Uri) {
         if (uri.scheme != "crew" || uri.host != "connect") return
         val addresses = uri.getQueryParameters("a").flatMap(ConnectionSettings::parseAddresses).distinct()
+        // No token once the owner's security key is registered: this phone then pairs with the key.
         val token = uri.getQueryParameter("t").orEmpty()
-        if (addresses.isEmpty() || token.isBlank()) {
+        if (addresses.isEmpty()) {
             _state.update { it.copy(message = "That connect link is incomplete") }
             return
         }
         val pin = uri.getQueryParameter("p").orEmpty()
-        _state.update { it.copy(pendingConnect = ConnectionSettings(addresses, token, pin), navTab = NavTab.SETTINGS) }
+        val keep = prefs.load().takeIf { it.paired && token.isBlank() }  // same server, already paired: keep this phone's id
+        _state.update { it.copy(pendingConnect = ConnectionSettings(addresses, token, pin, keep?.deviceId.orEmpty()), navTab = NavTab.SETTINGS) }
     }
 
     fun answerConnectLink(accept: Boolean) {
@@ -229,12 +257,12 @@ class CrewViewModel(private val app: Application) {
      * change may have moved it) and a found address is saved first in the list.
      */
     private fun reach(settings: ConnectionSettings): CrewApi = try {
-        CrewApi.resolve(settings)
+        CrewApi.resolve(settings, creds)
     } catch (e: Exception) {
         if (settings.pin.isBlank()) throw e
         val found = Discovery.find(app, settings.pin).filterNot { it in settings.addresses }
         if (found.isEmpty()) throw e
-        val client = runCatching { CrewApi.resolve(settings, found) }.getOrNull()?.takeIf { it.verified == Verified.Pin } ?: throw e
+        val client = runCatching { CrewApi.resolve(settings, creds, found) }.getOrNull()?.takeIf { it.verified == Verified.Pin } ?: throw e
         prefs.save(settings.copy(addresses = listOf(client.baseUrl) + settings.addresses))
         _state.update { it.copy(settings = prefs.load()) }
         client
@@ -269,6 +297,8 @@ class CrewViewModel(private val app: Application) {
                 api = client
                 val sessions = client.sessions().filterNot { it.id == _state.value.pendingDelete?.id }
                 val approvals = client.approvals()
+                val secrets = runCatching { client.secrets() }.getOrDefault(emptyList())
+                syncPrefs(client)
                 val routines = runCatching { client.routines() }.getOrDefault(_state.value.routines)
                 val wasRestarting = _state.value.restarting && sawDown
                 _state.update {
@@ -277,6 +307,7 @@ class CrewViewModel(private val app: Application) {
                         engines = server.engines,
                         sessions = sessions,
                         approvals = approvals,
+                        secrets = secrets,
                         routines = routines,
                         restarting = if (wasRestarting) false else it.restarting,
                         message = if (wasRestarting) "Crew is back" else it.message,
@@ -308,7 +339,14 @@ class CrewViewModel(private val app: Application) {
                 }
                 if (_state.value.restarting) sawDown = true
                 _state.update { it.copy(connection = Connection.Offline(reason)) }
-                if (e is ApiException && e.code == 401) return
+                if (e is ApiException && e.code == 401) {
+                    if (!creds.paired) return
+                    creds.session = null
+                    if (e.message.orEmpty().contains("no longer allowed")) {
+                        _state.update { it.copy(connection = Connection.Offline("This phone was removed from Crew. Set it up again in Settings > Security")) }
+                        return
+                    }
+                }
                 // While the server restarts, try every second so the app is back as soon as it is.
                 val wait = if (_state.value.restarting) 1_000L else Timing.RETRY_DELAYS_MS[minOf(attempt, Timing.RETRY_DELAYS_MS.lastIndex)]
                 delay(wait)
@@ -356,6 +394,19 @@ class CrewViewModel(private val app: Application) {
             }
             "error" -> lastError[sid] = event.payload.optString("message", "Something went wrong")
             "routine" -> routineEvent(event.payload)
+            "secret" -> {
+                val ask = SecretAsk.from(event.payload)
+                _state.update { s ->
+                    val rest = s.secrets.filterNot { it.id == ask.id }
+                    s.copy(secrets = if (ask.pending) rest + ask else rest)
+                }
+                live[sid]?.let {
+                    it.waiting = ask.pending
+                    it.activity = if (ask.pending) "Needs you: sign in on ${ask.site}" else "Continuing"
+                    pushLive()
+                }
+                if (ask.pending && !viewing(sid)) notifier.approval(sid, titleOf(sid), engineName(sid), "sign in on ${ask.site}")
+            }
             "approval" -> {
                 val approval = Approval.from(event.payload)
                 _state.update { s ->
@@ -839,8 +890,36 @@ class CrewViewModel(private val app: Application) {
     }
 
     /** Create (id null) or change a profile; [done] gets null on success, else what went wrong. */
-    fun saveProfile(id: String?, fields: JSONObject, key: String?, done: (String?) -> Unit) = withResult(done) { client ->
-        val target = if (key.isNullOrBlank()) client else CrewApi.forKeys(client, _state.value.settings)
+    fun saveProfile(id: String?, fields: JSONObject, key: String?, done: (String?) -> Unit) {
+        if (!key.isNullOrBlank() && _state.value.settings.paired) return saveProfileSigned(id, fields, key, done)
+        saveProfilePlain(id, fields, key, done)
+    }
+
+    /** A gateway key on a paired phone: the owner's fingerprint signs this exact request. */
+    private fun saveProfileSigned(id: String?, fields: JSONObject, key: String, done: (String?) -> Unit) {
+        val client = api ?: return done("Not connected to Crew")
+        scope.launch {
+            val error = try {
+                val target = withContext(Dispatchers.IO) { CrewApi.forKeys(client, _state.value.settings, creds) }
+                fields.put("key", key.trim())
+                val method = if (id == null) "POST" else "PATCH"
+                val path = if (id == null) "/api/profiles" else "/api/profiles/$id"
+                val text = fields.toString()
+                val header = presence(target, method, path, text, "Save the gateway key", "Crew stores it on the server")
+                withContext(Dispatchers.IO) {
+                    target.send(method, path, text, mapOf("X-Crew-Presence" to header))
+                    reloadProfiles(client)
+                }
+                null
+            } catch (e: Exception) {
+                e.message ?: "Request failed"
+            }
+            done(error)
+        }
+    }
+
+    private fun saveProfilePlain(id: String?, fields: JSONObject, key: String?, done: (String?) -> Unit) = withResult(done) { client ->
+        val target = if (key.isNullOrBlank()) client else CrewApi.forKeys(client, _state.value.settings, creds)
         if (!key.isNullOrBlank()) fields.put("key", key.trim())
         target.saveProfile(id, fields)
         reloadProfiles(client)
@@ -1221,6 +1300,176 @@ class CrewViewModel(private val app: Application) {
         if (s != null) scope.launch(Dispatchers.IO) { runCatching { s.close() } }
     }
 
+    // security: this phone's keys, the owner's security key, fingerprint-signed requests
+
+    /** Signs one request with the presence key after the owner's fingerprint; returns the X-Crew-Presence header. */
+    private suspend fun presence(client: CrewApi, method: String, path: String, text: String, title: String, subtitle: String): String {
+        val nonce = withContext(Dispatchers.IO) { client.nonce("presence").getString("nonce") }
+        val front = activity?.get() ?: throw java.io.IOException("Open Crew to confirm")
+        val message = "crew-presence-v1\n$nonce\n$method\n$path\n${b64(sha256(text.toByteArray()))}"
+        val sig = withContext(Dispatchers.Main) { Presence.sign(front, title, subtitle, message.toByteArray()) }
+        return "$nonce.${b64(sig)}"
+    }
+
+    fun loadSecurity() = act { client ->
+        val o = client.securityState()
+        val devices = o.optJSONArray("devices").objects().map(Device::from)
+        _state.update { it.copy(devices = devices) }
+    }
+
+    /** A client for pairing: the normal check, or, for a phone with no pin yet, the capturing one (see Tls.Capture). */
+    private fun pairingClient(settings: ConnectionSettings, setup: Credentials): CrewApi {
+        var last: Exception? = null
+        for (address in settings.addresses) {
+            val normal = CrewApi(address, setup, settings.pin)
+            try {
+                normal.probe(4_000)
+                return normal
+            } catch (e: Exception) {
+                last = e
+            }
+            if (settings.pin.isBlank()) {
+                val capturing = CrewApi(address, setup, "", Tls.Capture())
+                try {
+                    capturing.probe(4_000)
+                    return capturing
+                } catch (e: Exception) {
+                    last = e
+                }
+            }
+        }
+        throw last ?: java.io.IOException("Add the server's address first")
+    }
+
+    /**
+     * Pairs this phone with a tap of the owner's security key. The first phone (setup token) registers the key in
+     * the same tap; later phones need only the key. Afterwards the token is gone from this phone.
+     */
+    fun pairPhone(name: String, done: (String?) -> Unit) {
+        val front = activity?.get() ?: return done("Open Crew first")
+        scope.launch {
+            val error = try {
+                _state.update { it.copy(securityStep = "Getting ready…") }
+                val settings = prefs.load()
+                val setup = Credentials(settings.token, "")
+                val (client, n, keys) = withContext(Dispatchers.IO) {
+                    val client = pairingClient(settings, setup)
+                    Keys.delete()
+                    Triple(client, client.nonce("pair"), Keys.ensure())
+                }
+                val first = !n.optBoolean("paired")
+                if (first && settings.token.isBlank()) throw java.io.IOException("This server is not set up yet: open the code from ./master.sh token first")
+                val nonce = n.getString("nonce")
+                val deviceId = java.util.UUID.randomUUID().toString()
+                val pinSeen = client.pinSeen()
+                val (deviceKey, presenceKey) = keys
+                val payload = "$deviceId|${b64(sha256(deviceKey))}|${b64(sha256(presenceKey))}|$pinSeen"
+                val challenge = sha256("crew-u2f-v1\npair\n$nonce\n$payload".toByteArray())
+                _state.update { it.copy(securityStep = "Hold your security key flat against the back of the phone") }
+                val tap = U2f.tap(
+                    front, unb64(n.getString("app_param")), challenge,
+                    keyHandle = n.optStringOrNull("key_handle")?.let(::unb64),
+                    registerChallenge = if (first) sha256("crew-register\n$nonce".toByteArray()) else null,
+                )
+                _state.update { it.copy(securityStep = "Checking with Crew…") }
+                val body = JSONObject().put("nonce", nonce).put("device_id", deviceId).put("name", name.ifBlank { android.os.Build.MODEL })
+                    .put("pin_seen", pinSeen).put("device_key", b64(deviceKey)).put("presence_key", b64(presenceKey))
+                    .put("device_sig", b64(Keys.signWithDevice("crew-device-v1\npair\n$nonce\n$pinSeen".toByteArray())))
+                    .put("assertion", b64(tap.assertion))
+                tap.registration?.let { body.put("registration", b64(it)) }
+                val result = withContext(Dispatchers.IO) { client.pair(body, withToken = first) }
+                val capture = client.captured()
+                val pin = if (capture != null && !capture.trustedBySystem) capture.pin.orEmpty() else settings.pin
+                val paired = settings.copy(token = "", deviceId = result.getString("device_id"), pin = pin)
+                prefs.save(paired)
+                creds = Credentials.of(paired).also { it.session = result.optStringOrNull("session") }
+                _state.update { it.copy(settings = prefs.load(), message = "This phone is set up with your security key") }
+                connect()
+                null
+            } catch (e: Exception) {
+                e.message ?: "Pairing failed"
+            } finally {
+                _state.update { it.copy(securityStep = null) }
+            }
+            done(error)
+        }
+    }
+
+    /** Removes a phone from Crew, with a tap of the owner's security key. */
+    fun removeDevice(device: Device, done: (String?) -> Unit) {
+        val front = activity?.get() ?: return done("Open Crew first")
+        val client = api ?: return done("Not connected to Crew")
+        scope.launch {
+            val error = try {
+                val n = withContext(Dispatchers.IO) { client.nonce("revoke") }
+                val nonce = n.getString("nonce")
+                _state.update { it.copy(securityStep = "Hold your security key flat against the back of the phone") }
+                val tap = U2f.tap(front, unb64(n.getString("app_param")), sha256("crew-u2f-v1\nrevoke\n$nonce\n${device.id}".toByteArray()),
+                    keyHandle = unb64(n.getString("key_handle")))
+                withContext(Dispatchers.IO) {
+                    client.revokeDevice(device.id, JSONObject().put("nonce", nonce).put("assertion", b64(tap.assertion)))
+                }
+                if (device.current) {
+                    Keys.delete()
+                    prefs.save(prefs.load().copy(deviceId = ""))
+                    _state.update { it.copy(settings = prefs.load()) }
+                    connect()
+                } else {
+                    loadSecurity()
+                }
+                null
+            } catch (e: Exception) {
+                e.message ?: "Could not remove the phone"
+            } finally {
+                _state.update { it.copy(securityStep = null) }
+            }
+            done(error)
+        }
+    }
+
+    // the app's own settings on the server
+
+    private fun syncPrefs(client: CrewApi) {
+        val server = runCatching { client.serverPrefs() }.getOrNull() ?: return
+        if (server.length() == 0) {
+            prefs.syncedValues().forEach { (k, v) -> runCatching { client.setPref(k, v) } }  // first time: this phone's picks
+        } else {
+            prefs.apply(server)
+            _state.update { it.copy(highQuality = prefs.highQuality(), savedPrompts = prefs.savedPrompts()) }
+        }
+    }
+
+    // sign-in requests
+
+    /** Sends the owner's values for a sign-in request: fingerprint first, then Crew types them into the page. */
+    fun fillSecret(ask: SecretAsk, values: Map<String, String>, done: (String?) -> Unit) {
+        val client = api ?: return done("Not connected to Crew")
+        scope.launch {
+            val error = try {
+                if (!_state.value.settings.paired) throw java.io.IOException("Set this phone up with your security key first (Settings > Security)")
+                if (!client.secure) throw java.io.IOException("Not on an encrypted connection")
+                val path = "/api/secrets/${ask.id}/fill"
+                val text = JSONObject().put("values", JSONObject(values)).toString()
+                val header = presence(client, "POST", path, text, "Sign in on ${ask.site}", ask.reason.ifBlank { "Crew types it into the page" })
+                val result = SecretAsk.from(JSONObject(withContext(Dispatchers.IO) {
+                    client.send("POST", path, text, mapOf("X-Crew-Presence" to header))
+                }))
+                _state.update { s -> s.copy(secrets = s.secrets.filterNot { it.id == ask.id }) }
+                if (result.status == "filled") null else (result.error ?: "Not filled: ${result.status}")
+            } catch (e: PresenceCancelled) {
+                "Cancelled"
+            } catch (e: Exception) {
+                e.message ?: "Could not send it"
+            }
+            done(error)
+        }
+    }
+
+    fun cancelSecret(ask: SecretAsk) = act { client ->
+        client.send("POST", "/api/secrets/${ask.id}/cancel", "{}", emptyMap(), 20_000)
+        _state.update { s -> s.copy(secrets = s.secrets.filterNot { it.id == ask.id }) }
+    }
+
     private fun act(block: (CrewApi) -> Unit) {
         val client = api
         if (client == null) {
@@ -1265,3 +1514,9 @@ data class LiveTask(
 
 /** What a running task is doing, for the UI: [kind] is read, write, think or needs. */
 data class LiveInfo(val activity: String, val since: Long, val kind: String, val steps: Int)
+
+private fun sha256(data: ByteArray): ByteArray = java.security.MessageDigest.getInstance("SHA-256").digest(data)
+
+private fun b64(data: ByteArray): String = android.util.Base64.encodeToString(data, android.util.Base64.NO_WRAP)
+
+private fun unb64(text: String): ByteArray = android.util.Base64.decode(text, android.util.Base64.DEFAULT)

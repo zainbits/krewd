@@ -1,19 +1,23 @@
-"""HTTP API for the Crew apps. Every route except /api/health needs the bearer token."""
+"""HTTP API for the Crew apps. Every route except /api/health and the pairing ones needs a phone session (or the
+local token, from this machine); see security.py."""
 
 from __future__ import annotations
 
 import asyncio
+import time
 import hmac
 import uuid
 from datetime import datetime
 from contextlib import asynccontextmanager, suppress
 from typing import Any, Literal
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Path, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field, model_validator
 
 from . import __version__, tls
+from .secrets_store import SecretRequest, Secrets, origin as url_origin, parse_fields
+from .security import Principal, Security, SecurityError
 from . import files as shared_files
 from .attachments import TooLarge
 from .browser import Browser, BrowserUnavailable, TabGone
@@ -181,6 +185,16 @@ class TabView(BaseModel):
     scale: float = 0
 
 
+PREF_KEY = r"^[a-z0-9][a-z0-9_.-]{0,79}$"
+
+
+class SecretAsk(BaseModel):
+    tab_id: str | None = Field(default=None, max_length=200)
+    fields: list[dict[str, Any]] | None = Field(default=None, max_length=6)
+    submit: str = Field(default="enter", max_length=300)
+    reason: str = Field(default="", max_length=300)
+
+
 def create_app(hub: Hub, token: str, lifespan_hub: bool = True) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -199,11 +213,33 @@ def create_app(hub: Hub, token: str, lifespan_hub: bool = True) -> FastAPI:
 
     app = FastAPI(title="Crew", version=__version__, lifespan=lifespan)
     browser = Browser(hub.settings.cdp_port)
+    cert = hub.settings.tls_cert
+    security = Security(hub.settings, hub.pool, token, tls.pin(cert) if hub.settings.tls != "off" and cert.is_file() else None)
+    secrets_ = Secrets()
+    app.state.security = security
 
-    def require_token(authorization: str = Header(default="")) -> None:
+    def principal_of(request: Request, authorization: str) -> Principal:
         scheme, _, value = authorization.partition(" ")
-        if scheme.lower() != "bearer" or not hmac.compare_digest(value.strip().encode(), token.encode()):
-            raise HTTPException(status_code=401, detail="missing or wrong token")
+        if scheme.lower() != "bearer":
+            raise SecurityError("missing or wrong token", 401)
+        host = request.client.host if request.client else None
+        return security.authenticate(value, host, bool(request.scope.get("crew_tls")))
+
+    def require_token(request: Request, authorization: str = Header(default="")) -> Principal:
+        principal = principal_of(request, authorization)
+        request.state.principal = principal
+        return principal
+
+    async def require_presence(request: Request, principal: Principal = Depends(require_token)) -> Principal:
+        """A sensitive request: once a phone is paired, it needs the owner's fingerprint for this exact request."""
+        if security.paired:
+            await security.check_presence(principal, request.headers.get("x-crew-presence", ""), request.method,
+                                          request.url.path, await request.body())
+        return principal
+
+    @app.exception_handler(SecurityError)
+    async def security_error(_, exc: SecurityError):
+        return JSONResponse(status_code=exc.status, content={"detail": str(exc)})
 
     @app.exception_handler(NotFound)
     async def not_found(_, exc: NotFound):
@@ -264,9 +300,186 @@ def create_app(hub: Hub, token: str, lifespan_hub: bool = True) -> FastAPI:
             "workdir": str(hub.settings.workdir),
         }
 
-    def key_route(request: Request, body: ProfileFields) -> None:
+    async def key_route(request: Request, body: ProfileFields) -> None:
         if body.key and not verified_channel(request):
             raise HTTPException(403, "Keys are only accepted over HTTPS, never plain HTTP")
+        if body.key and security.paired:
+            await require_presence(request, request.state.principal)
+
+    # security: the owner's security key, phones and sessions
+
+    def crew_tls(request: Request) -> bool:
+        return bool(request.scope.get("crew_tls"))
+
+    async def json_body(request: Request) -> dict[str, Any]:
+        try:
+            body = await request.json()
+        except ValueError:
+            raise HTTPException(422, "expected JSON") from None
+        if not isinstance(body, dict):
+            raise HTTPException(422, "expected a JSON object")
+        return body
+
+    @app.post("/api/security/nonce")
+    async def security_nonce(request: Request) -> dict[str, Any]:
+        """A one-time value to sign (no login: it is useless without the phone's or the security key's key)."""
+        return security.nonce(str((await json_body(request)).get("purpose", "")))
+
+    @app.post("/api/security/pair", status_code=201)
+    async def security_pair(request: Request, authorization: str = Header(default="")) -> dict[str, Any]:
+        """Add a phone. The first comes with the setup token; later ones with a tap of the owner's security key."""
+        principal = None
+        if authorization:
+            try:
+                principal = principal_of(request, authorization)
+            except SecurityError:
+                principal = None
+        if not verified_channel(request):
+            raise HTTPException(403, "Phones are only added over HTTPS")
+        return await security.pair(await json_body(request), principal, crew_tls(request))
+
+    @app.post("/api/security/session")
+    async def security_session(request: Request) -> dict[str, Any]:
+        if not verified_channel(request):
+            raise HTTPException(403, "Sessions are only given over HTTPS")
+        return await security.session(await json_body(request), crew_tls(request))
+
+    @app.get("/api/security", dependencies=auth)
+    async def security_state(request: Request) -> dict[str, Any]:
+        principal: Principal = request.state.principal
+        return {"paired": security.paired, "you": principal.kind,
+                "devices": await security.devices(principal.device_id) if security.paired else []}
+
+    @app.post("/api/security/devices/{device_id}/revoke", dependencies=auth)
+    async def security_revoke(device_id: uuid.UUID, request: Request) -> dict[str, Any]:
+        body = await json_body(request) if (await request.body()) else {}
+        await security.revoke(device_id, body, request.state.principal)
+        return {"ok": True}
+
+    @app.post("/api/security/reset", dependencies=auth)
+    async def security_reset(request: Request) -> dict[str, Any]:
+        """Back to setup, for a lost phone and key: only from this machine (`crew security reset`)."""
+        if request.state.principal.kind not in ("local", "setup") or crew_tls(request):
+            raise HTTPException(403, "Only from the Crew machine: crew security reset")
+        await security.reset()
+        return {"ok": True}
+
+    # the app's own settings, kept here so a new phone starts where the old one was
+
+    @app.get("/api/prefs", dependencies=auth)
+    async def prefs() -> dict[str, Any]:
+        rows = await hub.pool.fetch("select key, value from app_prefs")
+        return {r["key"]: r["value"] for r in rows}
+
+    @app.put("/api/prefs/{key}", dependencies=auth)
+    async def set_pref(request: Request, key: str = Path(pattern=PREF_KEY)) -> dict[str, Any]:
+        raw = await request.body()
+        if len(raw) > 64_000:
+            raise HTTPException(413, "too large")
+        body = await json_body(request)
+        if "value" not in body:
+            raise HTTPException(422, "expected {value}")
+        if body["value"] is None:
+            await hub.pool.execute("delete from app_prefs where key = $1", key)
+        else:
+            await hub.pool.execute(
+                """insert into app_prefs (key, value) values ($1, $2)
+                   on conflict (key) do update set value = $2, updated_at = now()""", key, body["value"])
+        return {"ok": True}
+
+    # sign-in requests: an agent asks, the owner fills it on the phone, the server types it into the page
+
+    async def emit_secret(req: SecretRequest) -> None:
+        await hub.emit(req.session_id, "secret", req.json())
+
+    @app.post("/api/secrets", dependencies=auth, status_code=201)
+    async def ask_secret(body: SecretAsk) -> dict[str, Any]:
+        tabs = await browser.tabs()
+        tab = next((t for t in tabs if t["id"] == body.tab_id), None) if body.tab_id else None
+        if tab is None and body.tab_id is None:
+            # The tab of the one task whose agent is running a turn and last drove a tab.
+            busy = [t for t in tabs if hub.tab_busy(t["id"])]
+            tab = busy[0] if len(busy) == 1 else None
+            if tab is None:
+                raise HTTPException(422, "name the tab (--tab): no single task is using one right now")
+        if tab is None:
+            raise HTTPException(404, "that tab is closed")
+        session_id = hub.tab_owner.get(tab["id"])
+        if session_id is None:
+            raise HTTPException(422, "that tab is not used by a Crew task")
+        if not url_origin(tab.get("url", "")):
+            raise HTTPException(422, "the tab is not on a website")
+        submit = body.submit.strip() or "enter"
+        req = secrets_.add(SecretRequest(
+            id=uuid.uuid4(), session_id=session_id, tab_id=tab["id"], url=tab.get("url", ""),
+            title=tab.get("title") or "", reason=body.reason.strip(), fields=parse_fields(body.fields), submit=submit,
+        ))
+        await emit_secret(req)
+        return req.json()
+
+    @app.get("/api/secrets", dependencies=auth)
+    async def pending_secrets() -> list[dict[str, Any]]:
+        for req in secrets_.expire():
+            await emit_secret(req)
+        return [r.json() for r in secrets_.pending()]
+
+    @app.get("/api/secrets/{request_id}/wait", dependencies=auth)
+    async def wait_secret(request_id: uuid.UUID, timeout: float = Query(default=30, ge=0, le=60)) -> dict[str, Any]:
+        req = secrets_.get(request_id)
+        if req is None:
+            raise HTTPException(404, "no such request")
+        if req.status == "pending":
+            with suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(req.done.wait(), min(timeout, max(0.0, req.expires - time.time())))
+            if req.status == "pending" and req.expires <= time.time():
+                secrets_.expire()
+                await emit_secret(req)
+        return req.json()
+
+    @app.post("/api/secrets/{request_id}/cancel", dependencies=auth)
+    async def cancel_secret(request_id: uuid.UUID) -> dict[str, Any]:
+        req = secrets_.get(request_id)
+        if req is None:
+            raise HTTPException(404, "no such request")
+        if req.status == "pending":
+            req.status = "cancelled"
+            req.done.set()
+            await emit_secret(req)
+        return req.json()
+
+    @app.post("/api/secrets/{request_id}/fill")
+    async def fill_secret(request_id: uuid.UUID, request: Request, principal: Principal = Depends(require_token)) -> dict[str, Any]:
+        """The owner's values, typed into the page. Needs a paired phone, its fingerprint for this exact body, and
+        HTTPS. The body is read by hand, so a bad one is never echoed back in a validation error."""
+        if not verified_channel(request):
+            raise HTTPException(403, "Secrets only go over HTTPS")
+        if principal.kind != "device":
+            raise HTTPException(403, "Secrets need a phone set up with the security key (Settings > Security)")
+        await security.check_presence(principal, request.headers.get("x-crew-presence", ""), request.method,
+                                      request.url.path, await request.body())
+        req = secrets_.get(request_id)
+        if req is None or req.status != "pending":
+            raise HTTPException(409, f"that request is {req.status if req else 'gone'}")
+        body = await json_body(request)
+        values = body.get("values")
+        if not isinstance(values, dict) or not all(isinstance(values.get(f["name"]), str) and values.get(f["name"]) for f in req.fields):
+            raise HTTPException(422, "every field needs a value")
+        try:
+            current = await browser.page_url(req.tab_id)
+            if url_origin(current) != req.origin:
+                raise LookupError(f"the tab moved to {url_origin(current) or 'another page'}; nothing was typed")
+            await browser.fill_secret(req.tab_id, [(f["kind"], f["selector"], values[f["name"]]) for f in req.fields], req.submit)
+            await asyncio.sleep(2.5)  # let the form submit and the next page load before telling the agent
+            req.result_url = await browser.page_url(req.tab_id)
+            req.status = "filled"
+        except (LookupError, TabGone, BrowserUnavailable, RuntimeError, asyncio.TimeoutError) as exc:
+            req.status, req.error = "failed", str(exc) or type(exc).__name__
+        finally:
+            values = None  # noqa: F841 - drop the only reference to the values
+            body = None  # noqa: F841
+        req.done.set()
+        await emit_secret(req)
+        return req.json()
 
     @app.get("/api/profiles", dependencies=auth)
     async def profiles() -> dict[str, Any]:
@@ -274,12 +487,12 @@ def create_app(hub: Hub, token: str, lifespan_hub: bool = True) -> FastAPI:
 
     @app.post("/api/profiles", dependencies=auth, status_code=201)
     async def new_profile(body: ProfileFields, request: Request) -> dict[str, Any]:
-        key_route(request, body)
+        await key_route(request, body)
         return await hub.save_profile(None, body.model_dump(exclude={"key"}), body.key)
 
     @app.patch("/api/profiles/{profile_id}", dependencies=auth)
     async def change_profile(profile_id: str, body: ProfileFields, request: Request) -> dict[str, Any]:
-        key_route(request, body)
+        await key_route(request, body)
         return await hub.save_profile(profile_id, body.model_dump(exclude={"key", "preset"}), body.key)
 
     @app.delete("/api/profiles/{profile_id}", dependencies=auth)

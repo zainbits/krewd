@@ -15,8 +15,11 @@ data class ConnectionSettings(
     val addresses: List<String>,
     val token: String,
     val pin: String,
+    /** Set once this phone is paired with the owner's security key: it then signs in with its own keys. */
+    val deviceId: String = "",
 ) {
-    val configured: Boolean get() = token.isNotBlank() && addresses.isNotEmpty()
+    val paired: Boolean get() = deviceId.isNotBlank()
+    val configured: Boolean get() = (token.isNotBlank() || paired) && addresses.isNotEmpty()
 
     companion object {
         /** Addresses from text: one per line or comma, trimmed, without a trailing slash; http is upgraded. */
@@ -54,6 +57,40 @@ data class ConnectionSettings(
 class Prefs(context: Context) {
     private val prefs = context.getSharedPreferences("crew", Context.MODE_PRIVATE)
 
+    /** Called with (server key, value) whenever a synced setting changes here, to keep it on the server too. */
+    @Volatile var onChange: ((String, Any?) -> Unit)? = null
+
+    private fun synced(key: String, value: Any?) = onChange?.invoke(key, value)
+
+    /** Settings kept on the server (see [apply]): the app's own picks, not this phone's connection or keys. */
+    fun syncedValues(): Map<String, Any> {
+        val out = LinkedHashMap<String, Any>()
+        prefs.all.forEach { (k, v) ->
+            when {
+                k.startsWith("engine_") && v is String -> out["engine." + k.removePrefix("engine_")] = JSONObject(v)
+                k == "saved_prompts" && v is String -> out[k] = org.json.JSONArray(v)
+                k in SYNCED && v != null -> out[k] = v
+            }
+        }
+        return out
+    }
+
+    /** The server's copy wins (a new phone starts where the old one was); nothing is sent back for it. */
+    fun apply(server: JSONObject) {
+        val edit = prefs.edit()
+        server.keys().forEach { key ->
+            val v = server.get(key)
+            when {
+                key.startsWith("engine.") && v is JSONObject -> edit.putString("engine_" + key.removePrefix("engine."), v.toString())
+                key == "saved_prompts" && v is org.json.JSONArray -> edit.putString(key, v.toString())
+                key == "last_engine" && v is String -> edit.putString(key, v)
+                (key == "browser_high_quality" || key == "browser_cursor") && v is Boolean -> edit.putBoolean(key, v)
+                (key == "pip_wide_width" || key == "pip_tall_height") && v is Number -> edit.putFloat(key, v.toFloat())
+            }
+        }
+        edit.apply()
+    }
+
     fun load(): ConnectionSettings {
         // Before 0.14 there were two fields, a home address (plain HTTP) and a Tailscale address.
         val addresses = prefs.getString("addresses", null)?.let(ConnectionSettings::parseAddresses)
@@ -63,6 +100,7 @@ class Prefs(context: Context) {
             addresses = addresses,
             token = prefs.getString("token", "")!!,
             pin = prefs.getString("pin", "")!!,
+            deviceId = prefs.getString("device_id", "")!!,
         )
     }
 
@@ -71,6 +109,7 @@ class Prefs(context: Context) {
             .putString("addresses", settings.addresses.joinToString("\n"))
             .putString("token", settings.token.trim())
             .putString("pin", settings.pin.trim())
+            .putString("device_id", settings.deviceId.trim())
             .remove("lan_url").remove("tailnet_url").remove("network")
             .apply()
     }
@@ -79,31 +118,45 @@ class Prefs(context: Context) {
     fun engine(id: String): EngineDefaults = prefs.getString("engine_$id", null)?.let(EngineDefaults::parse) ?: EngineDefaults()
 
     fun updateEngine(id: String, change: (EngineDefaults) -> EngineDefaults) {
-        prefs.edit().putString("engine_$id", change(engine(id)).toJson()).apply()
+        val next = change(engine(id)).toJson()
+        prefs.edit().putString("engine_$id", next).apply()
+        synced("engine.$id", JSONObject(next))
     }
 
     /** The agent picked last on the new-task card. */
     fun lastEngine(): String? = prefs.getString("last_engine", null)
 
-    fun setLastEngine(id: String) = prefs.edit().putString("last_engine", id).apply()
+    fun setLastEngine(id: String) {
+        prefs.edit().putString("last_engine", id).apply()
+        synced("last_engine", id)
+    }
 
     /** The picture-in-picture size the owner picked: width (dp) for horizontal tabs, height for vertical ones. */
     fun pipSize(wide: Boolean): Float = prefs.getFloat(if (wide) "pip_wide_width" else "pip_tall_height", if (wide) 180f else 240f)
 
-    fun setPipSize(wide: Boolean, dp: Float) = prefs.edit().putFloat(if (wide) "pip_wide_width" else "pip_tall_height", dp).apply()
+    fun setPipSize(wide: Boolean, dp: Float) {
+        val key = if (wide) "pip_wide_width" else "pip_tall_height"
+        prefs.edit().putFloat(key, dp).apply()
+        synced(key, dp)
+    }
 
     /** Saved prompts for the new-task sheet, newest first. */
     fun savedPrompts(): List<String> = runCatching {
         org.json.JSONArray(prefs.getString("saved_prompts", "[]")).strings()
     }.getOrDefault(emptyList())
 
-    fun setSavedPrompts(list: List<String>) =
+    fun setSavedPrompts(list: List<String>) {
         prefs.edit().putString("saved_prompts", org.json.JSONArray(list).toString()).apply()
+        synced("saved_prompts", org.json.JSONArray(list))
+    }
 
     /** High quality live view: 60 fps and sharper frames, at about three times the data. Off: 30 fps. */
     fun highQuality(): Boolean = prefs.getBoolean("browser_high_quality", false)
 
-    fun setHighQuality(on: Boolean) = prefs.edit().putBoolean("browser_high_quality", on).apply()
+    fun setHighQuality(on: Boolean) {
+        prefs.edit().putBoolean("browser_high_quality", on).apply()
+        synced("browser_high_quality", on)
+    }
 
     /** Cursor (true) or touch input for the browser, remembered per agent, with the last pick as the fallback. */
     fun cursorMode(engineId: String?): Boolean =
@@ -111,9 +164,23 @@ class Prefs(context: Context) {
 
     fun setCursorMode(engineId: String?, cursor: Boolean) {
         prefs.edit().putBoolean("browser_cursor", cursor).apply()
+        synced("browser_cursor", cursor)
         if (engineId != null) updateEngine(engineId) { it.copy(cursor = cursor) }
     }
 
+    companion object {
+        private val SYNCED = setOf("last_engine", "pip_wide_width", "pip_tall_height", "browser_high_quality", "browser_cursor")
+    }
+}
+
+/** Who the app is to the server: the setup token, or (once paired) this phone, with a short session it renews. */
+class Credentials(val token: String, val deviceId: String) {
+    @Volatile var session: String? = null
+    val paired: Boolean get() = deviceId.isNotBlank()
+
+    companion object {
+        fun of(settings: ConnectionSettings) = Credentials(settings.token, settings.deviceId)
+    }
 }
 
 /** One agent's remembered settings: its config picks (model, effort, mode...), legacy mode, auto-approve and browser input. */
@@ -147,7 +214,13 @@ data class EngineDefaults(
 class ApiException(val code: Int, message: String) : IOException(message)
 
 /** Blocking HTTP client for the Crew server; call it from Dispatchers.IO. */
-class CrewApi(val baseUrl: String, private val token: String, private val pin: String) {
+class CrewApi(
+    val baseUrl: String,
+    private val creds: Credentials,
+    private val pin: String,
+    /** Only while pairing a phone that does not know the server's certificate yet: see [Tls.Capture]. */
+    private val capture: Tls.Capture? = null,
+) {
     /** How this server was checked on the first request ([probe]). */
     @Volatile var verified: Verified = Verified.Plain
         private set
@@ -178,7 +251,58 @@ class CrewApi(val baseUrl: String, private val token: String, private val pin: S
     /** The pin of the server's own certificate (GET /api/tls), or null when it has none. */
     fun tlsPin(): String? = obj("GET", "/api/tls").optStringOrNull("pin")
 
-    private fun open(url: String): HttpURLConnection = Tls.open(url, pin)
+    private fun open(url: String): HttpURLConnection = if (capture != null) Tls.openCapturing(url, capture) else Tls.open(url, pin)
+
+    fun captured(): Tls.Capture? = capture
+
+    /** The pin of the certificate this connection saw, which the phone signs (the server checks it is its own). */
+    fun pinSeen(): String = when {
+        capture != null -> capture.pin.orEmpty()
+        verified == Verified.Pin -> pin
+        else -> ""
+    }
+
+    private fun bearer(): String = if (creds.paired) creds.session ?: renewSession() else creds.token
+
+    /** A new session for this phone: sign a fresh nonce with its device key. */
+    fun renewSession(): String = synchronized(creds) {
+        creds.session?.let { return it }
+        val nonce = nonce("session").getString("nonce")
+        val pinSeen = pinSeen()
+        val sig = Keys.signWithDevice("crew-device-v1\nsession\n$nonce\n$pinSeen".toByteArray())
+        val body = JSONObject().put("device_id", creds.deviceId).put("nonce", nonce).put("pin_seen", pinSeen)
+            .put("sig", android.util.Base64.encodeToString(sig, android.util.Base64.NO_WRAP))
+        val session = JSONObject(call("POST", "/api/security/session", body, auth = false)).getString("session")
+        creds.session = session
+        session
+    }
+
+    fun nonce(purpose: String): JSONObject =
+        JSONObject(call("POST", "/api/security/nonce", JSONObject().put("purpose", purpose), auth = false))
+
+    /** Adds this phone (see security.py on the server); the first one also sends the setup token. */
+    fun pair(body: JSONObject, withToken: Boolean): JSONObject = JSONObject(call(
+        "POST", "/api/security/pair", body, auth = false,
+        headers = if (withToken && creds.token.isNotBlank()) mapOf("Authorization" to "Bearer ${creds.token}") else emptyMap(),
+    ))
+
+    fun securityState(): JSONObject = obj("GET", "/api/security")
+
+    fun revokeDevice(id: String, body: JSONObject) {
+        call("POST", "/api/security/devices/$id/revoke", body)
+    }
+
+    fun serverPrefs(): JSONObject = obj("GET", "/api/prefs")
+
+    fun setPref(key: String, value: Any?) {
+        call("PUT", "/api/prefs/" + java.net.URLEncoder.encode(key, "UTF-8"), JSONObject().put("value", value ?: JSONObject.NULL))
+    }
+
+    fun secrets(): List<SecretAsk> = arr("GET", "/api/secrets").objects().map(SecretAsk::from)
+
+    /** A request with an exact body and extra headers, for requests the owner's fingerprint signs. */
+    fun send(method: String, path: String, text: String, headers: Map<String, String>, readTimeoutMs: Int = 60_000): String =
+        call(method, path, null, readTimeoutMs = readTimeoutMs, text = text, headers = headers)
 
     fun state(): ServerState {
         val o = obj("GET", "/api/state")
@@ -360,7 +484,7 @@ class CrewApi(val baseUrl: String, private val token: String, private val pin: S
         val conn = open("$baseUrl/api/browser/tabs/$tabId/stream?quality=$quality")
         conn.connectTimeout = Timing.CONNECT_TIMEOUT_MS
         conn.readTimeout = 30_000 // the server repeats the last frame every 10 s
-        conn.setRequestProperty("Authorization", "Bearer $token")
+        conn.setRequestProperty("Authorization", "Bearer ${bearer()}")
         conn.setRequestProperty("Accept", "multipart/x-mixed-replace")
         return FrameStream(conn, tabId)
     }
@@ -374,7 +498,7 @@ class CrewApi(val baseUrl: String, private val token: String, private val pin: S
             conn.readTimeout = 120_000
             conn.doOutput = true
             conn.setChunkedStreamingMode(64 * 1024)
-            conn.setRequestProperty("Authorization", "Bearer $token")
+            conn.setRequestProperty("Authorization", "Bearer ${bearer()}")
             conn.setRequestProperty("Content-Type", mime ?: "application/octet-stream")
             conn.outputStream.use { out -> input.use { it.copyTo(out, 64 * 1024) } }
             val code = conn.responseCode
@@ -395,7 +519,7 @@ class CrewApi(val baseUrl: String, private val token: String, private val pin: S
         try {
             conn.connectTimeout = Timing.CONNECT_TIMEOUT_MS
             conn.readTimeout = 120_000
-            conn.setRequestProperty("Authorization", "Bearer $token")
+            conn.setRequestProperty("Authorization", "Bearer ${bearer()}")
             val code = conn.responseCode
             if (code !in 200..299) {
                 throw ApiException(code, if (code == 404) "The file is no longer there" else "Download failed (HTTP $code)")
@@ -412,7 +536,7 @@ class CrewApi(val baseUrl: String, private val token: String, private val pin: S
         try {
             conn.connectTimeout = Timing.CONNECT_TIMEOUT_MS
             conn.readTimeout = 60_000
-            conn.setRequestProperty("Authorization", "Bearer $token")
+            conn.setRequestProperty("Authorization", "Bearer ${bearer()}")
             val code = conn.responseCode
             if (code !in 200..299) throw ApiException(code, if (code == 404) "The image is no longer there" else "Image failed (HTTP $code)")
             return conn.inputStream.use { it.readBytes() }
@@ -427,7 +551,7 @@ class CrewApi(val baseUrl: String, private val token: String, private val pin: S
         try {
             conn.connectTimeout = Timing.CONNECT_TIMEOUT_MS
             conn.readTimeout = 15_000
-            conn.setRequestProperty("Authorization", "Bearer $token")
+            conn.setRequestProperty("Authorization", "Bearer ${bearer()}")
             val code = conn.responseCode
             if (code !in 200..299) throw ApiException(code, "Snapshot failed (HTTP $code)")
             return conn.inputStream.use { it.readBytes() }
@@ -450,6 +574,9 @@ class CrewApi(val baseUrl: String, private val token: String, private val pin: S
         connectTimeoutMs: Int = Timing.CONNECT_TIMEOUT_MS,
         readTimeoutMs: Int = 20_000,
         auth: Boolean = true,
+        text: String? = null,
+        headers: Map<String, String> = emptyMap(),
+        retried: Boolean = false,
     ): String {
         val conn = open(baseUrl + path)
         try {
@@ -457,13 +584,21 @@ class CrewApi(val baseUrl: String, private val token: String, private val pin: S
             conn.connectTimeout = connectTimeoutMs
             conn.readTimeout = readTimeoutMs
             conn.setRequestProperty("Accept", "application/json")
-            if (auth) conn.setRequestProperty("Authorization", "Bearer $token")
-            if (body != null) {
+            if (auth) conn.setRequestProperty("Authorization", "Bearer ${bearer()}")
+            headers.forEach { (k, v) -> conn.setRequestProperty(k, v) }
+            val payload = text ?: body?.toString()
+            if (payload != null) {
                 conn.doOutput = true
                 conn.setRequestProperty("Content-Type", "application/json")
-                conn.outputStream.use { it.write(body.toString().toByteArray()) }
+                conn.outputStream.use { it.write(payload.toByteArray()) }
             }
             val code = conn.responseCode
+            if (code == 401 && auth && creds.paired && !retried) {
+                // The session ran out (or the server restarted): get a new one with the phone's key, once.
+                creds.session = null
+                conn.disconnect()
+                return call(method, path, body, connectTimeoutMs, readTimeoutMs, auth, text, headers, retried = true)
+            }
             val stream = if (code in 200..299) conn.inputStream else conn.errorStream
             val text = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
             if (code !in 200..299) {
@@ -478,20 +613,20 @@ class CrewApi(val baseUrl: String, private val token: String, private val pin: S
 
     companion object {
         /** A client for requests that carry a key or a secret: only over a checked HTTPS connection. */
-        fun forKeys(current: CrewApi, settings: ConnectionSettings): CrewApi {
+        fun forKeys(current: CrewApi, settings: ConnectionSettings, creds: Credentials): CrewApi {
             if (current.secure) return current
             for (address in settings.addresses) {
-                val api = CrewApi(address, settings.token, settings.pin)
+                val api = CrewApi(address, creds, settings.pin)
                 if (runCatching { api.probe(Timing.CONNECT_TIMEOUT_MS) }.isSuccess && api.secure) return api
             }
             throw ApiException(0, "Keys only go over HTTPS, and no address answered over HTTPS")
         }
 
         /** The first of [addresses] that answers, tried in order; all but the last get a short timeout. */
-        fun resolve(settings: ConnectionSettings, addresses: List<String> = settings.addresses): CrewApi {
+        fun resolve(settings: ConnectionSettings, creds: Credentials, addresses: List<String> = settings.addresses): CrewApi {
             var last: Exception? = null
             addresses.forEachIndexed { i, address ->
-                val api = CrewApi(address, settings.token, settings.pin)
+                val api = CrewApi(address, creds, settings.pin)
                 try {
                     api.probe(if (i < addresses.lastIndex) 2_000 else Timing.CONNECT_TIMEOUT_MS)
                     return api

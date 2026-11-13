@@ -154,7 +154,9 @@ def connect_link(settings: Settings, token: str) -> str:
     if settings.tls == "off":
         addresses += [f"http://{a}:{settings.port}" for a in listen_addresses(settings.host) if not tls.is_loopback(a)]
     addresses += list(settings.urls)
-    query = [("a", a) for a in dict.fromkeys(addresses)] + [("t", token)]
+    # Once the owner's security key is registered, the token stays on this machine: a new phone pairs with the key.
+    paired = (settings.token_file.parent / "owner.json").is_file()
+    query = [("a", a) for a in dict.fromkeys(addresses)] + ([] if paired else [("t", token)])
     if settings.tls != "off":
         tls.ensure_certificate(settings.tls_cert, settings.tls_key, [lan_address()])
         query.append(("p", tls.pin(settings.tls_cert)))
@@ -165,7 +167,10 @@ def print_connect(settings: Settings, token: str) -> None:
     import segno
 
     link = connect_link(settings, token)
-    print("Scan this with the phone's camera, or open the link on the phone. It holds the token: keep it private.\n")
+    if "&t=" in link:
+        print("Scan this with the phone's camera, or open the link on the phone. It holds the setup token: keep it private.\n")
+    else:
+        print("Scan this with a new phone's camera (or open the link there), then tap your security key on the phone.\n")
     segno.make(link, error="m").terminal(compact=True)
     print("\n" + link)
 

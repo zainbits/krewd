@@ -2,6 +2,10 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- The owner's security key over NFC, and the fingerprint (or screen lock) for sensitive requests. -->
+    <uses-permission android:name="android.permission.NFC" />
+    <uses-permission android:name="android.permission.USE_BIOMETRIC" />
+    <uses-feature android:name="android.hardware.nfc" android:required="false" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- Live activity: a foreground service keeps alerts coming while tasks run with the phone locked. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />

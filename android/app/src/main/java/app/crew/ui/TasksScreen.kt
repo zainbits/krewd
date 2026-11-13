@@ -125,6 +125,8 @@ fun TasksScreen(state: UiState, viewModel: CrewViewModel, padding: PaddingValues
 
     val sessions = state.sessions.filter { !it.archived }
     val pending = state.approvals.filter { it.pending }
+    val signIns = state.secrets.filter { it.pending }
+    var filling by remember { mutableStateOf<String?>(null) }
     val running = sessions.filter { it.status == "running" || it.status == "waiting" }
         .filter { s -> pending.none { it.sessionId == s.id } }
     val rest = sessions.filter { s -> s !in running && pending.none { it.sessionId == s.id } }
@@ -134,6 +136,10 @@ fun TasksScreen(state: UiState, viewModel: CrewViewModel, padding: PaddingValues
     val earlier = rest.filter { !it.pinned && localDate(it.updatedAt) != today }
     val upcoming = state.routines.filter { it.enabled && it.nextRunAt != null }.sortedBy { it.nextRunAt }.take(4)
     val members = crewMembers(state)
+
+    signIns.firstOrNull { it.id == filling }?.let { ask ->
+        SecretSheet(ask = ask, viewModel = viewModel, onDismiss = { filling = null })
+    }
 
     Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surface) {
     Box(Modifier.fillMaxSize()) {
@@ -145,7 +151,7 @@ fun TasksScreen(state: UiState, viewModel: CrewViewModel, padding: PaddingValues
             item(key = "header") { HomeHeader(state.connection, onOpenSettings) }
             item(key = "hero") {
                 Hero(
-                    needs = pending.size,
+                    needs = pending.size + signIns.size,
                     working = running.size,
                     next = upcoming.firstOrNull(),
                 )
@@ -153,8 +159,21 @@ fun TasksScreen(state: UiState, viewModel: CrewViewModel, padding: PaddingValues
             if (members.isNotEmpty()) item(key = "roster") {
                 Roster(members, needsOf = { id -> pending.count { a -> sessions.firstOrNull { it.id == a.sessionId }?.engine == id } }, onTap = ask)
             }
+            if (signIns.isNotEmpty()) {
+                if (pending.isEmpty()) item(key = "needs-title") { SectionTitle("Needs you", signIns.size.toString()) }
+                items(signIns.size, key = { "secret-" + signIns[it].id }) { i ->
+                    val ask = signIns[i]
+                    SecretCard(
+                        ask = ask,
+                        engineName = sessions.firstOrNull { it.id == ask.sessionId }?.let { s -> state.engine(s.engine)?.name ?: s.engine } ?: "Agent",
+                        shape = groupShape(i, signIns.size + pending.size),
+                        onFill = { filling = ask.id },
+                        onOpen = { viewModel.openSession(ask.sessionId) },
+                    )
+                }
+            }
             if (pending.isNotEmpty()) {
-                item(key = "needs-title") { SectionTitle("Needs you", pending.size.toString()) }
+                item(key = "needs-title") { SectionTitle("Needs you", (pending.size + signIns.size).toString()) }
                 items(pending.size, key = { "needs-" + pending[it].id }) { i ->
                     val approval = pending[i]
                     val session = sessions.firstOrNull { it.id == approval.sessionId }

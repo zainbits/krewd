@@ -124,6 +124,12 @@ PY
   fi
   curl -fsS -m 3 "http://127.0.0.1:$(port)/api/health" >/dev/null 2>&1 && ok "server answers on port $(port)" \
     || bad "server does not answer on port $(port)" "./master.sh logs"
+  if [[ -f "$CONFIG_DIR/owner.json" ]]; then
+    [[ "$(stat -c %a "$CONFIG_DIR/owner.json" 2>/dev/null)" == 600 ]] && ok "security key registered (phones pair with it)" \
+      || warn "owner.json is not mode 600" "chmod 600 $CONFIG_DIR/owner.json"
+  else
+    warn "no security key yet: anyone with the setup token can use Crew" "in the app: Settings > Security > Set up with security key"
+  fi
   if [[ "$(conf CREW_TLS auto)" == off ]]; then
     warn "CREW_TLS=off: the home network gets plain HTTP, readable by anyone on it" "remove CREW_TLS from crew.env, then ./master.sh restart"
   elif [[ -f "$(conf CREW_TLS_CERT "$CONFIG_DIR/tls.crt")" && -f "$(conf CREW_TLS_KEY "$CONFIG_DIR/tls.key")" ]]; then
@@ -249,6 +255,11 @@ logs() {
 
 attach() { local s=crew; [[ "${1:-}" == browser || "${1:-}" == brave ]] && s=agent-brave; say "Detach with Ctrl+B, then D."; tmux attach -t "=$s"; }
 
+security() {
+  # The owner's phones and security key: status, revoke PHONE, reset (lost phone and key: back to setup).
+  "$REPO/deploy/crew-cli.sh" security "${@:-status}"
+}
+
 token() {
   # The connect code: the app's addresses, the certificate pin and the token, as a QR code and a link.
   uvrun python -m crew_server connect
@@ -337,6 +348,7 @@ ${B}Crew master script${N} ($REPO)
   logs [server|browser]     recent output
   attach [server|browser]   watch live in tmux (detach: Ctrl+B, then D)
   token          show the code (QR and link) that connects the phone app
+  security       the owner's phones and security key: status | revoke PHONE | reset
   test           run the server tests
   update         pull the latest code, reinstall, restart
   app            build the Android app and install it over adb
@@ -346,7 +358,7 @@ EOF
 
 menu() {
   usage; say ""
-  local choices=(doctor status setup start stop restart logs attach token test update app agent-prompt quit)
+  local choices=(doctor status setup start stop restart logs attach token security test update app agent-prompt quit)
   PS3="Pick a number: "
   select c in "${choices[@]}"; do
     [[ "$c" == quit || -z "$c" ]] && return
@@ -366,6 +378,7 @@ dispatch() {
     logs) logs "$@" ;;
     attach) attach "$@" ;;
     token) token ;;
+    security) security "$@" ;;
     test) run_tests ;;
     update) update ;;
     app) app ;;

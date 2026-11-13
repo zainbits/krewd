@@ -92,7 +92,9 @@ fun SettingsScreen(state: UiState, viewModel: CrewViewModel, padding: PaddingVal
                             (state.engines.takeIf { it.isNotEmpty() }?.joinToString(prefix = ". Agents: ") { it.name } ?: "")
                         is Connection.Offline -> "Offline: ${c.reason}"
                         Connection.Connecting -> "Connecting…"
-                        Connection.NotSetUp -> "On the server, run ./master.sh token and open its code on this phone, or enter the address and token."
+                        Connection.NotSetUp -> if (saved.addresses.isNotEmpty() && saved.token.isBlank())
+                            "Set this phone up with your security key (Security, below)."
+                        else "On the server, run ./master.sh token and open its code on this phone, or enter the address and token."
                     },
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -107,7 +109,7 @@ fun SettingsScreen(state: UiState, viewModel: CrewViewModel, padding: PaddingVal
                     shape = RoundedCornerShape(16.dp),
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
                 )
-                OutlinedTextField(
+                if (!saved.paired) OutlinedTextField(
                     value = token, onValueChange = { token = it },
                     label = { Text("Token") },
                     singleLine = true,
@@ -134,6 +136,7 @@ fun SettingsScreen(state: UiState, viewModel: CrewViewModel, padding: PaddingVal
                 )
             }
         }
+        item { SecurityCard(state, viewModel) }
         item { SignInsCard(state, viewModel) }
         item { ProfilesCard(state, viewModel) }
         item {

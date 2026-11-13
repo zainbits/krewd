@@ -82,6 +82,27 @@ def key_info(key: str) -> tuple[str, int, str | None]:
     raise ValueError(f"unknown key {key}")
 
 
+# Finds the field for a secret: the agent's selector, or the visible field of that kind (a username field is the
+# text or email field just before the password field). Returns the element, or null.
+FIND_FIELD = r"""(kind, selector) => {
+  const visible = (el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0 && getComputedStyle(el).visibility !== 'hidden' && !el.disabled && !el.readOnly; };
+  if (selector) return document.querySelector(selector);
+  const inputs = [...document.querySelectorAll('input')].filter(visible);
+  const password = inputs.find(i => i.type === 'password');
+  if (kind === 'password') return password || null;
+  if (kind === 'otp') return inputs.find(i => i.autocomplete === 'one-time-code') || inputs.find(i => /otp|code|token|pin/i.test(i.name + ' ' + i.id + ' ' + (i.placeholder || ''))) || inputs.find(i => ['text', 'tel', 'number'].includes(i.type)) || null;
+  const texty = inputs.filter(i => ['text', 'email', 'tel', ''].includes(i.type));
+  const named = texty.find(i => /user|email|login|mobile|phone/i.test(i.autocomplete + ' ' + i.name + ' ' + i.id + ' ' + i.type));
+  if (password) { const before = texty.filter(i => i.compareDocumentPosition(password) & Node.DOCUMENT_POSITION_FOLLOWING); if (named && before.includes(named)) return named; if (before.length) return before[before.length - 1]; }
+  return named || texty[0] || null;
+}"""
+# Focuses a field and empties it, so the typed value replaces what was there.
+PREPARE_FIELD = r"""function () {
+  this.scrollIntoView({block: 'center'}); this.focus();
+  if (this.value) { const set = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(this), 'value'); set && set.set ? set.set.call(this, '') : (this.value = ''); this.dispatchEvent(new Event('input', {bubbles: true})); }
+}"""
+
+
 class BrowserUnavailable(Exception):
     pass
 
@@ -453,6 +474,43 @@ class Browser:
         else:
             raise ValueError(f"unknown input type {kind}")
         return {}
+
+    async def page_url(self, target_id: str) -> str:
+        link = await self.link(target_id)
+        result = await link.call("Runtime.evaluate", {"expression": "location.href", "returnByValue": True})
+        return str(result.get("result", {}).get("value", ""))
+
+    async def fill_secret(self, target_id: str, fields: list[tuple[str, str | None, str]], submit: str) -> None:
+        """Type secret values into the page's fields and submit: [(kind, selector or None, value)].
+
+        Only selectors and fixed scripts go through Runtime; each value goes in as typed text (Input.insertText),
+        so it is never part of a script, a log line or an error message.
+        """
+        link = await self.link(target_id)
+        self.touched[target_id] = time.monotonic()
+        last = None
+        for kind, selector, value in fields:
+            found = await link.call("Runtime.evaluate", {
+                "expression": f"({FIND_FIELD})({json.dumps(kind)}, {json.dumps(selector)})", "returnByValue": False,
+            })
+            object_id = found.get("result", {}).get("objectId")
+            if not object_id or found.get("result", {}).get("subtype") == "null":
+                raise LookupError(f"no {kind} field found on the page" + (f" for {selector}" if selector else ""))
+            await link.call("Runtime.callFunctionOn", {"objectId": object_id, "functionDeclaration": PREPARE_FIELD})
+            await link.call("Input.insertText", {"text": value})
+            last = object_id
+        if submit == "enter" and last:
+            code, vk, text = key_info("Enter")
+            base = {"key": "Enter", "code": code, "windowsVirtualKeyCode": vk, "nativeVirtualKeyCode": vk}
+            await link.call("Input.dispatchKeyEvent", {"type": "keyDown", "text": text, **base})
+            await link.call("Input.dispatchKeyEvent", {"type": "keyUp", **base})
+        elif submit not in ("enter", "none"):
+            clicked = await link.call("Runtime.evaluate", {
+                "expression": f"(() => {{ const b = document.querySelector({json.dumps(submit)}); if (!b) return false; b.click(); return true; }})()",
+                "returnByValue": True,
+            })
+            if not clicked.get("result", {}).get("value"):
+                raise LookupError(f"no submit button found for {submit}")
 
     async def _mouse(self, link: TabLink, event: dict[str, Any], x: float, y: float) -> dict[str, Any]:
         """move (with held set while a button is down: drags and selections), down, up, click (clicks 1 or 2)."""

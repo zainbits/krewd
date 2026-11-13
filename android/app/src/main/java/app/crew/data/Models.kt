@@ -435,3 +435,38 @@ fun JSONObject.optStringOrNull(name: String): String? =
     if (isNull(name) || !has(name)) null else optString(name).takeIf { it.isNotEmpty() }
 
 fun JSONObject.optLongOrNull(name: String): Long? = if (isNull(name) || !has(name)) null else optLong(name)
+
+/** A sign-in request from an agent: the owner fills it on the phone; the agent never sees the values. */
+data class SecretAsk(
+    val id: String,
+    val sessionId: String,
+    val site: String,
+    val reason: String,
+    val fields: List<SecretField>,
+    val status: String,
+    val error: String?,
+) {
+    val pending: Boolean get() = status == "pending"
+
+    companion object {
+        fun from(o: JSONObject) = SecretAsk(
+            id = o.optString("id"),
+            sessionId = o.optString("session_id"),
+            site = o.optString("site"),
+            reason = o.optString("reason"),
+            fields = o.optJSONArray("fields").objects().map { SecretField(it.optString("name"), it.optString("label"), it.optString("kind")) },
+            status = o.optString("status"),
+            error = o.optStringOrNull("error"),
+        )
+    }
+}
+
+data class SecretField(val name: String, val label: String, val kind: String)
+
+/** One of the owner's phones (Settings > Security). */
+data class Device(val id: String, val name: String, val createdAt: String, val lastSeen: String?, val current: Boolean) {
+    companion object {
+        fun from(o: JSONObject) = Device(o.optString("id"), o.optString("name"), o.optString("created_at"),
+            o.optStringOrNull("last_seen"), o.optBoolean("current"))
+    }
+}

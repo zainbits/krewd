@@ -10,11 +10,18 @@
     crew routines notes ID [--set TEXT | --set-file PATH | --append TEXT]
     crew schedule CRON [--timezone TZ]      check a schedule and show its next runs
     crew chat history CHAT [--last N] [--after SEQ]     a chat's messages (owner, agents), e.g. after a switch
+    crew secret request [--field KIND[:LABEL[:SELECTOR]]]... [--submit enter|none|SELECTOR] --reason TEXT [--tab ID]
+    crew security status | revoke PHONE | reset          the owner's phones and security key (this machine only)
 
 A routine has one or more named triggers (cron schedules), e.g. check-in "55 9 * * 1-5" and check-out
 "0 19 * * 1-5". Every run goes into the routine's own chat and is told which trigger fired. A trigger can
 allow more than one attempt (--attempts check-out 3): a run that cannot finish yet asks for a follow-up with
 `crew routines later`, and Crew refuses past the limit. Notes are kept between runs and shown to each run.
+
+A sign-in request (`crew secret request`) asks the owner for a password, a one-time code or another secret on
+the phone. The agent never sees it: the owner types it there, Crew types it into the page's fields and submits
+the form, and the command prints only the outcome and the page it landed on. KIND is username, email, password,
+otp or text (default: username and password); the fields are found by themselves, or give a CSS selector.
 
 ID can be the first characters of a routine id. Reads the token from ~/.config/crew/token.
 """
@@ -223,6 +230,55 @@ def _at_time(text: str) -> dict[str, Any]:
     return {"at": at.isoformat()}
 
 
+def _secret(args: argparse.Namespace) -> int:
+    import time
+
+    fields = []
+    for spec in args.field or []:
+        kind, _, rest = spec.partition(":")
+        label, _, selector = rest.partition(":")
+        fields.append({"kind": kind.strip().lower(), "label": label.strip() or None, "selector": selector.strip() or None})
+    body: dict[str, Any] = {"fields": fields or None, "submit": args.submit, "reason": args.reason}
+    if args.tab:
+        body["tab_id"] = args.tab
+    req = call("POST", "/api/secrets", body)
+    print(f"Asked the owner on the phone for {', '.join(f['label'] for f in req['fields'])} on {req['site']}. Waiting...",
+          flush=True)
+    deadline = time.time() + args.timeout
+    try:
+        while req["status"] == "pending" and time.time() < deadline:
+            req = call("GET", f"/api/secrets/{req['id']}/wait?timeout=25")
+    except KeyboardInterrupt:
+        req = call("POST", f"/api/secrets/{req['id']}/cancel")
+    if req["status"] == "pending":
+        req = call("POST", f"/api/secrets/{req['id']}/cancel")
+    if req["status"] == "filled":
+        print(f"Filled and submitted. The page is now: {req.get('url')}\nCheck the page to see whether the sign-in worked.")
+        return 0
+    print(f"Not filled: {req['status']}" + (f" ({req['error']})" if req.get("error") else "")
+          + ". Do not ask for the secret in the chat; tell the owner and stop, or ask again if they want to.")
+    return 1
+
+
+def _security(args: argparse.Namespace) -> int:
+    state = call("GET", "/api/security")
+    if args.security_action == "status":
+        print("Security key: " + ("registered" if state["paired"] else "none yet (setup: ./master.sh token)"))
+        for d in state["devices"]:
+            print(f"  {d['id'][:8]}  {d['name']}  added {_when(d['created_at'])}, last seen {_when(d['last_seen'])}")
+        return 0
+    if args.security_action == "revoke":
+        ids = [d["id"] for d in state["devices"] if d["id"].startswith(args.phone.lower())]
+        if len(ids) != 1:
+            raise CliError(f"{args.phone!r} matches {len(ids)} phones (crew security status)")
+        call("POST", f"/api/security/devices/{ids[0]}/revoke")
+        print("Removed. That phone can no longer use Crew.")
+        return 0
+    call("POST", "/api/security/reset")
+    print("Reset: no security key and no phones now. Run ./master.sh token and open its code on your phone to set up again.")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="crew", description=__doc__, epilog=RULES, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -235,6 +291,22 @@ def main(argv: list[str] | None = None) -> int:
     hist.add_argument("chat")
     hist.add_argument("--last", type=int, default=30, help="how many messages from the end (default 30)")
     hist.add_argument("--after", type=int, default=0, help="only messages after this event seq")
+
+    secret = sub.add_parser("secret", help="ask the owner to fill a sign-in or code on the phone (never shown to you)")
+    ssub = secret.add_subparsers(dest="secret_action", required=True)
+    ask = ssub.add_parser("request", help="wait until the owner fills the page's login (or code) on the phone")
+    ask.add_argument("--field", action="append", metavar="KIND[:LABEL[:SELECTOR]]",
+                     help="username, email, password, otp or text; repeat for several (default username and password)")
+    ask.add_argument("--submit", default="enter", help="enter (default), none, or a CSS selector to click")
+    ask.add_argument("--reason", required=True, help="one line for the owner: what you are signing in to and why")
+    ask.add_argument("--tab", help="the tab id (default: the tab your task is using)")
+    ask.add_argument("--timeout", type=int, default=600, help="seconds to wait for the owner (default 600)")
+
+    sec = sub.add_parser("security", help="the owner's phones and security key (from this machine)")
+    secsub = sec.add_subparsers(dest="security_action", required=True)
+    secsub.add_parser("status")
+    secsub.add_parser("revoke").add_argument("phone", help="the phone's id or its first characters")
+    secsub.add_parser("reset", help="lost phone and key: remove the key and every phone, make a new setup token")
 
     sched = sub.add_parser("schedule", help="check a 5-field cron schedule and show its next runs")
     sched.add_argument("cron")
@@ -299,6 +371,10 @@ def main(argv: list[str] | None = None) -> int:
             for m in call("GET", f"/api/sessions/{ids[0]}/transcript?after={args.after}&last={args.last}"):
                 print(f"[{m['seq']}] {m['from']}:\n{m['text'].strip()}\n")
             return 0
+        if args.cmd == "secret":
+            return _secret(args)
+        if args.cmd == "security":
+            return _security(args)
         if args.cmd == "schedule":
             body = {"schedule": args.cron}
             if args.timezone:
