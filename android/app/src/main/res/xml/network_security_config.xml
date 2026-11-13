@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- The Crew server is reached over plain HTTP on the home LAN; Tailscale traffic uses HTTPS. -->
+<!-- No plain HTTP anywhere: the Crew server serves HTTPS on every network address. Its own certificate is
+     trusted by pin in code (data/Tls.kt); every other certificate must come from a system authority. -->
 <network-security-config>
-    <base-config cleartextTrafficPermitted="true" />
+    <base-config cleartextTrafficPermitted="false" />
 </network-security-config>

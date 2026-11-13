@@ -24,6 +24,13 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <!-- crew://connect?a=<address>&t=<token>&p=<pin>: the code ./master.sh token shows. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="crew" android:host="connect" />
+            </intent-filter>
         </activity>
         <service
             android:name=".LiveService"

@@ -1,19 +1,23 @@
-"""Entry point: `python -m crew_server [serve|token]`."""
+"""Entry point: `python -m crew_server [serve|token|connect]`."""
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
+import signal
 import socket
 import sys
+from urllib.parse import urlencode
 
 import asyncpg
 import uvicorn
 
-from . import db
+from . import __version__, db, tls
 from .api import create_app
-from .config import load_settings, read_or_create_token
+from .config import Settings, load_settings, read_or_create_token
 from .hub import Hub
+from .mdns import Announcer
 
 
 def lan_address() -> str:
@@ -23,22 +27,24 @@ def lan_address() -> str:
         return probe.getsockname()[0]
 
 
-def listen_sockets(hosts: str, port: int) -> list[socket.socket]:
+def listen_addresses(hosts: str) -> list[str]:
+    return [lan_address() if h == "lan" else h for h in dict.fromkeys(h.strip() for h in hosts.split(",") if h.strip())]
+
+
+def listen_sockets(hosts: str, port: int) -> list[tuple[str, socket.socket]]:
     """One listening socket per address in CREW_HOST ("127.0.0.1,lan", "0.0.0.0", ...).
 
     Binding chosen addresses instead of 0.0.0.0 lets Tailscale Serve use the same port on the
     Tailscale address while proxying to loopback.
     """
     sockets = []
-    for host in dict.fromkeys(h.strip() for h in hosts.split(",") if h.strip()):
-        address = lan_address() if host == "lan" else host
+    for address in listen_addresses(hosts):
         family = socket.AF_INET6 if ":" in address else socket.AF_INET
         sock = socket.socket(family, socket.SOCK_STREAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.bind((address, port))
         sock.set_inheritable(True)
-        sockets.append(sock)
-        logging.getLogger("crew").info("listening on %s:%s", address, port)
+        sockets.append((address, sock))
     return sockets
 
 
@@ -61,18 +67,107 @@ async def connect_with_retry(url: str):
             delay = min(delay * 2, 15)
 
 
+class _Server(uvicorn.Server):
+    """A uvicorn server that leaves signals to `serve`, which runs two of them side by side."""
+
+    @contextlib.contextmanager
+    def capture_signals(self):
+        yield
+
+
+def tls_marked(app):
+    """Marks requests that arrived over Crew's own HTTPS (`scope["crew_tls"]`), for the routes that take keys."""
+
+    async def marked(scope, receive, send):
+        if scope["type"] in ("http", "websocket"):
+            scope = {**scope, "crew_tls": True}
+        await app(scope, receive, send)
+
+    return marked
+
+
+def https_addresses(settings: Settings, addresses: list[str]) -> list[str]:
+    """The listening addresses that get HTTPS: every one but loopback (unless CREW_TLS=off)."""
+    if settings.tls == "off":
+        return []
+    return [a for a in addresses if not tls.is_loopback(a) and a not in ("0.0.0.0", "::")] or (
+        [a for a in addresses if a in ("0.0.0.0", "::")]
+    )
+
+
 async def serve() -> None:
+    log = logging.getLogger("crew")
     settings = load_settings()
     token = read_or_create_token(settings.token_file)
     sockets = listen_sockets(settings.host, settings.port)
+    secure = https_addresses(settings, [a for a, _ in sockets])
+    if secure:
+        tls.ensure_certificate(settings.tls_cert, settings.tls_key, [lan_address()] + secure)
     pool = await connect_with_retry(settings.database_url)
     hub = Hub(settings, pool)
     app = create_app(hub, token)
-    config = uvicorn.Config(app, log_level="info", proxy_headers=True)
+    servers: list[tuple[uvicorn.Server, list[socket.socket]]] = []
+    plain = [sock for address, sock in sockets if address not in secure]
+    https = [sock for address, sock in sockets if address in secure]
+    # The plain server owns the app's lifespan (hub, browser watcher); the HTTPS one only serves requests.
+    if plain:
+        servers.append((_Server(uvicorn.Config(app, log_level="info", proxy_headers=True)), plain))
+    if https:
+        config = uvicorn.Config(
+            tls_marked(app), log_level="info", proxy_headers=False, lifespan="on" if not plain else "off",
+            ssl_certfile=str(settings.tls_cert), ssl_keyfile=str(settings.tls_key),
+        )
+        servers.append((_Server(config), https))
+    for address, _ in sockets:
+        log.info("listening on %s://%s:%s", "https" if address in secure else "http", address, settings.port)
+    announcer = Announcer(secure, settings.port, __version__, tls.pin(settings.tls_cert)) if secure and settings.mdns else None
+
+    def stop(*_):
+        for server, _ in servers:
+            server.should_exit = True
+
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, stop)
+    tasks = [asyncio.create_task(server.serve(sockets=socks)) for server, socks in servers]
     try:
-        await uvicorn.Server(config).serve(sockets=sockets)
+        if announcer:
+            await announcer.start()
+        done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        stop()  # one stopped (or failed to start): stop the other too
+        await asyncio.gather(*tasks, return_exceptions=True)
+        for task in done:
+            task.result()
     finally:
+        if announcer:
+            await announcer.close()
         await pool.close()
+
+
+def connect_link(settings: Settings, token: str) -> str:
+    """The link the phone opens to connect (also shown as a QR code): addresses, the certificate pin, the token."""
+    addresses = []
+    for address in https_addresses(settings, listen_addresses(settings.host)):
+        if address in ("0.0.0.0", "::"):
+            address = lan_address()
+        addresses.append(f"https://{address}:{settings.port}")
+    if settings.tls == "off":
+        addresses += [f"http://{a}:{settings.port}" for a in listen_addresses(settings.host) if not tls.is_loopback(a)]
+    addresses += list(settings.urls)
+    query = [("a", a) for a in dict.fromkeys(addresses)] + [("t", token)]
+    if settings.tls != "off":
+        tls.ensure_certificate(settings.tls_cert, settings.tls_key, [lan_address()])
+        query.append(("p", tls.pin(settings.tls_cert)))
+    return "crew://connect?" + urlencode(query)
+
+
+def print_connect(settings: Settings, token: str) -> None:
+    import segno
+
+    link = connect_link(settings, token)
+    print("Scan this with the phone's camera, or open the link on the phone. It holds the token: keep it private.\n")
+    segno.make(link, error="m").terminal(compact=True)
+    print("\n" + link)
 
 
 def main() -> None:
@@ -81,10 +176,16 @@ def main() -> None:
     if command == "token":
         settings = load_settings()
         print(read_or_create_token(settings.token_file))
+    elif command == "connect":
+        settings = load_settings()
+        print_connect(settings, read_or_create_token(settings.token_file))
+    elif command == "pin":
+        settings = load_settings()
+        print(tls.pin(settings.tls_cert) if settings.tls_cert.is_file() else "no certificate yet (made on first start)")
     elif command == "serve":
         asyncio.run(serve())
     else:
-        raise SystemExit("usage: python -m crew_server [serve|token]")
+        raise SystemExit("usage: python -m crew_server [serve|token|connect|pin]")
 
 
 if __name__ == "__main__":

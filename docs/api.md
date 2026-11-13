@@ -1,14 +1,17 @@
 # Crew server API
 
-Base URL: `http://<server LAN address>:8800` (home network) or `https://<machine>.<tailnet>.ts.net:8800` (Tailscale Serve). `./master.sh status` prints both.
+Base URL: `https://<server address>:8800` on every network address, with Crew's own certificate, or an HTTPS proxy in front of Crew such as Tailscale Serve (`https://<machine>.<tailnet>.ts.net:8800`) or a domain. Plain HTTP is only on loopback (`http://127.0.0.1:8800`), for local tools and those proxies. `./master.sh status` prints the addresses.
 Every route except `/api/health` needs `Authorization: Bearer <token>`.
+
+Crew's certificate is self-signed; clients trust it by its pin, `sha256/` + base64 of the SHA-256 of its SubjectPublicKeyInfo (as in HPKP). The app learns it from the connect link `./master.sh token` shows (`crew://connect?a=<address>&a=...&t=<token>&p=<pin>`, also as a QR code), or over an address a certificate authority vouches for (`GET /api/tls`). The server announces its HTTPS address on the local network as `_crew._tcp` (mDNS, TXT `v` = version, `id` = the first 12 characters of the pin after `sha256/`), so the app finds it after an address change.
 
 | Method and path | Body | Returns |
 |---|---|---|
 | `GET /api/health` | | `{ok, version}` |
+| `GET /api/tls` | | `{enabled, pin}`: the pin of Crew's own certificate (null before the first start). |
 | `GET /api/state` | | `{last_seq, engines: [{id, name, default, agent, config_options, modes, steering, commands, profile, problem}], workdir}`. `commands` is what the agent last listed (see Session `commands`), so a new task can suggest them before its chat exists. `steering` is true when the agent advertised `_meta.steering.supported` in its ACP `initialize` answer (read from the agent, never assumed per engine). An engine never seen yet is probed in the background (a throwaway session), so its `config_options` fill in a few seconds later. `profile` is the profile the agent runs on (null: its sign-in account, or no gateway kind); `problem` says why it cannot run as set up now (its profile has no key, its sign-in account is not signed in). |
 | `GET /api/profiles` | | `{profiles: [{id, name, openai, anthropic, key_set, key_hint, agents}], presets: [{id, name, openai, anthropic}], managed}`. Keys never come back: only whether one is set and its last 4 characters. |
-| `POST /api/profiles` | `{name, openai?, anthropic?, key, preset?}` | the profile; 201. The gateway is asked for the key's models first (422 with the reason when it refuses). Saved to `profiles.toml`, the key to `keys.env` (mode 600); agents can run on it at once (Settings > Agents). |
+| `POST /api/profiles` | `{name, openai?, anthropic?, key, preset?}` | the profile; 201. A body with a key is accepted only over HTTPS (Crew's own, or a proxy on loopback); 403 otherwise. The gateway is asked for the key's models first (422 with the reason when it refuses). Saved to `profiles.toml`, the key to `keys.env` (mode 600); agents can run on it at once (Settings > Agents). |
 | `PATCH /api/profiles/{id}` | `{name?, openai?, anthropic?, key?}` | the profile. `""` removes an address. Idle agents on it restart with the new settings; a running turn finishes on the old ones. 409 when it takes away the address an agent running on it needs. |
 | `DELETE /api/profiles/{id}` | | `{ok}`; also removes its key from `keys.env`. 409 while an agent runs on it. |
 | `GET /api/agents` | | `{agents: [{engine, name, gateway, logged_in, account, error, profile, profile_choices, flow}]}`: each agent's sign-in account, from its CLI's status (cached a minute), the profile it runs on (`profile`, null: its sign-in account), and a sign-in in progress (`flow`: `{state, url, code, paste, error, expires_in}`). |

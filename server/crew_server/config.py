@@ -78,6 +78,13 @@ class Settings:
     data_dir: Path = Path.home() / ".crew"
     max_upload_mb: int = 1024
     share_dirs: tuple[Path, ...] = ()  # folders the agents hand files back from; empty means workdir/outputs
+    # HTTPS on every non-loopback address with Crew's own certificate ("auto"), or plain HTTP everywhere ("off").
+    tls: str = "auto"
+    tls_cert: Path = CONFIG_DIR / "tls.crt"
+    tls_key: Path = CONFIG_DIR / "tls.key"
+    mdns: bool = True  # announce the HTTPS address on the local network, so the app finds it by itself
+    # Other addresses the app should know (a Tailscale or public HTTPS name), for the connect link.
+    urls: tuple[str, ...] = ()
 
     @property
     def shared(self) -> list[Path]:
@@ -187,7 +194,19 @@ def load_settings() -> Settings:
         share_dirs=tuple(
             Path(os.path.expanduser(d)) for d in os.environ.get("CREW_SHARE_DIRS", "").split(os.pathsep) if d.strip()
         ),
+        tls=_choice("CREW_TLS", "auto", ("auto", "off")),
+        tls_cert=Path(os.path.expanduser(os.environ.get("CREW_TLS_CERT", str(CONFIG_DIR / "tls.crt")))),
+        tls_key=Path(os.path.expanduser(os.environ.get("CREW_TLS_KEY", str(CONFIG_DIR / "tls.key")))),
+        mdns=os.environ.get("CREW_MDNS", "1").strip().lower() not in ("0", "off", "no", "false"),
+        urls=tuple(u.strip().rstrip("/") for u in os.environ.get("CREW_URLS", "").split(",") if u.strip()),
     )
+
+
+def _choice(name: str, default: str, allowed: tuple[str, ...]) -> str:
+    value = os.environ.get(name, default).strip().lower() or default
+    if value not in allowed:
+        raise SystemExit(f"{name}={value!r}: use one of {', '.join(allowed)}")
+    return value
 
 
 def new_token() -> str:

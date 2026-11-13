@@ -302,8 +302,11 @@ async def managed(tmp_path, gateway, fake_codex, fake_claude):
     await pool.close()
 
 
-def client(hub: Hub, host: str = "127.0.0.1") -> httpx.AsyncClient:
+def client(hub: Hub, host: str = "127.0.0.1", https: bool = False) -> httpx.AsyncClient:
     app = create_app(hub, "test-token", lifespan_hub=False)
+    if https:
+        from crew_server.__main__ import tls_marked
+        app = tls_marked(app)
     return httpx.AsyncClient(transport=httpx.ASGITransport(app=app, client=(host, 5000)), base_url="http://test",
                              headers={"Authorization": "Bearer test-token"})
 
@@ -398,8 +401,11 @@ async def test_bad_keys_and_keys_over_plain_wifi_are_refused(managed, gateway):
         assert (await c.post("/api/profiles", json={"name": "GW", "openai": "ftp://x", "key": KEY})).status_code == 422
     async with client(managed, host="192.168.0.20") as lan:
         refused = await lan.post("/api/profiles", json={"name": "GW", "openai": f"{gateway}/v1", "key": KEY})
-        assert refused.status_code == 403 and "Tailscale" in refused.json()["detail"]
+        assert refused.status_code == 403 and "HTTPS" in refused.json()["detail"]
     assert managed.settings.profiles == {}
+    async with client(managed, host="192.168.0.20", https=True) as lan:  # Crew's own HTTPS: accepted
+        await add_gw(lan, gateway)
+    assert "gw" in managed.settings.profiles
 
 
 async def test_profiles_in_use_by_an_agent_are_kept(managed, gateway, tmp_path):

@@ -105,7 +105,7 @@ fun ProfilesCard(state: UiState, viewModel: CrewViewModel) {
         ProfileEditorSheet(
             existing = editing,
             presets = state.profiles.presets,
-            viaTailscale = (state.connection as? Connection.Online)?.route == "Tailscale" || state.settings.tailnetUrl.isNotBlank(),
+            secure = (state.connection as? Connection.Online)?.secure == true,
             viewModel = viewModel,
             onDismiss = { adding = false; editing = null },
         )
@@ -117,7 +117,7 @@ fun ProfilesCard(state: UiState, viewModel: CrewViewModel) {
 private fun ProfileEditorSheet(
     existing: ProfileInfo?,
     presets: List<ProfilePreset>,
-    viaTailscale: Boolean,
+    secure: Boolean,
     viewModel: CrewViewModel,
     onDismiss: () -> Unit,
 ) {
@@ -167,7 +167,7 @@ private fun ProfileEditorSheet(
                 supportingText = {
                     Text(
                         (if (existing?.keySet == true) "Set${existing.keyHint?.let { " (…$it)" } ?: ""}. Leave empty to keep it. " else "") +
-                            "Sent only over Tailscale, stored on the server, never shown again.",
+                            "Sent only over encrypted HTTPS, stored on the server, never shown again.",
                     )
                 },
                 visualTransformation = if (showKey) VisualTransformation.None else PasswordVisualTransformation(),
@@ -175,8 +175,8 @@ private fun ProfileEditorSheet(
                 trailingIcon = { TextButton(onClick = { showKey = !showKey }) { Text(if (showKey) "Hide" else "Show") } },
                 modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp),
             )
-            if (key.isNotBlank() && !viaTailscale) {
-                Text("Add the Tailscale address in Settings first: keys never go over plain home Wi-Fi.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+            if (key.isNotBlank() && !secure) {
+                Text("Not connected over encrypted HTTPS yet: keys never go over a plain connection.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
             }
             error?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.error) }
             Button(

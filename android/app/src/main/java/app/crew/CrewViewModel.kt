@@ -18,6 +18,7 @@ import app.crew.data.ChatItem
 import app.crew.data.ConfigOption
 import app.crew.data.ConnectionSettings
 import app.crew.data.CrewApi
+import app.crew.data.Discovery
 import app.crew.data.EngineDefaults
 import app.crew.data.EngineInfo
 import app.crew.data.Event
@@ -31,6 +32,7 @@ import app.crew.data.SchedulePreview
 import app.crew.data.SessionInfo
 import app.crew.data.Timeline
 import app.crew.data.UserItem
+import app.crew.data.Verified
 import app.crew.data.browserInput
 import app.crew.data.browserTabs
 import app.crew.data.closeBrowserTab
@@ -57,7 +59,8 @@ import org.json.JSONObject
 sealed interface Connection {
     data object NotSetUp : Connection
     data object Connecting : Connection
-    data class Online(val route: String, val version: String) : Connection
+    /** [route]: which address answered ("Home", "Tailscale", a host); [secure]: checked HTTPS. */
+    data class Online(val route: String, val version: String, val secure: Boolean = false) : Connection
     data class Offline(val reason: String) : Connection
 }
 
@@ -82,6 +85,8 @@ object NavTab {
 
 data class UiState(
     val settings: ConnectionSettings,
+    /** A connect link (crew://connect) waiting for the owner's yes: it would replace the server settings. */
+    val pendingConnect: ConnectionSettings? = null,
     val connection: Connection = Connection.Connecting,
     val engines: List<EngineInfo> = emptyList(),
     val sessions: List<SessionInfo> = emptyList(),
@@ -200,6 +205,55 @@ class CrewViewModel(private val app: Application) {
         connect()
     }
 
+    /** A crew://connect link (from `./master.sh token`): asks before it replaces the server settings. */
+    fun openConnectLink(uri: android.net.Uri) {
+        if (uri.scheme != "crew" || uri.host != "connect") return
+        val addresses = uri.getQueryParameters("a").flatMap(ConnectionSettings::parseAddresses).distinct()
+        val token = uri.getQueryParameter("t").orEmpty()
+        if (addresses.isEmpty() || token.isBlank()) {
+            _state.update { it.copy(message = "That connect link is incomplete") }
+            return
+        }
+        val pin = uri.getQueryParameter("p").orEmpty()
+        _state.update { it.copy(pendingConnect = ConnectionSettings(addresses, token, pin), navTab = NavTab.SETTINGS) }
+    }
+
+    fun answerConnectLink(accept: Boolean) {
+        val pending = _state.value.pendingConnect ?: return
+        _state.update { it.copy(pendingConnect = null) }
+        if (accept) saveSettings(pending)
+    }
+
+    /**
+     * The first address that answers; when none does, the local network is searched for the server (a router
+     * change may have moved it) and a found address is saved first in the list.
+     */
+    private fun reach(settings: ConnectionSettings): CrewApi = try {
+        CrewApi.resolve(settings)
+    } catch (e: Exception) {
+        if (settings.pin.isBlank()) throw e
+        val found = Discovery.find(app, settings.pin).filterNot { it in settings.addresses }
+        if (found.isEmpty()) throw e
+        val client = runCatching { CrewApi.resolve(settings, found) }.getOrNull()?.takeIf { it.verified == Verified.Pin } ?: throw e
+        prefs.save(settings.copy(addresses = listOf(client.baseUrl) + settings.addresses))
+        _state.update { it.copy(settings = prefs.load()) }
+        client
+    }
+
+    /**
+     * Over an address an authority vouches for (Tailscale, a domain), learn the server's own certificate pin,
+     * so the home network address can be checked too. Never learned over a pinned or plain connection.
+     */
+    private fun learnPin(client: CrewApi) {
+        if (client.verified != Verified.Authority) return
+        val pin = runCatching { client.tlsPin() }.getOrNull() ?: return
+        val current = prefs.load()
+        if (pin != current.pin) {
+            prefs.save(current.copy(pin = pin))
+            _state.update { it.copy(settings = prefs.load()) }
+        }
+    }
+
     private var sawDown = false
 
     private suspend fun runLoop(settings: ConnectionSettings) {
@@ -207,8 +261,10 @@ class CrewViewModel(private val app: Application) {
         _state.update { it.copy(connection = Connection.Connecting) }
         while (true) {
             try {
-                val client = CrewApi.resolve(settings)
+                // Settings learned while connecting (a pin, a found address) count; a new token restarts the loop.
+                val client = reach(prefs.load().takeIf { it.token == settings.token } ?: settings)
                 val version = client.health().optString("version")
+                learnPin(client)
                 val server = client.state()
                 api = client
                 val sessions = client.sessions().filterNot { it.id == _state.value.pendingDelete?.id }
@@ -217,7 +273,7 @@ class CrewViewModel(private val app: Application) {
                 val wasRestarting = _state.value.restarting && sawDown
                 _state.update {
                     it.copy(
-                        connection = Connection.Online(client.route.label, version),
+                        connection = Connection.Online(client.label, version, client.secure),
                         engines = server.engines,
                         sessions = sessions,
                         approvals = approvals,
@@ -246,6 +302,8 @@ class CrewViewModel(private val app: Application) {
                 api = null
                 val reason = when {
                     e is ApiException && e.code == 401 -> "The token was not accepted"
+                    e is javax.net.ssl.SSLException || e.cause is java.security.cert.CertificateException ->
+                        "The server's certificate is not the one this app trusts. On the server, run ./master.sh token and open its code here"
                     else -> e.message ?: e.javaClass.simpleName
                 }
                 if (_state.value.restarting) sawDown = true

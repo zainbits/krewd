@@ -49,6 +49,10 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun openFrom(intent: Intent?) {
+        intent?.data?.takeIf { it.scheme == "crew" }?.let {
+            viewModel.openConnectLink(it)
+            return
+        }
         intent?.getStringExtra(EXTRA_STOP_SESSION_ID)?.let {
             viewModel.askStop(it)
             return

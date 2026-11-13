@@ -4,39 +4,74 @@ import android.content.Context
 import app.crew.constants.Timing
 import java.io.IOException
 import java.net.HttpURLConnection
-import java.net.URL
 import org.json.JSONArray
 import org.json.JSONObject
 
-enum class Route(val label: String) { Lan("LAN"), Tailnet("Tailscale") }
-
-enum class NetworkChoice { Auto, Lan, Tailnet }
-
+/**
+ * Where the server is and how to trust it: addresses tried in order (home network, Tailscale, a domain...),
+ * the token, and the pin of the server's own certificate.
+ */
 data class ConnectionSettings(
-    val lanUrl: String,
-    val tailnetUrl: String,
+    val addresses: List<String>,
     val token: String,
-    val network: NetworkChoice,
+    val pin: String,
 ) {
-    val configured: Boolean get() = token.isNotBlank() && (lanUrl.isNotBlank() || tailnetUrl.isNotBlank())
+    val configured: Boolean get() = token.isNotBlank() && addresses.isNotEmpty()
+
+    companion object {
+        /** Addresses from text: one per line or comma, trimmed, without a trailing slash; http is upgraded. */
+        fun parseAddresses(text: String): List<String> =
+            text.split('\n', ',').map { normalize(it) }.filter { it.isNotEmpty() }.distinct()
+
+        fun normalize(address: String): String {
+            var a = address.trim().trimEnd('/')
+            if (a.isEmpty()) return a
+            if (!a.contains("://")) a = "https://$a"
+            // Crew serves HTTPS on every network address, and the app never sends anything in plain HTTP.
+            if (a.startsWith("http://")) a = "https://" + a.removePrefix("http://")
+            return a
+        }
+
+        /** A short name for an address: "Home" (private or .local), "Tailscale" (.ts.net), else its host. */
+        fun label(address: String): String {
+            val host = runCatching { java.net.URI(address).host }.getOrNull().orEmpty()
+            return when {
+                host.endsWith(".ts.net") -> "Tailscale"
+                host.endsWith(".local") || isPrivate(host) -> "Home"
+                host.isNotEmpty() -> host
+                else -> address
+            }
+        }
+
+        private fun isPrivate(host: String): Boolean {
+            val p = host.split('.').mapNotNull { it.toIntOrNull() }
+            if (p.size != 4) return false
+            return p[0] == 10 || (p[0] == 192 && p[1] == 168) || (p[0] == 172 && p[1] in 16..31)
+        }
+    }
 }
 
 class Prefs(context: Context) {
     private val prefs = context.getSharedPreferences("crew", Context.MODE_PRIVATE)
 
-    fun load() = ConnectionSettings(
-        lanUrl = prefs.getString("lan_url", DEFAULT_LAN)!!,
-        tailnetUrl = prefs.getString("tailnet_url", DEFAULT_TAILNET)!!,
-        token = prefs.getString("token", "")!!,
-        network = NetworkChoice.entries.getOrElse(prefs.getInt("network", 0)) { NetworkChoice.Auto },
-    )
+    fun load(): ConnectionSettings {
+        // Before 0.14 there were two fields, a home address (plain HTTP) and a Tailscale address.
+        val addresses = prefs.getString("addresses", null)?.let(ConnectionSettings::parseAddresses)
+            ?: listOfNotNull(prefs.getString("lan_url", null), prefs.getString("tailnet_url", null))
+                .flatMap(ConnectionSettings::parseAddresses).distinct()
+        return ConnectionSettings(
+            addresses = addresses,
+            token = prefs.getString("token", "")!!,
+            pin = prefs.getString("pin", "")!!,
+        )
+    }
 
     fun save(settings: ConnectionSettings) {
         prefs.edit()
-            .putString("lan_url", settings.lanUrl.trim().trimEnd('/'))
-            .putString("tailnet_url", settings.tailnetUrl.trim().trimEnd('/'))
+            .putString("addresses", settings.addresses.joinToString("\n"))
             .putString("token", settings.token.trim())
-            .putInt("network", settings.network.ordinal)
+            .putString("pin", settings.pin.trim())
+            .remove("lan_url").remove("tailnet_url").remove("network")
             .apply()
     }
 
@@ -79,10 +114,6 @@ class Prefs(context: Context) {
         if (engineId != null) updateEngine(engineId) { it.copy(cursor = cursor) }
     }
 
-    companion object {
-        const val DEFAULT_LAN = ""
-        const val DEFAULT_TAILNET = ""
-    }
 }
 
 /** One agent's remembered settings: its config picks (model, effort, mode...), legacy mode, auto-approve and browser input. */
@@ -116,10 +147,38 @@ data class EngineDefaults(
 class ApiException(val code: Int, message: String) : IOException(message)
 
 /** Blocking HTTP client for the Crew server; call it from Dispatchers.IO. */
-class CrewApi(val baseUrl: String, private val token: String, val route: Route) {
+class CrewApi(val baseUrl: String, private val token: String, private val pin: String) {
+    /** How this server was checked on the first request ([probe]). */
+    @Volatile var verified: Verified = Verified.Plain
+        private set
+
+    /** Encrypted and checked (pinned or vouched for by an authority): keys and secrets may go over it. */
+    val secure: Boolean get() = verified != Verified.Plain
+
+    val label: String get() = ConnectionSettings.label(baseUrl)
 
     fun health(timeoutMs: Int = Timing.CONNECT_TIMEOUT_MS): JSONObject =
         JSONObject(call("GET", "/api/health", null, timeoutMs, timeoutMs, auth = false))
+
+    /** The first request to an address: answers health and records how the server was checked. */
+    fun probe(timeoutMs: Int): JSONObject {
+        val conn = open("$baseUrl/api/health")
+        try {
+            conn.connectTimeout = timeoutMs
+            conn.readTimeout = timeoutMs
+            val code = conn.responseCode
+            if (code !in 200..299) throw ApiException(code, "HTTP $code")
+            verified = Tls.verifiedBy(conn, pin)
+            return JSONObject(conn.inputStream.bufferedReader().use { it.readText() })
+        } finally {
+            conn.disconnect()
+        }
+    }
+
+    /** The pin of the server's own certificate (GET /api/tls), or null when it has none. */
+    fun tlsPin(): String? = obj("GET", "/api/tls").optStringOrNull("pin")
+
+    private fun open(url: String): HttpURLConnection = Tls.open(url, pin)
 
     fun state(): ServerState {
         val o = obj("GET", "/api/state")
@@ -298,7 +357,7 @@ class CrewApi(val baseUrl: String, private val token: String, val route: Route) 
     /** Opens the live JPEG stream of one browser tab; read it with [FrameStream.read] off the main thread. */
     fun openBrowserStream(tabId: String, high: Boolean = false): FrameStream {
         val quality = if (high) "high" else "standard"
-        val conn = URL("$baseUrl/api/browser/tabs/$tabId/stream?quality=$quality").openConnection() as HttpURLConnection
+        val conn = open("$baseUrl/api/browser/tabs/$tabId/stream?quality=$quality")
         conn.connectTimeout = Timing.CONNECT_TIMEOUT_MS
         conn.readTimeout = 30_000 // the server repeats the last frame every 10 s
         conn.setRequestProperty("Authorization", "Bearer $token")
@@ -308,8 +367,7 @@ class CrewApi(val baseUrl: String, private val token: String, val route: Route) 
 
     /** Streams a file to the server (no size limit in memory). Returns the upload id. */
     fun upload(name: String, mime: String?, input: java.io.InputStream): String {
-        val conn = URL("$baseUrl/api/uploads?name=" + java.net.URLEncoder.encode(name, "UTF-8").replace("+", "%20"))
-            .openConnection() as HttpURLConnection
+        val conn = open("$baseUrl/api/uploads?name=" + java.net.URLEncoder.encode(name, "UTF-8").replace("+", "%20"))
         try {
             conn.requestMethod = "POST"
             conn.connectTimeout = Timing.CONNECT_TIMEOUT_MS
@@ -333,8 +391,7 @@ class CrewApi(val baseUrl: String, private val token: String, val route: Route) 
 
     /** Streams a file an agent handed back (GET /api/files) into [out]. */
     fun downloadFile(path: String, out: java.io.OutputStream) {
-        val conn = URL("$baseUrl/api/files?path=" + java.net.URLEncoder.encode(path, "UTF-8").replace("+", "%20"))
-            .openConnection() as HttpURLConnection
+        val conn = open("$baseUrl/api/files?path=" + java.net.URLEncoder.encode(path, "UTF-8").replace("+", "%20"))
         try {
             conn.connectTimeout = Timing.CONNECT_TIMEOUT_MS
             conn.readTimeout = 120_000
@@ -351,7 +408,7 @@ class CrewApi(val baseUrl: String, private val token: String, val route: Route) 
 
     /** An image from a tool result (GET /api/tool-images/{name}). */
     fun toolImage(name: String): ByteArray {
-        val conn = URL("$baseUrl/api/tool-images/" + java.net.URLEncoder.encode(name, "UTF-8")).openConnection() as HttpURLConnection
+        val conn = open("$baseUrl/api/tool-images/" + java.net.URLEncoder.encode(name, "UTF-8"))
         try {
             conn.connectTimeout = Timing.CONNECT_TIMEOUT_MS
             conn.readTimeout = 60_000
@@ -366,7 +423,7 @@ class CrewApi(val baseUrl: String, private val token: String, val route: Route) 
 
     /** A small JPEG of a browser tab (GET /api/browser/tabs/{id}/snapshot), [width] pixels wide. */
     fun tabSnapshot(tabId: String, width: Int): ByteArray {
-        val conn = URL("$baseUrl/api/browser/tabs/" + java.net.URLEncoder.encode(tabId, "UTF-8") + "/snapshot?width=$width").openConnection() as HttpURLConnection
+        val conn = open("$baseUrl/api/browser/tabs/" + java.net.URLEncoder.encode(tabId, "UTF-8") + "/snapshot?width=$width")
         try {
             conn.connectTimeout = Timing.CONNECT_TIMEOUT_MS
             conn.readTimeout = 15_000
@@ -394,7 +451,7 @@ class CrewApi(val baseUrl: String, private val token: String, val route: Route) 
         readTimeoutMs: Int = 20_000,
         auth: Boolean = true,
     ): String {
-        val conn = URL(baseUrl + path).openConnection() as HttpURLConnection
+        val conn = open(baseUrl + path)
         try {
             conn.requestMethod = method
             conn.connectTimeout = connectTimeoutMs
@@ -420,30 +477,23 @@ class CrewApi(val baseUrl: String, private val token: String, val route: Route) 
     }
 
     companion object {
-        /**
-         * A client for requests that carry a gateway key: always the Tailscale address (HTTPS), since the home
-         * network address is plain HTTP and the server refuses keys from it.
-         */
-        fun forKeys(current: CrewApi, settings: ConnectionSettings): CrewApi = when {
-            current.route == Route.Tailnet -> current
-            settings.tailnetUrl.isNotBlank() -> CrewApi(settings.tailnetUrl, settings.token, Route.Tailnet)
-            else -> throw ApiException(0, "Keys only go over Tailscale: add the Tailscale address above first")
+        /** A client for requests that carry a key or a secret: only over a checked HTTPS connection. */
+        fun forKeys(current: CrewApi, settings: ConnectionSettings): CrewApi {
+            if (current.secure) return current
+            for (address in settings.addresses) {
+                val api = CrewApi(address, settings.token, settings.pin)
+                if (runCatching { api.probe(Timing.CONNECT_TIMEOUT_MS) }.isSuccess && api.secure) return api
+            }
+            throw ApiException(0, "Keys only go over HTTPS, and no address answered over HTTPS")
         }
 
-        /** Picks the route to use. Auto tries the LAN first, since it is direct, then Tailscale. */
-        fun resolve(settings: ConnectionSettings): CrewApi {
-            val candidates = when (settings.network) {
-                NetworkChoice.Lan -> listOf(Route.Lan)
-                NetworkChoice.Tailnet -> listOf(Route.Tailnet)
-                NetworkChoice.Auto -> listOf(Route.Lan, Route.Tailnet)
-            }
+        /** The first of [addresses] that answers, tried in order; all but the last get a short timeout. */
+        fun resolve(settings: ConnectionSettings, addresses: List<String> = settings.addresses): CrewApi {
             var last: Exception? = null
-            for (route in candidates) {
-                val url = if (route == Route.Lan) settings.lanUrl else settings.tailnetUrl
-                if (url.isBlank()) continue
-                val api = CrewApi(url, settings.token, route)
+            addresses.forEachIndexed { i, address ->
+                val api = CrewApi(address, settings.token, settings.pin)
                 try {
-                    api.health(if (settings.network == NetworkChoice.Auto && route == Route.Lan) 1_500 else Timing.CONNECT_TIMEOUT_MS)
+                    api.probe(if (i < addresses.lastIndex) 2_000 else Timing.CONNECT_TIMEOUT_MS)
                     return api
                 } catch (e: Exception) {
                     last = e

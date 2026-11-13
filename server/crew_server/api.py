@@ -13,7 +13,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field, model_validator
 
-from . import __version__
+from . import __version__, tls
 from . import files as shared_files
 from .attachments import TooLarge
 from .browser import Browser, BrowserUnavailable, TabGone
@@ -121,9 +121,13 @@ class ProfileFields(BaseModel):
     preset: str | None = Field(default=None, max_length=40)  # on create: start from a preset (only the key needed)
 
 
-# Keys may only arrive from this machine: Tailscale Serve's HTTPS proxy and local tools connect from loopback,
-# while the phone on the home network talks plain HTTP from its own address.
+# Keys may only arrive over an encrypted, verified connection: Crew's own HTTPS (the app pins its certificate),
+# or from this machine, where an HTTPS proxy in front of Crew (Tailscale Serve, Caddy...) and local tools connect.
 LOOPBACK = {"127.0.0.1", "::1", "localhost"}
+
+
+def verified_channel(request: Request) -> bool:
+    return bool(request.scope.get("crew_tls")) or (request.client is not None and request.client.host in LOOPBACK)
 
 
 class LoginCode(BaseModel):
@@ -246,6 +250,12 @@ def create_app(hub: Hub, token: str, lifespan_hub: bool = True) -> FastAPI:
 
     auth = [Depends(require_token)]
 
+    @app.get("/api/tls", dependencies=auth)
+    async def tls_info() -> dict[str, Any]:
+        """The pin of Crew's own certificate, for an app that reached the server another trusted way."""
+        cert = hub.settings.tls_cert
+        return {"enabled": hub.settings.tls != "off", "pin": tls.pin(cert) if cert.is_file() else None}
+
     @app.get("/api/state", dependencies=auth)
     async def state() -> dict[str, Any]:
         return {
@@ -255,8 +265,8 @@ def create_app(hub: Hub, token: str, lifespan_hub: bool = True) -> FastAPI:
         }
 
     def key_route(request: Request, body: ProfileFields) -> None:
-        if body.key and (request.client is None or request.client.host not in LOOPBACK):
-            raise HTTPException(403, "Keys are only accepted over Tailscale (HTTPS), not plain home Wi-Fi")
+        if body.key and not verified_channel(request):
+            raise HTTPException(403, "Keys are only accepted over HTTPS, never plain HTTP")
 
     @app.get("/api/profiles", dependencies=auth)
     async def profiles() -> dict[str, Any]:

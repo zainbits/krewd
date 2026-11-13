@@ -31,19 +31,32 @@ import androidx.compose.ui.unit.dp
 import app.crew.Connection
 import app.crew.CrewViewModel
 import app.crew.UiState
-import app.crew.data.NetworkChoice
+import app.crew.data.ConnectionSettings
 
 @Composable
 fun SettingsScreen(state: UiState, viewModel: CrewViewModel, padding: PaddingValues) {
     val saved = state.settings
-    var lan by remember(saved) { mutableStateOf(saved.lanUrl) }
-    var tailnet by remember(saved) { mutableStateOf(saved.tailnetUrl) }
+    var addresses by remember(saved) { mutableStateOf(saved.addresses.joinToString("\n")) }
     var token by remember(saved) { mutableStateOf(saved.token) }
-    var network by remember(saved) { mutableStateOf(saved.network) }
     var showToken by remember { mutableStateOf(false) }
     var confirmRestart by remember { mutableStateOf(false) }
     val online = state.connection is Connection.Online
     LaunchedEffect(online) { if (online) viewModel.loadProfiles() }
+
+    state.pendingConnect?.let { pending ->
+        AlertDialog(
+            onDismissRequest = { viewModel.answerConnectLink(false) },
+            title = { Text("Connect to this Crew server?") },
+            text = {
+                Text(
+                    "This replaces the app's server settings with:\n\n" + pending.addresses.joinToString("\n") +
+                        "\n\nOnly say yes for a code from your own server (./master.sh token).",
+                )
+            },
+            confirmButton = { TextButton(onClick = { viewModel.answerConnectLink(true) }) { Text("Connect") } },
+            dismissButton = { TextButton(onClick = { viewModel.answerConnectLink(false) }) { Text("Cancel") } },
+        )
+    }
 
     if (confirmRestart) {
         AlertDialog(
@@ -75,29 +88,21 @@ fun SettingsScreen(state: UiState, viewModel: CrewViewModel, padding: PaddingVal
                 Text("Server", style = MaterialTheme.typography.titleMedium)
                 Text(
                     when (val c = state.connection) {
-                        is Connection.Online -> "Connected over ${c.route}. Crew ${c.version}" +
+                        is Connection.Online -> "Connected over ${c.route}" + (if (c.secure) " (encrypted)" else "") + ". Crew ${c.version}" +
                             (state.engines.takeIf { it.isNotEmpty() }?.joinToString(prefix = ". Agents: ") { it.name } ?: "")
                         is Connection.Offline -> "Offline: ${c.reason}"
                         Connection.Connecting -> "Connecting…"
-                        Connection.NotSetUp -> "Enter the server address and token to connect."
+                        Connection.NotSetUp -> "On the server, run ./master.sh token and open its code on this phone, or enter the address and token."
                     },
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 OutlinedTextField(
-                    value = lan, onValueChange = { lan = it },
-                    label = { Text("Home network address") },
-                    placeholder = { Text("http://192.168.1.10:8800") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(16.dp),
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
-                )
-                OutlinedTextField(
-                    value = tailnet, onValueChange = { tailnet = it },
-                    label = { Text("Tailscale address") },
-                    placeholder = { Text("https://machine.tailnet.ts.net:8800") },
-                    singleLine = true,
+                    value = addresses, onValueChange = { addresses = it },
+                    label = { Text("Server addresses") },
+                    placeholder = { Text("https://192.168.1.10:8800\nhttps://machine.tailnet.ts.net:8800") },
+                    supportingText = { Text("One per line, tried in order: home network, Tailscale, your domain.") },
+                    minLines = 2,
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(16.dp),
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
@@ -112,18 +117,18 @@ fun SettingsScreen(state: UiState, viewModel: CrewViewModel, padding: PaddingVal
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, autoCorrectEnabled = false),
                     trailingIcon = { TextButton(onClick = { showToken = !showToken }) { Text(if (showToken) "Hide" else "Show") } },
                 )
-                Text("Use", style = MaterialTheme.typography.labelLarge)
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    listOf(NetworkChoice.Auto to "Auto", NetworkChoice.Lan to "Home", NetworkChoice.Tailnet to "Tailscale").forEach { (choice, label) ->
-                        FilterChip(selected = network == choice, onClick = { network = choice }, label = { Text(label) })
-                    }
-                }
+                Text(
+                    if (saved.pin.isBlank()) "Server certificate: not known yet. It comes with the connect code, or over Tailscale."
+                    else "Server certificate: pinned (${saved.pin.removePrefix("sha256/").take(10)}…). The app refuses any other.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
                 Button(
-                    onClick = { viewModel.saveSettings(saved.copy(lanUrl = lan, tailnetUrl = tailnet, token = token, network = network)) },
+                    onClick = { viewModel.saveSettings(saved.copy(addresses = ConnectionSettings.parseAddresses(addresses), token = token)) },
                     modifier = Modifier.fillMaxWidth(),
                 ) { Text("Save and connect") }
                 Text(
-                    "On the server, ./master.sh status shows its addresses and ./master.sh token shows the token.",
+                    "On the server, ./master.sh token shows a code that fills all of this in.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

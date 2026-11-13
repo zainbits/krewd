@@ -124,13 +124,26 @@ PY
   fi
   curl -fsS -m 3 "http://127.0.0.1:$(port)/api/health" >/dev/null 2>&1 && ok "server answers on port $(port)" \
     || bad "server does not answer on port $(port)" "./master.sh logs"
+  if [[ "$(conf CREW_TLS auto)" == off ]]; then
+    warn "CREW_TLS=off: the home network gets plain HTTP, readable by anyone on it" "remove CREW_TLS from crew.env, then ./master.sh restart"
+  elif [[ -f "$(conf CREW_TLS_CERT "$CONFIG_DIR/tls.crt")" && -f "$(conf CREW_TLS_KEY "$CONFIG_DIR/tls.key")" ]]; then
+    [[ "$(stat -c %a "$(conf CREW_TLS_KEY "$CONFIG_DIR/tls.key")" 2>/dev/null)" == 600 ]] && ok "HTTPS certificate (pin $(uvrun python -m crew_server pin | cut -c1-19)...)" \
+      || warn "the HTTPS key is not mode 600" "chmod 600 $(conf CREW_TLS_KEY "$CONFIG_DIR/tls.key")"
+    local lan_ip; lan_ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+    if [[ -n "$lan_ip" && "$(conf CREW_HOST 127.0.0.1,lan)" == *lan* ]]; then
+      curl -kfsS -m 3 "https://$lan_ip:$(port)/api/health" >/dev/null 2>&1 && ok "HTTPS answers on the home network ($lan_ip)" \
+        || bad "no HTTPS on the home network address" "./master.sh restart, then ./master.sh logs"
+    fi
+  else
+    warn "no HTTPS certificate yet (made on first start)" "./master.sh restart"
+  fi
   curl -fsS -m 3 "http://127.0.0.1:$(cdp_port)/json/version" >/dev/null 2>&1 && ok "agent Brave answers on DevTools port $(cdp_port)" \
     || bad "agent Brave is not running" "log in to the desktop, then ./master.sh start browser"
   if has tailscale; then
     tailscale serve status 2>/dev/null | grep -q ":$(port)" && ok "Tailscale Serve publishes port $(port)" \
       || warn "Tailscale Serve does not publish Crew" "tailscale serve --bg --https=$(port) http://127.0.0.1:$(port)"
   else
-    warn "Tailscale is not installed: the phone works only on the home network" "install Tailscale"
+    say "  info  no Tailscale: the phone reaches Crew on the home network, or an HTTPS address in CREW_URLS"
   fi
 
   say "${B}Agent setup${N}"
@@ -198,7 +211,7 @@ PY
   say ""
   doctor
   say ""
-  say "Next: open the Crew app, Settings, enter this machine's address and the token (./master.sh token)."
+  say "Next: ./master.sh token, then scan its code with the phone (or open its link there) to connect the app."
 }
 
 # ---------------------------------------------------------------- run
@@ -219,7 +232,7 @@ status() {
   for u in "${UNITS[@]}"; do printf '%-22s %s\n' "$u" "$(systemctl --user is-active "$u" 2>/dev/null)"; done
   curl -fsS -m 3 "http://127.0.0.1:$(port)/api/health" 2>/dev/null && echo || say "server: not answering on $(port)"
   local ip; ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
-  say "Home network: http://${ip:-<this machine>}:$(port)"
+  [[ "$(conf CREW_TLS auto)" == off ]] && say "Home network: http://${ip:-<this machine>}:$(port)" || say "Home network: https://${ip:-<this machine>}:$(port)"
   if has tailscale; then
     local dns; dns="$(tailscale status --json 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["Self"]["DNSName"].rstrip("."))' 2>/dev/null)"
     [[ -n "$dns" ]] && say "Tailscale:    https://$dns:$(port)"
@@ -237,8 +250,8 @@ logs() {
 attach() { local s=crew; [[ "${1:-}" == browser || "${1:-}" == brave ]] && s=agent-brave; say "Detach with Ctrl+B, then D."; tmux attach -t "=$s"; }
 
 token() {
-  say "The app's token (Settings > Token). Keep it private."
-  uvrun python -m crew_server token
+  # The connect code: the app's addresses, the certificate pin and the token, as a QR code and a link.
+  uvrun python -m crew_server connect
 }
 
 run_tests() {
@@ -323,7 +336,7 @@ ${B}Crew master script${N} ($REPO)
   start|stop|restart [server|browser|all]
   logs [server|browser]     recent output
   attach [server|browser]   watch live in tmux (detach: Ctrl+B, then D)
-  token          show the token the phone app needs
+  token          show the code (QR and link) that connects the phone app
   test           run the server tests
   update         pull the latest code, reinstall, restart
   app            build the Android app and install it over adb
