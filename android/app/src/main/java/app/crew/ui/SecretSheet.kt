@@ -10,14 +10,12 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.ModalBottomSheetProperties
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -31,12 +29,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.autofill.ContentType
-import androidx.compose.ui.semantics.contentType
-import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.text.input.PasswordVisualTransformation
-import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.SecureFlagPolicy
 import app.crew.CrewViewModel
@@ -58,8 +50,8 @@ fun SecretCard(ask: SecretAsk, engineName: String, shape: RoundedCornerShape, on
 }
 
 /**
- * The secure sheet for a sign-in request: real username/password fields (so a password manager can fill them, or
- * paste), no screenshots or screen recording, no keyboard learning. Send asks for the fingerprint, then Crew types
+ * The secure sheet for a sign-in request: real username/password fields that tell password managers which website
+ * they belong to (so Bitwarden and others offer the saved login for that site), or paste, no screenshots or screen recording, no keyboard learning. Send asks for the fingerprint, then Crew types
  * the values into the page and submits it; the agent only hears whether it worked.
  */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -70,6 +62,7 @@ fun SecretSheet(ask: SecretAsk, viewModel: CrewViewModel, onDismiss: () -> Unit)
     var sending by remember(ask.id) { mutableStateOf(false) }
     var error by remember(ask.id) { mutableStateOf<String?>(null) }
     val activity = LocalActivity.current
+    val site = remember(ask.id) { SiteAddress.of(ask.origin) }
     DisposableEffect(Unit) {
         activity?.window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
         onDispose {
@@ -94,35 +87,17 @@ fun SecretSheet(ask: SecretAsk, viewModel: CrewViewModel, onDismiss: () -> Unit)
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             ask.fields.forEach { field ->
-                OutlinedTextField(
-                    value = values[field.name].orEmpty(),
-                    onValueChange = { values[field.name] = it },
-                    label = { Text(field.label) },
-                    singleLine = true,
+                SiteField(
+                    label = field.label,
+                    kind = field.kind,
+                    name = field.name,
+                    site = site,
                     enabled = !sending,
-                    visualTransformation = if (field.kind == "password" && !shown) PasswordVisualTransformation() else VisualTransformation.None,
-                    keyboardOptions = KeyboardOptions(
-                        keyboardType = when (field.kind) {
-                            "password" -> KeyboardType.Password
-                            "otp" -> KeyboardType.NumberPassword
-                            "email", "username" -> KeyboardType.Email
-                            else -> KeyboardType.Text
-                        },
-                        autoCorrectEnabled = false,
-                    ),
-                    trailingIcon = if (field.kind == "password") {
+                    shown = shown,
+                    onValueChange = { values[field.name] = it },
+                    trailing = if (field.kind == "password") {
                         { TextButton(onClick = { shown = !shown }) { Text(if (shown) "Hide" else "Show") } }
                     } else null,
-                    shape = RoundedCornerShape(16.dp),
-                    modifier = Modifier.fillMaxWidth().semantics {
-                        contentType = when (field.kind) {
-                            "password" -> ContentType.Password
-                            "otp" -> ContentType.SmsOtpCode
-                            "email" -> ContentType.EmailAddress
-                            "username" -> ContentType.Username
-                            else -> ContentType.Username
-                        }
-                    },
                 )
             }
             error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium) }

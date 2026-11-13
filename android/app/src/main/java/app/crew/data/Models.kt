@@ -441,6 +441,8 @@ data class SecretAsk(
     val id: String,
     val sessionId: String,
     val site: String,
+    /** The page's origin ("https://www.example.com"), which the sheet hands to password managers. */
+    val origin: String,
     val reason: String,
     val fields: List<SecretField>,
     val status: String,
@@ -453,6 +455,7 @@ data class SecretAsk(
             id = o.optString("id"),
             sessionId = o.optString("session_id"),
             site = o.optString("site"),
+            origin = o.optString("origin"),
             reason = o.optString("reason"),
             fields = o.optJSONArray("fields").objects().map { SecretField(it.optString("name"), it.optString("label"), it.optString("kind")) },
             status = o.optString("status"),
