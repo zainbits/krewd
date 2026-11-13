@@ -90,7 +90,7 @@ fun SecurityCard(state: UiState, viewModel: CrewViewModel) {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
                         Text(device.name + if (device.current) " (this phone)" else "", style = MaterialTheme.typography.bodyLarge)
-                        Text("Added ${device.createdAt.take(10)}" + (device.lastSeen?.let { ", last seen ${it.take(10)}" } ?: ""),
+                        Text("Added ${localTime(device.createdAt)}" + (device.lastSeen?.let { ", last seen ${localTime(it)}" } ?: ""),
                             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                     TextButton(onClick = { removing = device }, enabled = online && state.securityStep == null) { Text("Remove") }
@@ -106,3 +106,9 @@ fun SecurityCard(state: UiState, viewModel: CrewViewModel) {
         error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium) }
     }
 }
+
+/** An ISO time from the server, in this phone's time zone: "14 Nov, 01:29". */
+private fun localTime(iso: String): String = runCatching {
+    java.time.OffsetDateTime.parse(iso).atZoneSameInstant(java.time.ZoneId.systemDefault())
+        .format(java.time.format.DateTimeFormatter.ofPattern("d MMM, HH:mm"))
+}.getOrDefault(iso.take(10))

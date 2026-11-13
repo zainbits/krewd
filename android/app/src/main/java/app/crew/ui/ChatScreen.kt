@@ -132,6 +132,9 @@ fun ChatScreen(state: UiState, viewModel: CrewViewModel) {
 
     val bars = WindowInsets.statusBars.union(WindowInsets.displayCutout).asPaddingValues()
     var settingsOpen by rememberSaveable(state.openSessionId) { mutableStateOf(false) }
+    // This chat's sign-in requests, at the bottom of the chat (also under Needs you on the Crew tab).
+    val signIns = state.secrets.filter { it.pending && it.sessionId == session?.id }
+    var filling by remember(state.openSessionId) { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
     val density = LocalDensity.current
     // Height of everything pinned at the bottom (composer, chips, keyboard), measured, so the last message
@@ -151,6 +154,15 @@ fun ChatScreen(state: UiState, viewModel: CrewViewModel) {
             reverseLayout = true,
             verticalArrangement = Arrangement.spacedBy(10.dp, Alignment.Bottom),
         ) {
+            items(signIns, key = { "secret-" + it.id }) { ask ->
+                SecretCard(
+                    ask = ask,
+                    engineName = session?.let { s -> state.engine(s.engine)?.name ?: s.engine } ?: "Agent",
+                    shape = RoundedCornerShape(20.dp),
+                    onFill = { filling = ask.id },
+                    onOpen = { filling = ask.id },
+                )
+            }
             items(rows, key = { it.key }) { item -> ChatRow(item, viewModel, session?.isBusy == true, commands) }
             if (state.timelineLoading && rows.isEmpty()) {
                 item(key = "loading") { CircularProgressIndicator(Modifier.padding(24.dp)) }
@@ -171,6 +183,7 @@ fun ChatScreen(state: UiState, viewModel: CrewViewModel) {
             )
         }
 
+        signIns.firstOrNull { it.id == filling }?.let { ask -> SecretSheet(ask = ask, viewModel = viewModel, onDismiss = { filling = null }) }
         ChatTopBar(state, viewModel, onSettings = { settingsOpen = true })
         if (settingsOpen && session != null) ChatSettingsSheet(state, viewModel, session, onDismiss = { settingsOpen = false })
 
