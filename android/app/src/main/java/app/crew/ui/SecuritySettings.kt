@@ -41,6 +41,7 @@ fun SecurityCard(state: UiState, viewModel: CrewViewModel) {
             title = { Text("Security key") },
             text = { Text(step) },
             confirmButton = {},
+            dismissButton = { TextButton(onClick = { viewModel.cancelKeyStep() }) { Text("Cancel") } },
         )
     }
     removing?.let { device ->
@@ -66,7 +67,7 @@ fun SecurityCard(state: UiState, viewModel: CrewViewModel) {
                     "Set this phone up with your security key. Crew then trusts only your phones: this phone proves itself with its own key, " +
                         "your fingerprint confirms sign-ins and gateway keys, and adding a phone needs a tap of the key. The setup token stops working."
                 else
-                    "Set this phone up with your security key: hold it to the back of the phone when asked.",
+                    "Set this phone up with your security key: plug it into the phone's USB-C port (or hold it to the back, on phones with NFC) and touch it when asked.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

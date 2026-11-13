@@ -1311,6 +1311,17 @@ class CrewViewModel(private val app: Application) {
         return "$nonce.${b64(sig)}"
     }
 
+    /** What the security key screen says: plug in or hold the key, then touch it. */
+    private val keyStep = U2f.Step { text -> _state.update { it.copy(securityStep = text) } }
+
+    private var keyJob: Job? = null
+
+    /** Stops waiting for the security key (the owner tapped Cancel). */
+    fun cancelKeyStep() {
+        keyJob?.cancel()
+        _state.update { it.copy(securityStep = null) }
+    }
+
     fun loadSecurity() = act { client ->
         val o = client.securityState()
         val devices = o.optJSONArray("devices").objects().map(Device::from)
@@ -1347,7 +1358,7 @@ class CrewViewModel(private val app: Application) {
      */
     fun pairPhone(name: String, done: (String?) -> Unit) {
         val front = activity?.get() ?: return done("Open Crew first")
-        scope.launch {
+        keyJob = scope.launch {
             val error = try {
                 _state.update { it.copy(securityStep = "Getting ready…") }
                 val settings = prefs.load()
@@ -1365,11 +1376,11 @@ class CrewViewModel(private val app: Application) {
                 val (deviceKey, presenceKey) = keys
                 val payload = "$deviceId|${b64(sha256(deviceKey))}|${b64(sha256(presenceKey))}|$pinSeen"
                 val challenge = sha256("crew-u2f-v1\npair\n$nonce\n$payload".toByteArray())
-                _state.update { it.copy(securityStep = "Hold your security key flat against the back of the phone") }
                 val tap = U2f.tap(
                     front, unb64(n.getString("app_param")), challenge,
                     keyHandle = n.optStringOrNull("key_handle")?.let(::unb64),
                     registerChallenge = if (first) sha256("crew-register\n$nonce".toByteArray()) else null,
+                    step = keyStep,
                 )
                 _state.update { it.copy(securityStep = "Checking with Crew…") }
                 val body = JSONObject().put("nonce", nonce).put("device_id", deviceId).put("name", name.ifBlank { android.os.Build.MODEL })
@@ -1386,6 +1397,8 @@ class CrewViewModel(private val app: Application) {
                 _state.update { it.copy(settings = prefs.load(), message = "This phone is set up with your security key") }
                 connect()
                 null
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                "Cancelled"
             } catch (e: Exception) {
                 e.message ?: "Pairing failed"
             } finally {
@@ -1399,13 +1412,12 @@ class CrewViewModel(private val app: Application) {
     fun removeDevice(device: Device, done: (String?) -> Unit) {
         val front = activity?.get() ?: return done("Open Crew first")
         val client = api ?: return done("Not connected to Crew")
-        scope.launch {
+        keyJob = scope.launch {
             val error = try {
                 val n = withContext(Dispatchers.IO) { client.nonce("revoke") }
                 val nonce = n.getString("nonce")
-                _state.update { it.copy(securityStep = "Hold your security key flat against the back of the phone") }
                 val tap = U2f.tap(front, unb64(n.getString("app_param")), sha256("crew-u2f-v1\nrevoke\n$nonce\n${device.id}".toByteArray()),
-                    keyHandle = unb64(n.getString("key_handle")))
+                    keyHandle = unb64(n.getString("key_handle")), step = keyStep)
                 withContext(Dispatchers.IO) {
                     client.revokeDevice(device.id, JSONObject().put("nonce", nonce).put("assertion", b64(tap.assertion)))
                 }
@@ -1418,6 +1430,8 @@ class CrewViewModel(private val app: Application) {
                     loadSecurity()
                 }
                 null
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                "Cancelled"
             } catch (e: Exception) {
                 e.message ?: "Could not remove the phone"
             } finally {
