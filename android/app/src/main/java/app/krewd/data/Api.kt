@@ -35,15 +35,21 @@ data class ConnectionSettings(
             return a
         }
 
-        /** A short name for an address: "Home" (private or .local), "Tailscale" (.ts.net), else its host. */
+        /** A short name for an address: "Home" (private or .local), "Tailscale" (.ts.net or 100.64.0.0/10), else its host. */
         fun label(address: String): String {
             val host = runCatching { java.net.URI(address).host }.getOrNull().orEmpty()
             return when {
-                host.endsWith(".ts.net") -> "Tailscale"
+                host.endsWith(".ts.net") || isTailscale(host) -> "Tailscale"
                 host.endsWith(".local") || isPrivate(host) -> "Home"
                 host.isNotEmpty() -> host
                 else -> address
             }
+        }
+
+        /** Tailscale's own addresses: 100.64.0.0/10 (shared address space). */
+        private fun isTailscale(host: String): Boolean {
+            val p = host.split('.').mapNotNull { it.toIntOrNull() }
+            return p.size == 4 && p[0] == 100 && p[1] in 64..127
         }
 
         private fun isPrivate(host: String): Boolean {
