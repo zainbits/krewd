@@ -17,7 +17,11 @@
   <img alt="Agents: ACP" src="https://img.shields.io/badge/agents-Agent%20Client%20Protocol-8a63d2">
 </p>
 
-<!-- Demo video and screenshots: docs/media/ (added with the launch). -->
+<p align="center">
+  <img src="docs/media/hero-strip.png" alt="Krewd on a phone: a routine at work, a live task with the agent's browser, a secure sign-in sheet, and a release shipped by a routine">
+</p>
+
+<!-- Demo video: added with the launch. -->
 
 ## Why Krewd
 
@@ -62,6 +66,23 @@ them from anywhere.
   skills as you type.
 - **Live notifications.** Android 16 live updates for running tasks, plus alerts when an agent needs
   you, finishes or fails.
+
+## A look inside
+
+<table>
+  <tr>
+    <td align="center" width="25%"><img src="docs/media/screens/home-working.png" alt="Home screen with one routine working"><br><sub>Your crew at a glance: what needs you, what is running, what is next.</sub></td>
+    <td align="center" width="25%"><img src="docs/media/screens/approval.png" alt="An approval card on the home screen"><br><sub>Agents ask before they push, pay, send or publish. Answer on the card.</sub></td>
+    <td align="center" width="25%"><img src="docs/media/screens/chat-live.png" alt="A chat with the live view of the agent's browser tab"><br><sub>Live plan, every step, and the agent's own browser tab in picture-in-picture.</sub></td>
+    <td align="center" width="25%"><img src="docs/media/screens/sign-in.png" alt="The secure sign-in sheet"><br><sub>Sign-ins from your phone and password manager. The agent never sees them.</sub></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="docs/media/screens/browser.png" alt="The Browser tab showing a website fitted to the phone"><br><sub>Drive the agents' browser yourself: cursor with hover, touch, keyboard.</sub></td>
+    <td align="center"><img src="docs/media/screens/routine.png" alt="A routine with its instructions, notes and runs"><br><sub>Routines with triggers, versioned instructions and notes each run learns from.</sub></td>
+    <td align="center"><img src="docs/media/screens/release.png" alt="A weekly release train routine's result"><br><sub>A weekly routine that turns user feedback into a shipped release.</sub></td>
+    <td align="center"><sub>Screens from Krewd's demo server (<code>./master.sh demo</code>), with made-up data. The websites are real.</sub></td>
+  </tr>
+</table>
 
 ## How it works
 
