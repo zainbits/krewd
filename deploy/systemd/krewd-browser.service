@@ -1,0 +1,19 @@
+# Installed by ./master.sh (it fills in @REPO@ and @CDP_PORT@). Starts with the desktop login.
+[Unit]
+Description=Krewd agent browser (Brave; watch it: tmux attach -t agent-brave)
+PartOf=graphical-session.target
+After=graphical-session.target
+# Give up after 6 restarts in 10 minutes (something keeps killing it); ./master.sh start retries.
+StartLimitIntervalSec=600
+StartLimitBurst=6
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 @REPO@/deploy/supervise.py --session agent-brave --close-cdp @CDP_PORT@ -- @REPO@/deploy/run-browser.sh
+Restart=always
+RestartSec=10
+KillMode=process
+TimeoutStopSec=40
+
+[Install]
+WantedBy=graphical-session.target

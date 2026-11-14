@@ -7,8 +7,8 @@ plugins {
 
 // One version for the app and the server: VERSION at the repo root. The version code follows from it
 // (0.8.1 is 801), so it always grows with the version.
-val crewVersion = providers.fileContents(rootProject.layout.projectDirectory.file("../VERSION")).asText.get().trim()
-val crewVersionCode = crewVersion.split(".").map(String::toInt).let { (major, minor, patch) -> major * 10_000 + minor * 100 + patch }
+val krewdVersion = providers.fileContents(rootProject.layout.projectDirectory.file("../VERSION")).asText.get().trim()
+val krewdVersionCode = krewdVersion.split(".").map(String::toInt).let { (major, minor, patch) -> major * 10_000 + minor * 100 + patch }
 
 // Signing key, kept outside the repo: a properties file with storeFile (relative to the file),
 // storePassword, keyAlias and keyPassword. Default ~/.android/keystores/release.properties;
@@ -19,15 +19,15 @@ val signingFile = System.getenv("ANDROID_SIGNING_PROPERTIES")?.let(::File)
 val signing = signingFile.takeIf { it.isFile }?.let { file -> Properties().apply { file.inputStream().use(::load) } }
 
 android {
-    namespace = "app.crew"
+    namespace = "app.krewd"
     compileSdk = 37
 
     defaultConfig {
-        applicationId = "app.crew"
+        applicationId = "app.krewd"
         minSdk = 36
         targetSdk = 37
-        versionCode = crewVersionCode
-        versionName = crewVersion
+        versionCode = krewdVersionCode
+        versionName = krewdVersion
     }
 
     signingConfigs {

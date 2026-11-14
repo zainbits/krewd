@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Start the Crew server in the foreground (systemd runs this inside tmux session "crew").
+# Start the Krewd server in the foreground (systemd runs this inside tmux session "krewd").
 set -euo pipefail
 source "$(dirname "$0")/lib.sh"
 # Agents need the same tools as the owner's own terminal (gh, browser-harness, SDKs), so take the login
@@ -13,4 +13,4 @@ cd "$REPO/server"
 "$UV" sync --frozen --quiet
 # exec the environment's Python itself (not `uv run`), so the tmux pane process is the server and a
 # crash or stop never leaves an orphan holding the port.
-exec "$REPO/server/.venv/bin/python" -m crew_server serve
+exec "$REPO/server/.venv/bin/python" -m krewd_server serve

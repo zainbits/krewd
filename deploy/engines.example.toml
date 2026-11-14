@@ -1,5 +1,5 @@
-# Crew engines: any command that speaks the Agent Client Protocol (ACP) on stdin/stdout.
-# Copy to ~/.config/crew/engines.toml. The app lists every engine here; "default" is preselected.
+# Krewd engines: any command that speaks the Agent Client Protocol (ACP) on stdin/stdout.
+# Copy to ~/.config/krewd/engines.toml. The app lists every engine here; "default" is preselected.
 default = "claude"
 
 [engines.claude]
@@ -11,7 +11,7 @@ command = ["~/.local/bin/claude-agent-acp"]
 gateway = "claude"
 
 [engines.claude.env]
-# browser-harness attaches to the agents' Brave (crew-browser.service) instead of launching one.
+# browser-harness attaches to the agents' Brave (krewd-browser.service) instead of launching one.
 BU_CDP_URL = "http://127.0.0.1:9222"
 BH_TELEMETRY = "0"
 BH_UPDATE_CHECK = "0"
@@ -23,7 +23,7 @@ BH_TAB_MARKER = "0"
 # gateway = "codex"
 #
 # [engines.codex.env]
-# # The Codex that codex-acp runs, and that Crew reads Codex's model catalog from for profiles.
+# # The Codex that codex-acp runs, and that Krewd reads Codex's model catalog from for profiles.
 # CODEX_PATH = "/path/to/codex"
 # BU_CDP_URL = "http://127.0.0.1:9222"
 # BH_TELEMETRY = "0"

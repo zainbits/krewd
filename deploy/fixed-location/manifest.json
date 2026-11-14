@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Crew fixed location",
+  "name": "Krewd fixed location",
   "version": "1.0",
-  "description": "Answers pages' location requests with this machine's fixed location from Crew's config (CREW_BROWSER_LOCATION).",
+  "description": "Answers pages' location requests with this machine's fixed location from Krewd's config (KREWD_BROWSER_LOCATION).",
   "content_scripts": [
     {
       "matches": ["<all_urls>"],

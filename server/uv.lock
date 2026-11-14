@@ -208,7 +208,7 @@ wheels = [
 ]
 
 [[package]]
-name = "crew-server"
+name = "krewd-server"
 source = { editable = "." }
 dependencies = [
     { name = "asyncpg" },

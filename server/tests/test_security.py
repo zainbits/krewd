@@ -14,17 +14,17 @@ import pytest
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 
-import crew_server.api as api_module
-from crew_server import db, tls
-from crew_server.__main__ import tls_marked
-from crew_server.api import create_app
-from crew_server.config import Engine, Settings, load_env_file
-from crew_server.hub import Hub
-from crew_server.security import APP_PARAM, challenge_param, device_message, pair_payload, presence_message
+import krewd_server.api as api_module
+from krewd_server import db, tls
+from krewd_server.__main__ import tls_marked
+from krewd_server.api import create_app
+from krewd_server.config import Engine, Settings, load_env_file
+from krewd_server.hub import Hub
+from krewd_server.security import APP_PARAM, challenge_param, device_message, pair_payload, presence_message
 
 load_env_file()
-DATABASE_URL = os.environ.get("CREW_TEST_DATABASE_URL")
-pytestmark = pytest.mark.skipif(not DATABASE_URL, reason="CREW_TEST_DATABASE_URL is not set")
+DATABASE_URL = os.environ.get("KREWD_TEST_DATABASE_URL")
+pytestmark = pytest.mark.skipif(not DATABASE_URL, reason="KREWD_TEST_DATABASE_URL is not set")
 FAKE = Path(__file__).with_name("fake_agent.py")
 SETUP = "setup-token"
 
@@ -121,14 +121,14 @@ def app(hub):
 
 
 def lan(app, auth: str | None = None) -> httpx.AsyncClient:
-    """The phone over Crew's own HTTPS on the home network."""
+    """The phone over Krewd's own HTTPS on the home network."""
     headers = {"Authorization": f"Bearer {auth}"} if auth else {}
     return httpx.AsyncClient(transport=httpx.ASGITransport(app=tls_marked(app), client=("192.168.0.20", 5000)),
-                             base_url="https://crew", headers=headers)
+                             base_url="https://krewd", headers=headers)
 
 
 def local(app, auth: str) -> httpx.AsyncClient:
-    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app, client=("127.0.0.1", 5000)), base_url="http://crew",
+    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app, client=("127.0.0.1", 5000)), base_url="http://krewd",
                              headers={"Authorization": f"Bearer {auth}"})
 
 
@@ -180,7 +180,7 @@ async def test_first_phone_pairs_with_the_setup_token_which_then_stays_on_the_ma
     assert owner.stat().st_mode & 0o777 == 0o600 and json.loads(owner.read_text())["counter"] == key.counter
     new_token = hub.settings.token_file.read_text().strip()
     assert new_token != SETUP
-    async with local(app, new_token) as c:  # the crew command on the machine itself
+    async with local(app, new_token) as c:  # the krewd command on the machine itself
         assert (await c.get("/api/state")).status_code == 200
     async with lan(app, new_token) as c:  # but never from the network
         assert (await c.get("/api/state")).status_code == 401
@@ -195,7 +195,7 @@ async def test_first_phone_pairs_with_the_setup_token_which_then_stays_on_the_ma
     async with lan(app, again.json()["session"]) as c:
         assert (await c.get("/api/state")).status_code == 200
     # The connect code no longer carries the token.
-    from crew_server.__main__ import connect_link
+    from krewd_server.__main__ import connect_link
     assert "&t=" not in connect_link(hub.settings, new_token)
 
 
@@ -233,10 +233,10 @@ async def test_keys_and_phone_removal_need_the_fingerprint_or_the_key(hub, app):
         headers = {"Content-Type": "application/json"}
         assert (await c.post("/api/profiles", content=body, headers=headers)).status_code == 403
         bad = await presence(c, phone, "POST", "/api/profiles", b"another body")
-        assert (await c.post("/api/profiles", content=body, headers={**headers, "X-Crew-Presence": bad})).status_code == 403
+        assert (await c.post("/api/profiles", content=body, headers={**headers, "X-Krewd-Presence": bad})).status_code == 403
         good = await presence(c, phone, "POST", "/api/profiles", body)
         # Past the fingerprint check (what follows is the profile's own answer: not managed here, or incomplete).
-        assert (await c.post("/api/profiles", content=body, headers={**headers, "X-Crew-Presence": good})).status_code not in (401, 403)
+        assert (await c.post("/api/profiles", content=body, headers={**headers, "X-Krewd-Presence": good})).status_code not in (401, 403)
         n = (await nonce(c, "revoke"))["nonce"]
         assert (await c.post(f"/api/security/devices/{other.id}/revoke", json={"nonce": n, "assertion": b64(FakeKey().sign(challenge_param("revoke", n, other.id)))})).status_code == 403
         n = (await nonce(c, "revoke"))["nonce"]
@@ -300,11 +300,11 @@ async def test_sign_in_requests_go_from_the_phone_into_the_page_and_nowhere_else
         no_finger = await c.post(path, content=body, headers={"Content-Type": "application/json"})
         assert no_finger.status_code == 403
         finger = await presence(c, phone, "POST", path, body)
-        filled = await c.post(path, content=body, headers={"Content-Type": "application/json", "X-Crew-Presence": finger})
+        filled = await c.post(path, content=body, headers={"Content-Type": "application/json", "X-Krewd-Presence": finger})
         assert filled.status_code == 200, filled.text
         assert filled.json()["status"] == "filled" and filled.json()["url"] == "https://login.example.com/home"
         again = await presence(c, phone, "POST", path, body)
-        assert (await c.post(path, content=body, headers={"Content-Type": "application/json", "X-Crew-Presence": again})).status_code == 409
+        assert (await c.post(path, content=body, headers={"Content-Type": "application/json", "X-Krewd-Presence": again})).status_code == 409
     browser = app.state.security  # noqa: F841 - the fake browser saw the values; nothing else did
     rows = await hub.pool.fetch("select payload::text as p from events where kind = 'secret'")
     assert rows and not any(secret in r["p"] or "me@example.com" in r["p"] for r in rows)

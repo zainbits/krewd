@@ -1,7 +1,7 @@
 [project]
-name = "crew-server"
+name = "krewd-server"
 dynamic = ["version"]
-description = "Crew server: runs ACP coding agents on the host and serves the Crew apps"
+description = "Krewd server: runs ACP coding agents on the host and serves the Krewd apps"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.115",
@@ -39,4 +39,4 @@ pattern = "^(?P<version>\\S+)"
 cache-keys = [{ file = "pyproject.toml" }, { file = "../VERSION" }]
 
 [tool.hatch.build.targets.wheel]
-packages = ["crew_server"]
+packages = ["krewd_server"]

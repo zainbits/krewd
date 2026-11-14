@@ -1,5 +1,5 @@
 <resources>
-    <style name="Theme.Crew" parent="android:Theme.Material.NoActionBar">
+    <style name="Theme.Krewd" parent="android:Theme.Material.NoActionBar">
         <item name="android:windowBackground">@android:color/transparent</item>
     </style>
 </resources>

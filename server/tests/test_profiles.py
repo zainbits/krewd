@@ -14,14 +14,14 @@ from pathlib import Path
 import httpx
 import pytest
 
-from crew_server import db
-from crew_server.api import create_app
-from crew_server.config import Engine, Profile, Settings, load_agent_profiles, load_engines, load_env_file, load_profiles
-from crew_server.hub import Hub
-from crew_server.profiles import Gateways, ProfileError, codex_catalog, default_model
+from krewd_server import db
+from krewd_server.api import create_app
+from krewd_server.config import Engine, Profile, Settings, load_agent_profiles, load_engines, load_env_file, load_profiles
+from krewd_server.hub import Hub
+from krewd_server.profiles import Gateways, ProfileError, codex_catalog, default_model
 
 load_env_file()
-DATABASE_URL = os.environ.get("CREW_TEST_DATABASE_URL")
+DATABASE_URL = os.environ.get("KREWD_TEST_DATABASE_URL")
 FAKE = Path(__file__).with_name("fake_agent.py")
 KEY = "k-test-0123456789"
 
@@ -228,7 +228,7 @@ async def test_claude_gets_the_gateway_key_and_a_model_the_key_may_use(tmp_path,
 
 
 def test_claude_profiles_start_on_a_listed_model_only_off_claude_names():
-    from crew_server.profiles import claude_defaults
+    from krewd_server.profiles import claude_defaults
 
     # an Anthropic-style proxy (Claude Code's own names) may list models it refuses: Claude Code's default stays
     assert claude_defaults(["claude-fable-9", "claude-haiku-9"]) == {}
@@ -241,21 +241,21 @@ def test_claude_profiles_start_on_a_listed_model_only_off_claude_names():
 
 
 def test_claude_lists_what_its_discovery_keeps():
-    from crew_server.profiles import claude_listed
+    from krewd_server.profiles import claude_listed
 
     models = [{"id": "claude-haiku-9"}, {"id": "gpt-x"}, {"id": "anthropic/glm[1m]"}]
     assert claude_listed(models) == ["claude-haiku-9", "anthropic/glm[1m]"]
 
 
-async def test_codex_gets_a_provider_with_a_catalog_from_crew(tmp_path, gateway, fake_codex):
+async def test_codex_gets_a_provider_with_a_catalog_from_krewd(tmp_path, gateway, fake_codex):
     engines, profile = setup(tmp_path, gateway, fake_codex)
     gateways = Gateways(port=8800)
     env = await gateways.engine_env(engines["cx"], profile)
-    assert env["GW_KEY"] == KEY and env["MODEL_PROVIDER"] == "crew-gw"
+    assert env["GW_KEY"] == KEY and env["MODEL_PROVIDER"] == "krewd-gw"
     config = json.loads(env["CODEX_CONFIG"])
     assert config["approval_policy"] == "never"  # the engine's own CODEX_CONFIG is kept
     assert config["model"] == "vendor/reasoner"
-    assert config["model_providers"]["crew-gw"] == {
+    assert config["model_providers"]["krewd-gw"] == {
         "name": "Gateway", "base_url": f"{gateway}/v1", "env_key": "GW_KEY", "wire_api": "responses",
         "model_catalog_url": f"http://127.0.0.1:8800/api/codex-catalog/{gateways.secret}/cx",
     }
@@ -283,7 +283,7 @@ async def test_missing_key_or_wrong_key_is_a_clear_error(tmp_path, gateway, fake
 @pytest.fixture
 async def managed(tmp_path, gateway, fake_codex, fake_claude):
     if not DATABASE_URL:
-        pytest.skip("CREW_TEST_DATABASE_URL is not set")
+        pytest.skip("KREWD_TEST_DATABASE_URL is not set")
     pool = await db.connect(DATABASE_URL)
     await pool.execute(
         "drop table if exists session_agents, routine_triggers, routine_runs, routine_versions, routines, messages, events, approvals, sessions,"
@@ -305,7 +305,7 @@ async def managed(tmp_path, gateway, fake_codex, fake_claude):
 def client(hub: Hub, host: str = "127.0.0.1", https: bool = False) -> httpx.AsyncClient:
     app = create_app(hub, "test-token", lifespan_hub=False)
     if https:
-        from crew_server.__main__ import tls_marked
+        from krewd_server.__main__ import tls_marked
         app = tls_marked(app)
     return httpx.AsyncClient(transport=httpx.ASGITransport(app=app, client=(host, 5000)), base_url="http://test",
                              headers={"Authorization": "Bearer test-token"})
@@ -351,7 +351,7 @@ async def test_an_agent_runs_on_the_profile_picked_for_it_and_chats_follow(manag
         assert reply == os.environ.get("ANTHROPIC_BASE_URL", "<unset>")
 
         await c.put("/api/agents/cx/profile", json={"profile": "gw"})
-        assert (await reply_to(managed, "cx", "env MODEL_PROVIDER"))[0] == "crew-gw"
+        assert (await reply_to(managed, "cx", "env MODEL_PROVIDER"))[0] == "krewd-gw"
         assert (await c.put("/api/agents/cx/profile", json={"profile": "nope"})).status_code == 422
 
         # model lists are asked again whenever they were listed on another profile, also after a restart
@@ -403,7 +403,7 @@ async def test_bad_keys_and_keys_over_plain_wifi_are_refused(managed, gateway):
         refused = await lan.post("/api/profiles", json={"name": "GW", "openai": f"{gateway}/v1", "key": KEY})
         assert refused.status_code == 403 and "HTTPS" in refused.json()["detail"]
     assert managed.settings.profiles == {}
-    async with client(managed, host="192.168.0.20", https=True) as lan:  # Crew's own HTTPS: accepted
+    async with client(managed, host="192.168.0.20", https=True) as lan:  # Krewd's own HTTPS: accepted
         await add_gw(lan, gateway)
     assert "gw" in managed.settings.profiles
 
@@ -444,7 +444,7 @@ async def test_the_sign_in_account_is_one_choice_among_the_profiles(managed, gat
         assert managed.logins.known("cx") is True
         # signing in changes nothing about what the agent runs on
         assert (await c.get("/api/agents")).json()["agents"][1]["profile"] == "gw"
-        assert (await reply_to(managed, "cx", "env MODEL_PROVIDER"))[0] == "crew-gw"
+        assert (await reply_to(managed, "cx", "env MODEL_PROVIDER"))[0] == "krewd-gw"
 
 
 # sign-ins (need a database)

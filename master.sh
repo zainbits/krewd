@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Crew's one entry point. Run it with no arguments for a menu, or name an action:
+# Krewd's one entry point. Run it with no arguments for a menu, or name an action:
 #   ./master.sh setup | doctor | status | start | stop | restart | logs | attach | token
 #               test | update | app | agent-prompt | help
 # It never prints secrets except the app token, and only when you ask for it ("token").
@@ -8,7 +8,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/deploy/lib.sh"
 export PATH="$HOME/.local/bin:$PATH"
 
 UNIT_DIR="$HOME/.config/systemd/user"
-UNITS=(crew.service crew-browser.service)
+UNITS=(krewd.service krewd-browser.service)
 B=$'\e[1m'; G=$'\e[32m'; Y=$'\e[33m'; R=$'\e[31m'; N=$'\e[0m'
 [[ -t 1 ]] || { B=; G=; Y=; R=; N=; }
 
@@ -19,8 +19,8 @@ bad()  { printf '  %sFAIL%s  %s\n' "$R" "$N" "$1"; [[ -n "${2:-}" ]] && printf '
 ask()  { local reply; read -r -p "$1 [y/N] " reply; [[ "$reply" =~ ^[Yy] ]]; }
 has()  { command -v "$1" >/dev/null 2>&1; }
 uvrun() { "$(find_uv)" run --project "$REPO/server" --frozen --quiet "$@"; }
-port() { conf CREW_PORT 8800; }
-cdp_port() { conf CREW_CDP_PORT 9222; }
+port() { conf KREWD_PORT 8800; }
+cdp_port() { conf KREWD_CDP_PORT 9222; }
 linux_systemd() { [[ "$(uname)" == Linux ]] && has systemctl && systemctl --user show-environment >/dev/null 2>&1; }
 
 # ---------------------------------------------------------------- doctor
@@ -30,8 +30,8 @@ doctor() {
   say "${B}Tools${N}"
   for t in git python3 tmux curl; do has "$t" && ok "$t" || bad "$t is missing" "install $t with the system package manager"; done
   [[ -n "$(find_uv)" ]] && ok "uv" || bad "uv is missing" "curl -LsSf https://astral.sh/uv/install.sh | sh"
-  linux_systemd && ok "systemd user session" || bad "no systemd user session (Crew's services need Linux with systemd)"
-  [[ -n "$(find_brave)" ]] && ok "Brave ($(find_brave))" || bad "Brave not found" "install Brave, or set CREW_BROWSER in $ENV_FILE"
+  linux_systemd && ok "systemd user session" || bad "no systemd user session (Krewd's services need Linux with systemd)"
+  [[ -n "$(find_brave)" ]] && ok "Brave ($(find_brave))" || bad "Brave not found" "install Brave, or set KREWD_BROWSER in $ENV_FILE"
   [[ -f "$(signing_file)" ]] && ok "APK signing key ($(signing_file))" \
     || warn "no APK signing key: ./master.sh app makes debug-signed APKs" "put a signing properties file at $(signing_file) (AGENTS.md, new machine step 10)"
   has browser-harness && ok "browser-harness" || bad "browser-harness is missing" "uv tool install browser-harness (AGENTS.md, new machine step 5)"
@@ -42,7 +42,7 @@ doctor() {
   else
     bad "no config folder" "./master.sh setup"
   fi
-  for f in crew.env engines.toml token; do
+  for f in krewd.env engines.toml token; do
     local path="$CONFIG_DIR/$f"
     if [[ ! -f "$path" ]]; then
       [[ "$f" == token ]] && warn "no token yet (made on first start)" || bad "$f is missing" "./master.sh setup"
@@ -52,17 +52,17 @@ doctor() {
       ok "$f"
     fi
   done
-  [[ -n "$(conf CREW_DATABASE_URL '')" ]] && ok "CREW_DATABASE_URL is set" || bad "CREW_DATABASE_URL is not set" "./master.sh setup"
+  [[ -n "$(conf KREWD_DATABASE_URL '')" ]] && ok "KREWD_DATABASE_URL is set" || bad "KREWD_DATABASE_URL is not set" "./master.sh setup"
 
   say "${B}Server code${N}"
-  if [[ -n "$(find_uv)" ]] && uvrun python -c "import crew_server" 2>/dev/null; then ok "Python environment"; else bad "server environment is not installed" "cd server && uv sync"; fi
+  if [[ -n "$(find_uv)" ]] && uvrun python -c "import krewd_server" 2>/dev/null; then ok "Python environment"; else bad "server environment is not installed" "cd server && uv sync"; fi
   if [[ -f "$CONFIG_DIR/engines.toml" ]] && [[ -n "$(find_uv)" ]]; then
     while IFS=$'\t' read -r id status cmd; do
       [[ -z "$id" ]] && continue
       [[ "$status" == ok ]] && ok "engine $id ($cmd)" || bad "engine $id: $cmd is not executable" "install the ACP adapter, AGENTS.md, new machine step 4"
     done < <(uvrun python - "$CONFIG_DIR/engines.toml" <<'PY' 2>/dev/null
 import os, shutil, sys
-from crew_server.config import load_engines
+from krewd_server.config import load_engines
 from pathlib import Path
 engines, _ = load_engines(Path(sys.argv[1]))
 for e in engines.values():
@@ -77,7 +77,7 @@ PY
     # gateway for the key's models; no tokens spent).
     local keys="$CONFIG_DIR/keys.env" checked
     [[ ! -f "$keys" || "$(stat -c %a "$keys" 2>/dev/null)" == 600 ]] || warn "keys.env is not mode 600" "chmod 600 $keys"
-    if checked="$(CREW_CONFIG_DIR="$CONFIG_DIR" uvrun python -m crew_server.profiles check 2>/dev/null)"; then
+    if checked="$(KREWD_CONFIG_DIR="$CONFIG_DIR" uvrun python -m krewd_server.profiles check 2>/dev/null)"; then
       while IFS=$'\t' read -r status id detail; do
         [[ -z "$status" ]] && continue
         case "$status" in
@@ -87,16 +87,16 @@ PY
         esac
       done <<< "$checked"
     else
-      bad "sign-ins and profiles could not be checked" "cd $REPO/server && uv run python -m crew_server.profiles check"
+      bad "sign-ins and profiles could not be checked" "cd $REPO/server && uv run python -m krewd_server.profiles check"
     fi
   fi
-  if [[ -n "$(conf CREW_DATABASE_URL '')" && -n "$(find_uv)" ]]; then
-    local db; db="$(CREW_CONFIG_DIR="$CONFIG_DIR" uvrun python - <<'PY' 2>&1
+  if [[ -n "$(conf KREWD_DATABASE_URL '')" && -n "$(find_uv)" ]]; then
+    local db; db="$(KREWD_CONFIG_DIR="$CONFIG_DIR" uvrun python - <<'PY' 2>&1
 import asyncio, os, asyncpg
-from crew_server.config import load_env_file
+from krewd_server.config import load_env_file
 load_env_file()
 async def main():
-    conn = await asyncpg.connect(os.environ["CREW_DATABASE_URL"], timeout=5)
+    conn = await asyncpg.connect(os.environ["KREWD_DATABASE_URL"], timeout=5)
     v = await conn.fetchval("show server_version")
     await conn.close()
     print("PostgreSQL", v)
@@ -106,13 +106,13 @@ except Exception as exc:
     print("ERROR", type(exc).__name__)
 PY
 )"
-    [[ "$db" == PostgreSQL* ]] && ok "database reachable ($db)" || bad "database not reachable ($db)" "start PostgreSQL, or check CREW_DATABASE_URL"
+    [[ "$db" == PostgreSQL* ]] && ok "database reachable ($db)" || bad "database not reachable ($db)" "start PostgreSQL, or check KREWD_DATABASE_URL"
   fi
 
   say "${B}Services${N}"
   if linux_systemd; then
-    [[ "$(loginctl show-user "$USER" -p Linger --value 2>/dev/null)" == yes ]] && ok "lingering on (Crew starts at boot)" \
-      || warn "lingering is off: Crew starts only after you log in" "sudo loginctl enable-linger $USER"
+    [[ "$(loginctl show-user "$USER" -p Linger --value 2>/dev/null)" == yes ]] && ok "lingering on (Krewd starts at boot)" \
+      || warn "lingering is off: Krewd starts only after you log in" "sudo loginctl enable-linger $USER"
     for u in "${UNITS[@]}"; do
       if [[ ! -f "$UNIT_DIR/$u" ]]; then bad "$u is not installed" "./master.sh setup"; continue; fi
       local en act; en="$(systemctl --user is-enabled "$u" 2>/dev/null)"; act="$(systemctl --user is-active "$u" 2>/dev/null)"
@@ -128,15 +128,15 @@ PY
     [[ "$(stat -c %a "$CONFIG_DIR/owner.json" 2>/dev/null)" == 600 ]] && ok "security key registered (phones pair with it)" \
       || warn "owner.json is not mode 600" "chmod 600 $CONFIG_DIR/owner.json"
   else
-    warn "no security key yet: anyone with the setup token can use Crew" "in the app: Settings > Security > Set up with security key"
+    warn "no security key yet: anyone with the setup token can use Krewd" "in the app: Settings > Security > Set up with security key"
   fi
-  if [[ "$(conf CREW_TLS auto)" == off ]]; then
-    warn "CREW_TLS=off: the home network gets plain HTTP, readable by anyone on it" "remove CREW_TLS from crew.env, then ./master.sh restart"
-  elif [[ -f "$(conf CREW_TLS_CERT "$CONFIG_DIR/tls.crt")" && -f "$(conf CREW_TLS_KEY "$CONFIG_DIR/tls.key")" ]]; then
-    [[ "$(stat -c %a "$(conf CREW_TLS_KEY "$CONFIG_DIR/tls.key")" 2>/dev/null)" == 600 ]] && ok "HTTPS certificate (pin $(uvrun python -m crew_server pin | cut -c1-19)...)" \
-      || warn "the HTTPS key is not mode 600" "chmod 600 $(conf CREW_TLS_KEY "$CONFIG_DIR/tls.key")"
+  if [[ "$(conf KREWD_TLS auto)" == off ]]; then
+    warn "KREWD_TLS=off: the home network gets plain HTTP, readable by anyone on it" "remove KREWD_TLS from krewd.env, then ./master.sh restart"
+  elif [[ -f "$(conf KREWD_TLS_CERT "$CONFIG_DIR/tls.crt")" && -f "$(conf KREWD_TLS_KEY "$CONFIG_DIR/tls.key")" ]]; then
+    [[ "$(stat -c %a "$(conf KREWD_TLS_KEY "$CONFIG_DIR/tls.key")" 2>/dev/null)" == 600 ]] && ok "HTTPS certificate (pin $(uvrun python -m krewd_server pin | cut -c1-19)...)" \
+      || warn "the HTTPS key is not mode 600" "chmod 600 $(conf KREWD_TLS_KEY "$CONFIG_DIR/tls.key")"
     local lan_ip; lan_ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
-    if [[ -n "$lan_ip" && "$(conf CREW_HOST 127.0.0.1,lan)" == *lan* ]]; then
+    if [[ -n "$lan_ip" && "$(conf KREWD_HOST 127.0.0.1,lan)" == *lan* ]]; then
       curl -kfsS -m 3 "https://$lan_ip:$(port)/api/health" >/dev/null 2>&1 && ok "HTTPS answers on the home network ($lan_ip)" \
         || bad "no HTTPS on the home network address" "./master.sh restart, then ./master.sh logs"
     fi
@@ -147,19 +147,19 @@ PY
     || bad "agent Brave is not running" "log in to the desktop, then ./master.sh start browser"
   if has tailscale; then
     tailscale serve status 2>/dev/null | grep -q ":$(port)" && ok "Tailscale Serve publishes port $(port)" \
-      || warn "Tailscale Serve does not publish Crew" "tailscale serve --bg --https=$(port) http://127.0.0.1:$(port)"
+      || warn "Tailscale Serve does not publish Krewd" "tailscale serve --bg --https=$(port) http://127.0.0.1:$(port)"
   else
-    say "  info  no Tailscale: the phone reaches Crew on the home network, or an HTTPS address in CREW_URLS"
+    say "  info  no Tailscale: the phone reaches Krewd on the home network, or an HTTPS address in KREWD_URLS"
   fi
 
   say "${B}Agent setup${N}"
-  local workdir; workdir="$(conf CREW_WORKDIR "$HOME")"
-  grep -qs "Crew" "$workdir/AGENTS.md" && ok "$workdir/AGENTS.md has Crew's instructions" \
-    || warn "$workdir/AGENTS.md has no Crew section" "copy deploy/agents-section.md into it"
-  grep -qs "crew routines" "$workdir/AGENTS.md" && ok "Crew's agent instructions cover routines" \
-    || warn "$workdir/AGENTS.md has an older Crew section (no routines)" "replace it with deploy/agents-section.md"
-  [[ "$(readlink -f "$HOME/.local/bin/crew" 2>/dev/null)" == "$(readlink -f "$REPO/deploy/crew-cli.sh")" ]] && ok "crew command (~/.local/bin/crew)" \
-    || warn "the crew command is not installed" "./master.sh setup (links ~/.local/bin/crew to deploy/crew-cli.sh)"
+  local workdir; workdir="$(conf KREWD_WORKDIR "$HOME")"
+  grep -qs "Krewd" "$workdir/AGENTS.md" && ok "$workdir/AGENTS.md has Krewd's instructions" \
+    || warn "$workdir/AGENTS.md has no Krewd section" "copy deploy/agents-section.md into it"
+  grep -qs "krewd routines" "$workdir/AGENTS.md" && ok "Krewd's agent instructions cover routines" \
+    || warn "$workdir/AGENTS.md has an older Krewd section (no routines)" "replace it with deploy/agents-section.md"
+  [[ "$(readlink -f "$HOME/.local/bin/krewd" 2>/dev/null)" == "$(readlink -f "$REPO/deploy/krewd-cli.sh")" ]] && ok "krewd command (~/.local/bin/krewd)" \
+    || warn "the krewd command is not installed" "./master.sh setup (links ~/.local/bin/krewd to deploy/krewd-cli.sh)"
   [[ -e "$HOME/.agents/skills/browser-harness" ]] && ok "browser-harness skill is installed" \
     || warn "browser-harness skill not found in ~/.agents/skills" "AGENTS.md, new machine step 5"
   [[ -d "$HOME/.agents/skills" && "$(readlink -f "$HOME/.claude/skills" 2>/dev/null)" == "$(readlink -f "$HOME/.agents/skills")" ]] \
@@ -184,18 +184,18 @@ install_units() {
 }
 
 setup() {
-  say "${B}Crew setup${N} on $(hostname). Safe to run again; it keeps existing files."
+  say "${B}Krewd setup${N} on $(hostname). Safe to run again; it keeps existing files."
   (umask 077; mkdir -p "$CONFIG_DIR"); chmod 700 "$CONFIG_DIR"
   if [[ ! -f "$ENV_FILE" ]]; then
-    (umask 077; cp "$REPO/deploy/crew.env.example" "$ENV_FILE")
+    (umask 077; cp "$REPO/deploy/krewd.env.example" "$ENV_FILE")
     say "Created $ENV_FILE from the example."
     local url
-    read -r -s -p "PostgreSQL URL for Crew (postgresql://user:pass@host:5432/crew; Enter to edit the file later): " url; echo
+    read -r -s -p "PostgreSQL URL for Krewd (postgresql://user:pass@host:5432/krewd; Enter to edit the file later): " url; echo
     if [[ -n "$url" ]]; then
       URL="$url" python3 - "$ENV_FILE" <<'PY'
 import os, sys
 p = sys.argv[1]
-lines = [("CREW_DATABASE_URL=" + os.environ["URL"]) if l.startswith("CREW_DATABASE_URL=") else l
+lines = [("KREWD_DATABASE_URL=" + os.environ["URL"]) if l.startswith("KREWD_DATABASE_URL=") else l
          for l in open(p).read().splitlines()]
 open(p, "w").write("\n".join(lines) + "\n")
 PY
@@ -206,13 +206,13 @@ PY
   chmod 600 "$ENV_FILE"
   [[ -f "$CONFIG_DIR/engines.toml" ]] || { cp "$REPO/deploy/engines.example.toml" "$CONFIG_DIR/engines.toml"; say "Created engines.toml (Claude Code)."; }
   if [[ -n "$(find_uv)" ]]; then (cd "$REPO/server" && "$(find_uv)" sync --frozen --quiet) && say "Server environment ready."; else say "Install uv first, then run setup again."; fi
-  mkdir -p "$(conf CREW_BROWSER_PROFILE "$HOME/.local/share/crew/agent-brave")"
-  mkdir -p "$HOME/.local/bin" && ln -sfn "$REPO/deploy/crew-cli.sh" "$HOME/.local/bin/crew" && say "Linked the crew command: ~/.local/bin/crew."
+  mkdir -p "$(conf KREWD_BROWSER_PROFILE "$HOME/.local/share/krewd/agent-brave")"
+  mkdir -p "$HOME/.local/bin" && ln -sfn "$REPO/deploy/krewd-cli.sh" "$HOME/.local/bin/krewd" && say "Linked the krewd command: ~/.local/bin/krewd."
   if linux_systemd; then
     install_units
     [[ "$(loginctl show-user "$USER" -p Linger --value 2>/dev/null)" == yes ]] \
-      || say "${Y}To start Crew at boot without logging in, run once:${N} sudo loginctl enable-linger $USER"
-    if ask "Start Crew now?"; then start all; fi
+      || say "${Y}To start Krewd at boot without logging in, run once:${N} sudo loginctl enable-linger $USER"
+    if ask "Start Krewd now?"; then start all; fi
   fi
   say ""
   doctor
@@ -224,8 +224,8 @@ PY
 
 pick_units() {
   case "${1:-all}" in
-    server|crew) echo crew.service ;;
-    browser|brave) echo crew-browser.service ;;
+    server|krewd) echo krewd.service ;;
+    browser|brave) echo krewd-browser.service ;;
     all|"") echo "${UNITS[@]}" ;;
     *) say "Unknown part '$1' (server, browser or all)" >&2; return 1 ;;
   esac
@@ -238,35 +238,35 @@ status() {
   for u in "${UNITS[@]}"; do printf '%-22s %s\n' "$u" "$(systemctl --user is-active "$u" 2>/dev/null)"; done
   curl -fsS -m 3 "http://127.0.0.1:$(port)/api/health" 2>/dev/null && echo || say "server: not answering on $(port)"
   local ip; ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
-  [[ "$(conf CREW_TLS auto)" == off ]] && say "Home network: http://${ip:-<this machine>}:$(port)" || say "Home network: https://${ip:-<this machine>}:$(port)"
+  [[ "$(conf KREWD_TLS auto)" == off ]] && say "Home network: http://${ip:-<this machine>}:$(port)" || say "Home network: https://${ip:-<this machine>}:$(port)"
   if has tailscale; then
     local dns; dns="$(tailscale status --json 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["Self"]["DNSName"].rstrip("."))' 2>/dev/null)"
     [[ -n "$dns" ]] && say "Tailscale:    https://$dns:$(port)"
   fi
-  say "Watch:        tmux attach -t crew   |   tmux attach -t agent-brave   (detach: Ctrl+B, then D)"
+  say "Watch:        tmux attach -t krewd   |   tmux attach -t agent-brave   (detach: Ctrl+B, then D)"
 }
 
 logs() {
-  local which="${1:-server}" session=crew unit=crew.service
-  [[ "$which" == browser || "$which" == brave ]] && { session=agent-brave; unit=crew-browser.service; }
+  local which="${1:-server}" session=krewd unit=krewd.service
+  [[ "$which" == browser || "$which" == brave ]] && { session=agent-brave; unit=krewd-browser.service; }
   say "${B}systemd ($unit)${N}"; journalctl --user -u "$unit" -n 15 --no-pager -o short-iso 2>/dev/null
   say "${B}tmux $session (last 40 lines)${N}"; tmux capture-pane -p -J -S -40 -t "=$session:" 2>/dev/null || say "(no tmux session)"
 }
 
-attach() { local s=crew; [[ "${1:-}" == browser || "${1:-}" == brave ]] && s=agent-brave; say "Detach with Ctrl+B, then D."; tmux attach -t "=$s"; }
+attach() { local s=krewd; [[ "${1:-}" == browser || "${1:-}" == brave ]] && s=agent-brave; say "Detach with Ctrl+B, then D."; tmux attach -t "=$s"; }
 
 security() {
   # The owner's phones and security key: status, revoke PHONE, reset (lost phone and key: back to setup).
-  "$REPO/deploy/crew-cli.sh" security "${@:-status}"
+  "$REPO/deploy/krewd-cli.sh" security "${@:-status}"
 }
 
 token() {
   # The connect code: the app's addresses, the certificate pin and the token, as a QR code and a link.
-  uvrun python -m crew_server connect
+  uvrun python -m krewd_server connect
 }
 
 run_tests() {
-  [[ -n "$(conf CREW_TEST_DATABASE_URL '')" ]] || { say "Set CREW_TEST_DATABASE_URL in $ENV_FILE (a throwaway database) first."; return 1; }
+  [[ -n "$(conf KREWD_TEST_DATABASE_URL '')" ]] || { say "Set KREWD_TEST_DATABASE_URL in $ENV_FILE (a throwaway database) first."; return 1; }
   (cd "$REPO/server" && "$(find_uv)" run --frozen pytest -q)
 }
 
@@ -313,12 +313,12 @@ agent_prompt() {
   local report; report="$(doctor 2>&1 | sed $'s/\e\\[[0-9;]*m//g')"
   local prompt
   prompt="$(cat <<EOF
-You are helping me set up, check or fix Crew on this machine ($(hostname), $(uname -sr)).
-Crew is my self-hosted agent team: a server that runs coding agents (Claude Code, Codex or any ACP agent) for my phone app.
+You are helping me set up, check or fix Krewd on this machine ($(hostname), $(uname -sr)).
+Krewd is my self-hosted agent team: a server that runs coding agents (Claude Code, Codex or any ACP agent) for my phone app.
 
 - Repository: $REPO (read its AGENTS.md first; it explains every part and how to set it up).
 - The one script for everything is $REPO/master.sh: run ./master.sh doctor to see what is wrong, ./master.sh help for all actions.
-- Config lives in $CONFIG_DIR (crew.env, engines.toml, profiles.toml, keys.env, token). Never print or paste secrets from it (database passwords, gateway keys, the token).
+- Config lives in $CONFIG_DIR (krewd.env, engines.toml, profiles.toml, keys.env, token). Never print or paste secrets from it (database passwords, gateway keys, the token).
 - Use sudo only in a tmux session where I type the password myself. Ask me before anything consequential.
 - When you are done, run ./master.sh doctor again and tell me what changed and what is still open.
 
@@ -339,7 +339,7 @@ EOF
 
 usage() {
   cat <<EOF
-${B}Crew master script${N} ($REPO)
+${B}Krewd master script${N} ($REPO)
 
   setup          first-time setup on this machine (safe to rerun)
   doctor         check everything and say how to fix what is wrong

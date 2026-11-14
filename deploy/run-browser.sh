@@ -4,11 +4,11 @@
 # the owner's own logins and tabs out of the agents' reach. The profile lives on disk and survives restarts.
 set -euo pipefail
 source "$(dirname "$0")/lib.sh"
-BRAVE="$(find_brave)" || { echo "Brave not found; set CREW_BROWSER in $ENV_FILE" >&2; exit 1; }
-PROFILE="$(conf CREW_BROWSER_PROFILE "$HOME/.local/share/crew/agent-brave")"
-PORT="$(conf CREW_CDP_PORT 9222)"
+BRAVE="$(find_brave)" || { echo "Brave not found; set KREWD_BROWSER in $ENV_FILE" >&2; exit 1; }
+PROFILE="$(conf KREWD_BROWSER_PROFILE "$HOME/.local/share/krewd/agent-brave")"
+PORT="$(conf KREWD_CDP_PORT 9222)"
 mkdir -p "$PROFILE"
-export DISPLAY="${DISPLAY:-$(conf CREW_DISPLAY :0)}"
+export DISPLAY="${DISPLAY:-$(conf KREWD_DISPLAY :0)}"
 if [[ -z "${XAUTHORITY:-}" || ! -s "${XAUTHORITY:-}" ]]; then
   for f in "/run/user/$(id -u)/gdm/Xauthority" "$HOME/.Xauthority"; do [[ -s "$f" ]] && { export XAUTHORITY="$f"; break; }; done
 fi
@@ -16,14 +16,14 @@ fi
 # --disable-gpu: software rendering. With the GPU, Brave stops painting (about 1 frame a second, and every
 # mouse event waits a second) once the monitor sleeps or is unplugged, and it does not recover when the
 # monitor returns. Nobody watches this window on the monitor; the phone's live view is the screen.
-# CREW_BROWSER_GPU=1 keeps the GPU for a machine whose display is always on.
+# KREWD_BROWSER_GPU=1 keeps the GPU for a machine whose display is always on.
 GPU_FLAG=(--disable-gpu)
-[[ "$(conf CREW_BROWSER_GPU 0)" == 1 ]] && GPU_FLAG=()
-# CREW_BROWSER_LOCATION=LAT,LON[,ACCURACY_M]: the machine's real, fixed location. A home server has no GPS
+[[ "$(conf KREWD_BROWSER_GPU 0)" == 1 ]] && GPU_FLAG=()
+# KREWD_BROWSER_LOCATION=LAT,LON[,ACCURACY_M]: the machine's real, fixed location. A home server has no GPS
 # or Wi-Fi and Brave on Linux has no system location source, so location requests (for example a web
 # attendance check-in) wait forever. If set, a small extension (deploy/fixed-location) answers them with it.
 EXT_FLAGS=()
-LOCATION="$(conf CREW_BROWSER_LOCATION '')"
+LOCATION="$(conf KREWD_BROWSER_LOCATION '')"
 if [[ -n "$LOCATION" ]]; then
   IFS=, read -r LAT LON ACC <<<"$LOCATION"
   ACC="${ACC:-50}"
@@ -37,7 +37,7 @@ if [[ -n "$LOCATION" ]]; then
     # Recent Chromium ignores --load-extension unless this feature is turned off.
     EXT_FLAGS=(--load-extension="$EXT" --disable-features=DisableLoadExtensionCommandLineSwitch)
   else
-    echo "CREW_BROWSER_LOCATION must be LAT,LON[,ACCURACY_M] in decimal degrees and metres; ignoring it" >&2
+    echo "KREWD_BROWSER_LOCATION must be LAT,LON[,ACCURACY_M] in decimal degrees and metres; ignoring it" >&2
   fi
 fi
 exec "$BRAVE" --user-data-dir="$PROFILE" --remote-debugging-port="$PORT" --remote-debugging-address=127.0.0.1 \

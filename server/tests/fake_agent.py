@@ -78,7 +78,7 @@ async def run_prompt(request_id: int, sid: str, text: str, params: dict) -> None
                      "content": {"type": "text", "text": "Compacted."}})
         send({"jsonrpc": "2.0", "id": request_id, "result": {"stopReason": "end_turn"}})
         return
-    if text.startswith("Crew is compacting this chat"):
+    if text.startswith("Krewd is compacting this chat"):
         update(sid, {"sessionUpdate": "agent_message_chunk", "messageId": "h1",
                      "content": {"type": "text", "text": "## Handover\nGoal: timesheets. Code MK-42."}})
         send({"jsonrpc": "2.0", "id": request_id, "result": {"stopReason": "end_turn"}})
@@ -147,7 +147,7 @@ async def run_prompt(request_id: int, sid: str, text: str, params: dict) -> None
     if "moves between agents" in text:
         update(sid, {"sessionUpdate": "agent_message_chunk", "messageId": "m7",
                      "content": {"type": "text", "text": " briefed"}})
-    if "Scheduled run of the Crew routine" in text or "Run started by the owner" in text:
+    if "Scheduled run of the Krewd routine" in text or "Run started by the owner" in text:
         update(sid, {"sessionUpdate": "agent_message_chunk", "messageId": "m6",
                      "content": {"type": "text", "text": " routine-ran"}})
     if "calls" in text:

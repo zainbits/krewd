@@ -1,4 +1,4 @@
-"""Crew's own certificate, its pin, HTTPS beside plain loopback, and the connect link."""
+"""Krewd's own certificate, its pin, HTTPS beside plain loopback, and the connect link."""
 
 from __future__ import annotations
 
@@ -15,9 +15,9 @@ import uvicorn
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 
-from crew_server import tls
-from crew_server.__main__ import _Server, connect_link, https_addresses, tls_marked
-from crew_server.config import Settings
+from krewd_server import tls
+from krewd_server.__main__ import _Server, connect_link, https_addresses, tls_marked
+from krewd_server.config import Settings
 
 
 def settings(tmp_path: Path, **changes) -> Settings:
@@ -52,11 +52,11 @@ def test_https_goes_on_every_address_but_loopback(tmp_path):
 
 
 def test_connect_link_has_the_https_addresses_extra_urls_token_and_pin(tmp_path):
-    s = settings(tmp_path, urls=("https://crew.example.org",))
+    s = settings(tmp_path, urls=("https://krewd.example.org",))
     link = urlparse(connect_link(s, "abcd-efgh"))
-    assert link.scheme == "crew" and link.netloc == "connect"
+    assert link.scheme == "krewd" and link.netloc == "connect"
     q = parse_qs(link.query)
-    assert q["a"] == ["https://192.0.2.7:8800", "https://crew.example.org"]
+    assert q["a"] == ["https://192.0.2.7:8800", "https://krewd.example.org"]
     assert q["t"] == ["abcd-efgh"] and q["p"] == [tls.pin(s.tls_cert)]
     off = parse_qs(urlparse(connect_link(replace(s, tls="off"), "t")).query)
     assert off["a"][0] == "http://192.0.2.7:8800" and "p" not in off
@@ -64,7 +64,7 @@ def test_connect_link_has_the_https_addresses_extra_urls_token_and_pin(tmp_path)
 
 async def _app(scope, receive, send):
     assert scope["type"] == "http"
-    body = b"tls" if scope.get("crew_tls") else b"plain"
+    body = b"tls" if scope.get("krewd_tls") else b"plain"
     await send({"type": "http.response.start", "status": 200, "headers": [(b"content-length", str(len(body)).encode())]})
     await send({"type": "http.response.body", "body": body})
 

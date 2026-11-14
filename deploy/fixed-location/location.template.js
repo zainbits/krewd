@@ -1,5 +1,5 @@
-// Crew fixed location. run-browser.sh copies this file to location.js and fills in the numbers from
-// CREW_BROWSER_LOCATION. A home server has no GPS or Wi-Fi, and Brave on Linux has no system location
+// Krewd fixed location. run-browser.sh copies this file to location.js and fills in the numbers from
+// KREWD_BROWSER_LOCATION. A home server has no GPS or Wi-Fi, and Brave on Linux has no system location
 // source, so without this every location request on the agents' Brave waits forever.
 // Runs in the page's own world before any page script and answers the standard Geolocation API.
 (() => {

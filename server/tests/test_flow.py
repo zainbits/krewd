@@ -1,6 +1,6 @@
 """End-to-end tests of the hub and API against a fake ACP agent and a real PostgreSQL.
 
-Needs CREW_TEST_DATABASE_URL (a throwaway database; its tables are dropped first).
+Needs KREWD_TEST_DATABASE_URL (a throwaway database; its tables are dropped first).
 """
 
 from __future__ import annotations
@@ -14,14 +14,14 @@ from pathlib import Path
 import httpx
 import pytest
 
-from crew_server import db
-from crew_server.api import create_app
-from crew_server.config import Engine, Settings, load_env_file
-from crew_server.hub import Hub, NotFound
+from krewd_server import db
+from krewd_server.api import create_app
+from krewd_server.config import Engine, Settings, load_env_file
+from krewd_server.hub import Hub, NotFound
 
 load_env_file()
-DATABASE_URL = os.environ.get("CREW_TEST_DATABASE_URL")
-pytestmark = pytest.mark.skipif(not DATABASE_URL, reason="CREW_TEST_DATABASE_URL is not set")
+DATABASE_URL = os.environ.get("KREWD_TEST_DATABASE_URL")
+pytestmark = pytest.mark.skipif(not DATABASE_URL, reason="KREWD_TEST_DATABASE_URL is not set")
 
 FAKE = Path(__file__).with_name("fake_agent.py")
 TOKEN = "test-token"
@@ -501,7 +501,7 @@ async def test_scheduler_runs_due_routines_once_and_skips_stale_ones(hub):
     assert nxt > now
     await wait_run(hub, rid, "done")
 
-    # Missed by more than the catch-up window (Crew was down): recorded as skipped, not run.
+    # Missed by more than the catch-up window (Krewd was down): recorded as skipped, not run.
     # (A yearly schedule, so no later slot falls inside the window either.)
     yearly = await hub.create_routine("Yearly", "Renew.", "0 0 1 1 *", timezone="UTC")
     yid = uuid.UUID(yearly["id"])
@@ -537,7 +537,7 @@ async def test_routine_chat_comes_back_after_delete_and_pause_clears_next_run(hu
 
 
 async def test_bad_schedules_are_refused(hub):
-    from crew_server.routines import Invalid
+    from krewd_server.routines import Invalid
     with pytest.raises(Invalid):
         await hub.create_routine("Bad", "x", "every friday")
     with pytest.raises(Invalid):
@@ -641,7 +641,7 @@ async def test_one_routine_with_several_triggers(hub):
     assert run["triggers"] == ["check-out"] and run["attempt"] == 1 and run["max_attempts"] == 3
     user = [e for e in await hub.events(0, uuid.UUID(routine["session_id"])) if e["kind"] == "user"][-1]["payload"]
     assert "Trigger: check-out (Weekdays at 19:00). Attempt 1 of 3." in user["text"]
-    assert "Counter is top right." in user["text"] and "crew routines later" in user["text"]
+    assert "Counter is top right." in user["text"] and "krewd routines later" in user["text"]
     # Both due at once: one run that names both.
     await hub.pool.execute("update routine_triggers set next_run_at = $2 where routine_id = $1", rid, now)
     assert await hub.run_due(now + timedelta(seconds=1)) == 1
@@ -711,7 +711,7 @@ async def test_notes_and_the_month_end_trigger(hub):
     r = await hub.set_routine_notes(rid, "MK entry is 'MK-Delivery'.")
     r = await hub.set_routine_notes(rid, "Week 46 filled.", append=True)
     assert r["notes"] == "MK entry is 'MK-Delivery'.\nWeek 46 filled."
-    from crew_server.routines import Invalid
+    from krewd_server.routines import Invalid
     with pytest.raises(Invalid):
         await hub.update_routine(rid, {"schedule": "0 9 * * *"})  # several triggers: use triggers
     with pytest.raises(Invalid):
@@ -822,7 +822,7 @@ async def test_switch_api_and_transcript(hub):
         assert (await client.post(f"/api/sessions/{sid}/engine", headers=h, json={"engine": "native"})).status_code == 202
         await wait_for(hub, uuid.UUID(sid), "switch")
         r = await client.get(f"/api/sessions/{sid}/transcript?last=2", headers=h)
-        assert r.status_code == 200 and len(r.json()) == 2 and r.json()[-1]["from"] == "Crew"
+        assert r.status_code == 200 and len(r.json()) == 2 and r.json()[-1]["from"] == "Krewd"
 
 
 def test_command_list_reads_acp_entries_and_old_names():
