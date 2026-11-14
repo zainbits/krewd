@@ -64,6 +64,8 @@ args = "routines list"
 do = "krewd"
 args = "routines create --title 'Flight fare watch' --trigger morning '0 7 * * *' --instructions 'Open Google Flights for Mumbai (BOM) to Dubai (DXB), 20 to 27 Dec, return. Read the cheapest fare. Tell the owner the fare and how it moved since the last run; flag it clearly if it dropped below 18,000 rupees. Never book anything.' --by agent --note 'Owner asked in chat for a daily fare watch'"
 shown = "routines create --title 'Flight fare watch' --trigger morning '0 7 * * *' --instructions '…' --by agent"
+unless = "Flight fare watch"
+exists_say = "You already have **Flight fare watch**: it checks this fare every morning at 7:00, so I didn't make a second one. Want me to change its time or the price it flags?"
 [[followups.steps]]
 do = "say"
 text = """Done: **Flight fare watch** runs every day at 7:00.

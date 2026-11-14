@@ -84,6 +84,18 @@ def task(text: str, engine: str, follow_up: str | None = None) -> str:
     return session["id"]
 
 
+NOTES = {
+    "Flight fare watch": "- Google Flights shows the cheapest return first under 'Best'; read the price from the top card.\n"
+                         "- Last runs: ₹38,026 (Sat), ₹37,813 (Sun). Early-morning departures are always the cheapest.\n"
+                         "- The owner only wants a ping when it drops under ₹18,000 or jumps by more than 10%.",
+    "Weekly release train": "- Play reviews come in via play-reviews; filter out reviews older than last Friday.\n"
+                            "- Crash rate gate for widening the rollout: under 0.5% of sessions for 48 h.\n"
+                            "- Version rule the owner agreed: new feature = minor, fixes only = patch, data migration = major.",
+    "Issue triage": "- CI on main takes about 12 minutes; start triage only when the latest run is green.\n"
+                    "- Label set: bug, design, question, duplicate. Ask before closing anything.",
+    "Competitor pricing watch": "- Read prices from the live pages only; Vercel hides usage prices behind a toggle.",
+}
+
 ROUTINES = [
     {"title": "Weekly release train", "engine": "claude", "by": "owner",
      "triggers": [{"name": "friday", "schedule": "0 16 * * 5"}],
@@ -155,6 +167,9 @@ def main() -> None:
         if chat:
             wait_turn(chat, before)
 
+    for title, routine_id in made.items():
+        if title in NOTES:
+            api("PUT", f"/api/routines/{routine_id}/notes", {"notes": NOTES[title]})
     api("PATCH", f"/api/sessions/{build}", {"pinned": True})
     asyncio.run(backdate({papers: 24 * 5 + 3, competitors: 24 * 2 + 5, build: 20, flights: 2}))
     print("Done. Open the demo app: the chats, routines and a pinned chat are there.")

@@ -3,6 +3,7 @@ match = ["build", "ci", "failing", "red", "fix the tests", "pr"]
 title = "Fix the failing checkout build"
 routine = "Nightly repo doctor"
 plan = ["Pull main and reproduce the failure", "Find the cause", "Fix it and add a test", "Run the whole suite", "Open a pull request"]
+on_steer = "Noted: {message} I'll put it in the same PR."
 handover = """## Handover
 Repo acme/storefront. CI was red on checkout totals: discounts were rounded per item instead of once per cart. Fixed in src/cart/total.ts with a regression test; suite green (214 passed). PR #482 opened after the owner's yes."""
 
@@ -54,9 +55,6 @@ old = """  return items.reduce((sum, item) => {
   }, 0)"""
 new = """  const subtotal = items.reduce((sum, item) => sum + item.price * item.qty, 0)
   return round2(subtotal * (1 - discount))"""
-[[steps]]
-do = "steered"
-text = "Noted: {message}. I'll keep that in the PR description."
 [[steps]]
 do = "plan"
 done = 3

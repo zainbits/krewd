@@ -266,7 +266,14 @@ async def run_steps(sid: str, steps: list[dict], scene: dict) -> str:
     """Play steps; returns 'rejected' when the owner said no to an approval that ends the scene."""
     state = session_state(sid)
     plan = scene.get("plan") or []
+    acknowledged = 0
     for step in steps:
+        # A message the owner steered into the running turn: answer it at the next step, as a real agent does.
+        waiting = steered.get(sid, [])
+        if len(waiting) > acknowledged:
+            for message in waiting[acknowledged:]:
+                await say(sid, scene.get("on_steer", 'Got it: "{message}". Adding that to this change.').replace("{message}", message.strip()))
+            acknowledged = len(waiting)
         do = step["do"]
         ms = step.get("ms", 900)
         if do == "think":
@@ -347,6 +354,11 @@ async def run_steps(sid: str, steps: list[dict], scene: dict) -> str:
                 await say(sid, step.get("declined", "The sign-in did not go through, so I stopped here."))
                 return "rejected"
         elif do == "krewd":
+            if step.get("unless"):  # e.g. a routine of that name exists already: say so instead, like a real agent
+                _, listed = await shell([KREWD, "routines", "list"])
+                if step["unless"].lower() in listed.lower():
+                    await say(sid, step.get("exists_say", "That already exists, so I left it as it is."))
+                    return "done"
             args = shlex.split(fill(sid, step["args"]))
             code, out = await shell([KREWD, *args])
             shown = "krewd " + fill(sid, step.get("shown", step["args"]))
@@ -387,9 +399,8 @@ async def run_steps(sid: str, steps: list[dict], scene: dict) -> str:
             else:
                 await say(sid, step.get("rejected", "Okay, I did not do that. Everything else is ready when you want it."))
                 return "rejected"
-        elif do == "steered":
-            for text in steered.get(sid, [])[-1:]:
-                await say(sid, step.get("text", "Got it, adjusting.").replace("{message}", text))
+        elif do == "steered":  # kept for older scenes; steering is now answered at every step
+            pass
         else:
             await say(sid, f"(demo: unknown step {do})")
     return "done"

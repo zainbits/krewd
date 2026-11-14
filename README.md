@@ -31,8 +31,11 @@ them from anywhere.
 - **Agent-agnostic.** Claude Code and Codex work today; any agent that speaks the
   [Agent Client Protocol](https://agentclientprotocol.com) can be added in a few lines of TOML. Switch
   agents in the middle of a chat: the outgoing one writes a handover, the next one picks up.
+- **Any model, not just the agent's own.** Run Claude Code or Codex on its own subscription, or on any
+  model through a gateway: OpenRouter, a company proxy, or a model on your own hardware behind an
+  OpenAI- or Anthropic-compatible server (vLLM, llama.cpp, LM Studio, Ollama). Pick per agent in the
+  app; how far an agent gets still depends on how capable the model is.
 - **Self-hosted.** Your data, logins and history stay on your hardware, in your own PostgreSQL.
-  Run agents on their own subscriptions or through any gateway (OpenRouter, a company proxy).
 - **You stay in charge.** Agents ask before they submit, send, pay, book or delete. You approve on
   the card, from the lock screen if you like.
 
@@ -48,7 +51,8 @@ them from anywhere.
   run, and one chat per routine to review every run. Agents create and manage routines themselves
   with the `krewd` command, and ask before they do.
 - **Sign-ins without sharing passwords.** When a site needs a login, the agent asks; you fill it in a
-  secure sheet on the phone (your password manager offers the saved login) and Krewd types it into
+  secure sheet on the phone, where Bitwarden or any Android password manager offers the saved login for that
+  very site and Krewd types it into
   the page. The agent never sees it, and nothing is stored or logged.
 - **Hardware-key security.** Phones pair with your FIDO security key (USB-C or NFC). Keys and
   sign-ins need your fingerprint. HTTPS everywhere with Krewd's own pinned certificate; one QR code
