@@ -636,7 +636,7 @@ private fun TaskRow(session: SessionInfo, look: KrewdLook, onClick: () -> Unit) 
                 }
                 if (session.lastText.isNotBlank()) {
                     Text(
-                        session.lastText,
+                        plainPreview(session.lastText),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1,
@@ -717,3 +717,11 @@ private fun SwipeToReveal(
         ) { content() }
     }
 }
+
+/** A one-line preview of an agent's Markdown reply: link text without its address, no emphasis or code marks. */
+internal fun plainPreview(text: String): String = text
+    .replace(Regex("""\[([^\]]+)]\([^)]*\)"""), "$1")
+    .replace(Regex("""(\*\*|__|`)"""), "")
+    .replace(Regex("""(?m)^\s*(#+|[-*]|\d+\.)\s+"""), "")
+    .replace(Regex("""\s+"""), " ")
+    .trim()
