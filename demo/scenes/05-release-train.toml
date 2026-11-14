@@ -1,0 +1,139 @@
+# The showcase: a weekly routine that runs a whole release on its own. It collects the week's feedback,
+# groups it, reproduces and fixes the top bugs, decides minor or major from what changed, bumps the
+# version, builds, writes the notes, and asks the owner once, before anything is published.
+match = ["release", "ship", "feedback", "new version", "release train"]
+title = "Ship this week's release"
+routine = "Weekly release train"
+plan = ["Collect this week's feedback (store reviews, issues, support)", "Group it and pick what to fix", "Reproduce the top bugs", "Fix them, with tests", "Pick the version and build the release", "Write the release notes", "Publish after your yes"]
+handover = """## Handover
+Weekly release train for the Acme Shop app. This week: 214 reviews, 37 issues, 52 support threads grouped into 4 themes; fixed 3 bugs and shipped saved-cart sync; version 2.8.0 (minor: new feature, no breaking change). Built, notes in ~/outputs/release-notes-2.8.0.md; staged rollout to 10% after the owner's yes."""
+
+[[steps]]
+do = "think"
+text = "A release run. Feedback first: what people actually hit this week decides what goes in, not my guess."
+[[steps]]
+do = "plan"
+done = 0
+[[steps]]
+do = "run"
+title = "Collect reviews, issues and support threads since last Friday"
+command = """play-reviews --app com.acme.shop --since last-friday --json > /tmp/reviews.json
+gh issue list -R acme/shop-android --search 'created:>=2026-11-07' --json number,title,labels > /tmp/issues.json
+support-export --since 2026-11-07 > /tmp/support.json
+jq length /tmp/reviews.json /tmp/issues.json /tmp/support.json"""
+ms = 2600
+output = """214
+37
+52"""
+[[steps]]
+do = "plan"
+done = 1
+[[steps]]
+do = "think"
+text = "Grouping 303 items by what the person was trying to do. Four themes stand out; two are crashes, one is a feature people keep asking for."
+[[steps]]
+do = "run"
+title = "Group the feedback by theme"
+command = "krewd-feedback cluster /tmp/reviews.json /tmp/issues.json /tmp/support.json --top 4"
+ms = 2200
+output = """ 1. Checkout crashes on Android 16 after a coupon      61 mentions  ★1.8  (crash, 4.1% of sessions)
+ 2. Cart is empty on a second device                   48 mentions  "sync my cart" (feature request)
+ 3. Dark mode: receipt text unreadable                 29 mentions  ★2.6
+ 4. Push notifications arrive twice                    17 mentions  ★3.1"""
+[[steps]]
+do = "plan"
+done = 2
+[[steps]]
+do = "run"
+title = "Reproduce the top crash on an Android 16 emulator"
+command = "./gradlew :app:connectedCheck --tests '*CheckoutCouponTest*' -Pdevice=pixel-android16"
+ms = 3200
+output = """CheckoutCouponTest > applyExpiredCoupon_thenPay FAILED
+    java.lang.IllegalStateException: Coupon.expiresAt was null
+        at com.acme.shop.checkout.CouponRules.validate(CouponRules.kt:42)
+1 test failed (reproduced issue #812 and 61 reviews)"""
+[[steps]]
+do = "plan"
+done = 3
+[[steps]]
+do = "edit"
+path = "app/src/main/java/com/acme/shop/checkout/CouponRules.kt"
+ms = 900
+old = """    val expires = coupon.expiresAt!!
+    if (expires.isBefore(now)) return Invalid.Expired"""
+new = """    val expires = coupon.expiresAt ?: return Valid // codes without an end date never expire
+    if (expires.isBefore(now)) return Invalid.Expired"""
+[[steps]]
+do = "edit"
+path = "app/src/main/java/com/acme/shop/notifications/PushReceiver.kt"
+ms = 700
+old = """    override fun onMessageReceived(message: RemoteMessage) = show(message)"""
+new = """    override fun onMessageReceived(message: RemoteMessage) {
+        if (seen.add(message.messageId)) show(message) // FCM can deliver the same message twice
+    }"""
+[[steps]]
+do = "run"
+title = "Run every test, the UI tests and lint"
+command = "./gradlew test connectedCheck lint"
+ms = 3600
+output = """BUILD SUCCESSFUL in 4m 12s
+1,284 tests completed, 0 failed (3 new regression tests)
+Lint: 0 errors, 0 new warnings"""
+[[steps]]
+do = "plan"
+done = 4
+[[steps]]
+do = "think"
+text = "What changed: three fixes and one new feature (saved cart sync, merged on Tuesday), no breaking API or data change. That is a minor release: 2.7.3 becomes 2.8.0."
+[[steps]]
+do = "run"
+title = "Bump to 2.8.0 and build the signed release"
+command = "./scripts/bump-version.sh minor && git commit -am 'release: 2.8.0' && git tag v2.8.0 && ./gradlew bundleRelease"
+ms = 3000
+output = """2.7.3 -> 2.8.0 (versionCode 20800)
+[main 4c2e9f1] release: 2.8.0
+BUILD SUCCESSFUL in 2m 51s
+app/build/outputs/bundle/release/app-release.aab (18.4 MB, signed)"""
+[[steps]]
+do = "plan"
+done = 5
+[[steps]]
+do = "file"
+name = "release-notes-2.8.0.md"
+content = """# Acme Shop 2.8.0
+
+## New
+- Your cart now follows you: start on your phone, finish on your tablet.
+
+## Fixed
+- Checkout no longer crashes on Android 16 when a coupon has no end date (61 reports).
+- Receipts are readable in dark mode (29 reports).
+- Notifications arrive once, not twice (17 reports).
+
+Built from 303 pieces of feedback this week: 214 store reviews, 37 issues, 52 support threads.
+"""
+[[steps]]
+do = "usage"
+used = 118000
+[[steps]]
+do = "plan"
+done = 6
+[[steps]]
+do = "ask"
+title = "Publish 2.8.0: Play staged rollout to 10% and a GitHub release"
+command = "play-publish --track production --rollout 0.10 app-release.aab && gh release create v2.8.0 --notes-file release-notes-2.8.0.md"
+ms = 2000
+output = """Play: 2.8.0 (20800) in review, staged rollout 10% once approved
+GitHub: https://github.com/acme/shop-android/releases/tag/v2.8.0"""
+rejected = "Okay, nothing published. 2.8.0 is built, tagged locally and ready; say the word when you want it out."
+[[steps]]
+do = "say"
+text = """**Acme Shop 2.8.0 is out to 10% of users.**
+
+- **Feedback in:** 303 items this week (214 reviews, 37 issues, 52 support threads), grouped into 4 themes.
+- **Fixed:** the Android 16 checkout crash (61 reports), the unreadable dark-mode receipt, and doubled notifications. 3 new regression tests.
+- **New:** saved cart sync, the most requested feature (48 asks).
+- **Version:** 2.8.0, a minor release: a new feature, nothing breaking.
+- **Checks:** 1,284 tests and lint pass; signed bundle built.
+
+Release notes: `~/outputs/release-notes-2.8.0.md`. I'll watch crash rates and reviews over the weekend and widen the rollout on Monday if they stay healthy."""

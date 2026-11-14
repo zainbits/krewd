@@ -33,6 +33,7 @@ BASE = f"http://127.0.0.1:{env('KREWD_PORT', '8810')}"
 TOKEN = (CONFIG / "token").read_text().strip()
 
 SAVED_PROMPTS = [
+    "Collect this week's app feedback, fix what matters and ship a release",
     "Find me the cheapest Mumbai to Dubai flight, 20 to 27 Dec",
     "The checkout build is failing. Fix it and open a PR",
     "Check our competitors' pricing pages and tell me what changed",
@@ -84,6 +85,12 @@ def task(text: str, engine: str, follow_up: str | None = None) -> str:
 
 
 ROUTINES = [
+    {"title": "Weekly release train", "engine": "claude", "by": "owner",
+     "triggers": [{"name": "friday", "schedule": "0 16 * * 5"}],
+     "instructions": "Every Friday: collect the week's Play reviews, GitHub issues and support threads for the Acme Shop "
+                     "Android app, group them, reproduce and fix the top bugs with regression tests, decide the version "
+                     "(patch, minor or major) from what changed, bump it, build the signed release and write the notes. "
+                     "Ask me before publishing; then roll out to 10% and watch crash rates over the weekend."},
     {"title": "Nightly repo doctor", "engine": "codex", "by": "owner",
      "triggers": [{"name": "nightly", "schedule": "0 2 * * *"}],
      "instructions": "Pull acme/storefront, install, run every test suite and the audit. Only tell me when something "
@@ -124,10 +131,10 @@ def main() -> None:
     api("PUT", "/api/prefs/last_engine", {"value": "claude"})
 
     print("Chats (the demo agents play their scenes)")
-    papers = task(SAVED_PROMPTS[4], "codex")
-    competitors = task(SAVED_PROMPTS[2], "claude")
-    build = task(SAVED_PROMPTS[1], "codex")
-    flights = task(SAVED_PROMPTS[0], "claude", follow_up="Yes, watch it every morning and tell me if it drops")
+    papers = task(SAVED_PROMPTS[5], "codex")
+    competitors = task(SAVED_PROMPTS[3], "claude")
+    build = task(SAVED_PROMPTS[2], "codex")
+    flights = task(SAVED_PROMPTS[1], "claude", follow_up="Yes, watch it every morning and tell me if it drops")
 
     print("Routines")
     made = {}
