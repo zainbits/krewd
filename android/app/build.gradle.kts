@@ -28,6 +28,7 @@ android {
         targetSdk = 37
         versionCode = krewdVersionCode
         versionName = krewdVersion
+        buildConfigField("boolean", "DEMO", "false")
     }
 
     signingConfigs {
@@ -53,6 +54,14 @@ android {
                 "proguard-rules.pro",
             )
         }
+        // The demo app for screenshots and videos (./master.sh demo app): installs beside the real app and
+        // connects to the demo server. The only difference: screen recording is allowed on the sign-in sheet.
+        create("demo") {
+            initWith(getByName("release"))
+            applicationIdSuffix = ".demo"
+            matchingFallbacks += listOf("release")
+            buildConfigField("boolean", "DEMO", "true")
+        }
     }
 
     compileOptions {
@@ -62,6 +71,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 }
 

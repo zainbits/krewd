@@ -1,5 +1,7 @@
 package app.krewd.ui
 
+import app.krewd.BuildConfig
+
 import android.view.WindowManager
 import androidx.activity.compose.LocalActivity
 import androidx.compose.foundation.layout.Arrangement
@@ -63,17 +65,19 @@ fun SecretSheet(ask: SecretAsk, viewModel: KrewdViewModel, onDismiss: () -> Unit
     var error by remember(ask.id) { mutableStateOf<String?>(null) }
     val activity = LocalActivity.current
     val site = remember(ask.id) { SiteAddress.of(ask.origin) }
+    // No screenshots or screen recording while the sheet is open; the demo build allows them, for the videos.
+    val secure = !BuildConfig.DEMO
     DisposableEffect(Unit) {
-        activity?.window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        if (secure) activity?.window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
         onDispose {
-            activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+            if (secure) activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
             values.clear()
         }
     }
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-        properties = ModalBottomSheetProperties(securePolicy = SecureFlagPolicy.SecureOn),
+        properties = ModalBottomSheetProperties(securePolicy = if (secure) SecureFlagPolicy.SecureOn else SecureFlagPolicy.Inherit),
     ) {
         Column(
             Modifier.fillMaxWidth().padding(horizontal = 20.dp).padding(bottom = 16.dp).imePadding().navigationBarsPadding(),

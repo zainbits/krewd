@@ -32,6 +32,8 @@ TMUX = "/usr/bin/tmux" if os.path.exists("/usr/bin/tmux") else "tmux"
 # Passed into the tmux session explicitly: an already-running tmux server keeps its own old environment.
 PASS_ENV = ("PATH", "HOME", "USER", "LANG", "DISPLAY", "XAUTHORITY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR",
             "DBUS_SESSION_BUS_ADDRESS", "XDG_SESSION_TYPE", "XDG_CURRENT_DESKTOP")
+# Also every KREWD_* and UV_* variable the unit sets (the demo server's config folder, a fixed uv).
+PASS_PREFIXES = ("KREWD_", "UV_")
 
 
 def tmux(*args: str) -> int:
@@ -104,7 +106,8 @@ def main() -> None:
     if alive(args.session):
         print(f"adopting running tmux session {args.session}", flush=True)
     else:
-        env = [f"-e{k}={os.environ[k]}" for k in PASS_ENV if os.environ.get(k)]
+        keys = [*PASS_ENV, *sorted(k for k in os.environ if k.startswith(PASS_PREFIXES))]
+        env = [f"-e{k}={os.environ[k]}" for k in keys if os.environ.get(k)]
         if tmux("new-session", "-d", "-s", args.session, "-c", args.cwd, *env, "exec " + shlex.join(command)):
             sys.exit(f"could not start tmux session {args.session}")
         print(f"started {args.session}; watch it with: tmux attach -t {args.session}", flush=True)

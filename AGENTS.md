@@ -6,7 +6,7 @@ Krewd is a self-hosted, agent-agnostic agent team. The owner asks for a task in 
 
 ## Start here: `./master.sh`
 
-`master.sh` is the one command to remember. Run it with no arguments for a menu, or name an action: `setup`, `doctor`, `status`, `start`, `stop`, `restart`, `logs`, `attach`, `token`, `test`, `update`, `app`, `agent-prompt`.
+`master.sh` is the one command to remember. Run it with no arguments for a menu, or name an action: `setup`, `doctor`, `status`, `start`, `stop`, `restart`, `logs`, `attach`, `token`, `test`, `update`, `app`, `demo`, `agent-prompt`.
 
 `setup` also links the `krewd` command (`deploy/krewd-cli.sh`) as `~/.local/bin/krewd`: the command line the agents use to manage routines.
 
@@ -39,7 +39,8 @@ Krewd is a self-hosted, agent-agnostic agent team. The owner asks for a task in 
   - Example config files.
   - `agents-section.md`: instructions for the agents Krewd runs, including the routine rules (ask before creating a routine when an existing one may be the one to update).
   - `krewd-cli.sh`: the `krewd` command, run with the server's environment.
-- `docs/`: `api.md`.
+- `docs/`: `api.md`; `docs/media/` holds the README's images.
+- `demo/`: the demo server for screenshots and videos (`./master.sh demo setup|up|seed|reset|down|token|app`, see `demo/README.md`): a second Krewd with its own database, port, config folder, Brave and fake home, whose agents are a scripted ACP agent (`demo/agent.py`) playing `demo/scenes/*.toml` on real websites. Installed but never started at boot. The app's `demo` build type (`app.krewd.demo`) is the same app beside the real one, with screen recording allowed on the sign-in sheet. When you add a feature worth showing, add or extend a scene.
 - `VERSION`: the one Krewd version. The server reads it live (`/api/health`, its ACP client info and its package metadata), and the app's build takes its version name from it, with the version code worked out from it (0.8.1 is 801).
 
 ## How it runs

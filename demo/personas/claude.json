@@ -1,0 +1,337 @@
+{
+ "agent": {
+  "name": "@agentclientprotocol/claude-agent-acp",
+  "title": "Claude Agent",
+  "version": "0.101.0"
+ },
+ "config_options": [
+  {
+   "id": "mode",
+   "name": "Mode",
+   "description": "Session permission mode",
+   "category": "mode",
+   "type": "select",
+   "options": [
+    {
+     "value": "default",
+     "name": "Manual",
+     "description": "Always ask before making changes"
+    },
+    {
+     "value": "acceptEdits",
+     "name": "Accept edits",
+     "description": "Automatically accept all file edits"
+    },
+    {
+     "value": "plan",
+     "name": "Plan",
+     "description": "Create a plan before making changes"
+    },
+    {
+     "value": "auto",
+     "name": "Auto",
+     "description": "Claude handles permission decisions"
+    },
+    {
+     "value": "bypassPermissions",
+     "name": "Bypass permissions",
+     "description": "Accepts all permissions"
+    }
+   ],
+   "currentValue": "default"
+  },
+  {
+   "id": "model",
+   "name": "Model",
+   "description": "AI model to use",
+   "category": "model",
+   "type": "select",
+   "options": [
+    {
+     "value": "default",
+     "name": "Default (recommended)",
+     "description": "Opus"
+    },
+    {
+     "value": "opus",
+     "name": "Opus 5.5",
+     "description": "Opus 5.5 · Best for everyday, complex tasks · $4/$20 per Mtok"
+    },
+    {
+     "value": "fable",
+     "name": "Fable 5.1",
+     "description": "Fable 5.1 · Most capable for your hardest and longest-running tasks · $10/$50 per Mtok"
+    },
+    {
+     "value": "sonnet",
+     "name": "Sonnet 5.5",
+     "description": "Sonnet 5.5 · Efficient for routine tasks · $2/$10 per Mtok"
+    },
+    {
+     "value": "haiku",
+     "name": "Haiku 5.5",
+     "description": "Haiku 5.5 · Fastest for quick answers · $0.10/$0.50 per Mtok ($0.50/$2.50 for prompts over 100k)"
+    }
+   ],
+   "currentValue": "opus"
+  },
+  {
+   "id": "effort",
+   "name": "Effort",
+   "description": "Available effort levels for this model",
+   "category": "thought_level",
+   "type": "select",
+   "options": [
+    {
+     "value": "default",
+     "name": "Default",
+     "description": null
+    },
+    {
+     "value": "low",
+     "name": "Low",
+     "description": null
+    },
+    {
+     "value": "medium",
+     "name": "Medium",
+     "description": null
+    },
+    {
+     "value": "high",
+     "name": "High",
+     "description": null
+    },
+    {
+     "value": "xhigh",
+     "name": "Xhigh",
+     "description": null
+    },
+    {
+     "value": "max",
+     "name": "Max",
+     "description": null
+    }
+   ],
+   "currentValue": "high"
+  }
+ ],
+ "modes": {
+  "currentModeId": "default",
+  "availableModes": [
+   {
+    "id": "default",
+    "name": "Manual",
+    "description": "Always ask before making changes"
+   },
+   {
+    "id": "acceptEdits",
+    "name": "Accept edits",
+    "description": "Automatically accept all file edits"
+   },
+   {
+    "id": "plan",
+    "name": "Plan",
+    "description": "Create a plan before making changes"
+   },
+   {
+    "id": "auto",
+    "name": "Auto",
+    "description": "Claude handles permission decisions"
+   },
+   {
+    "id": "bypassPermissions",
+    "name": "Bypass permissions",
+    "description": "Accepts all permissions"
+   }
+  ]
+ },
+ "commands": [
+  {
+   "name": "advisor",
+   "description": "Let Claude consult a stronger model at key moments",
+   "hint": "[fable|opus|sonnet|off]"
+  },
+  {
+   "name": "autocompact",
+   "description": "Configure the auto-compact window size",
+   "hint": "[auto|<tokens>]"
+  },
+  {
+   "name": "batch",
+   "description": "Research and plan a large-scale change, then execute it in parallel across 5–30 isolated worktree agents that each open a PR.",
+   "hint": "<instruction>"
+  },
+  {
+   "name": "browser-harness",
+   "description": "Control a real browser via CDP: clicking, typing, navigation, logged-in sessions, JS-rendered or bot-protected pages. Not for plain HTTP fetches of public content - use curl for those. (user)",
+   "hint": null
+  },
+  {
+   "name": "claude-api",
+   "description": "Reference for the Claude API / Anthropic SDK — model ids, pricing, params, streaming, tool use, MCP, agents, caching, token counting, model migration.\nTRIGGER — read BEFORE opening the target file; don't skip because it \"looks like a one-liner\" — whenever: the prompt names Claude/Anthropic in any form (Claude, Anthropic, Fable, Opus, Sonnet, Haiku, `anthropic`, `@anthropic-ai`, `claude-*`, `us.anthropic.*`, `[1m]`); the user asks about an LLM (pricing/model choice/limits/caching) — never answer from memory; OR the task is LLM-shaped with provider unstated (agent/MCP/tool-definition/multi-agent/RAG/LLM-judge/computer-use; generate/summarize/extract/classify/rewrite/converse over NL; debugging refusals/cutoffs/streaming/tool-calls/tokens).\nSKIP only when another provider is being worked on (overrides all triggers): OpenAI/GPT/Gemini/Llama/Mistral/Cohere/Ollama named in the query; OR `grep -rE 'openai|langchain_openai|google.generativeai|genai|mistralai|cohere|ollama'` over the project hits (run this grep FIRST if no provider named — don't Read the file).",
+   "hint": null
+  },
+  {
+   "name": "code-review",
+   "description": "Review the current diff, or a PR number/branch/path target, for correctness bugs (plus reuse/simplification/efficiency cleanups where the model's recipe covers them) at the effort level given first, before any target (low|medium|high|xhigh|max: from few high-confidence findings to many, some uncertain); with no level given, it reuses the level you typed last. Pass --comment to post findings as inline PR comments, or --fix to apply them to the working tree after the review. Pass --max-findings <n> to report up to n findings, or --max-findings all for every finding. The choice stays until you pass --max-findings default.",
+   "hint": "[low|medium|high|xhigh|max] [--fix] [--comment] [<pr#>|<branch>|<path>] [--max-findings <n>|all]"
+  },
+  {
+   "name": "color",
+   "description": "Set the prompt bar color for this session",
+   "hint": "[red|blue|green|yellow|purple|orange|pink|cyan|default]"
+  },
+  {
+   "name": "compact",
+   "description": "Free up context by summarizing the conversation so far",
+   "hint": "<optional custom summarization instructions>"
+  },
+  {
+   "name": "context",
+   "description": "Show current context usage",
+   "hint": null
+  },
+  {
+   "name": "dataviz",
+   "description": "Use this skill whenever you are about to create ANY chart, graph, plot, dashboard, or data visualization, in ANY output medium — an HTML or React artifact, inline SVG, plotting code in any library (matplotlib, plotly, d3, Recharts, …), an image/PNG you will render and upload, or a chart shared into Slack. Read it BEFORE writing the first line of chart code, choosing chart colors, building a stat tile / meter / KPI row, or laying out a dashboard. When the destination is a first-party document connector (host-designated, never self-described) that renders live charts, hand it the rows (inline, or as an uploaded data file the chart cites) rather than a rendered PNG/SVG — a picture of a chart loses hover, data inspection and per-value comments. Produces visualizations that read as one system — elegant, accessible, consistent in light and dark — using a brand-neutral placeholder palette you swap for your own. Teaches a design-system-agnostic method: a form heuristic, a color formula with a runnable validator, mark specs, and interaction rules. A validated default palette is documented in `references/palette.md` — swap that file's values for your brand's. Triggers on: \"chart\", \"graph\", \"plot\", \"data viz\", \"visualization\", \"dashboard\", \"analytics\", \"visualize data\", \"categorical colors\", \"sequential / diverging palette\", \"stat tile\", \"sparkline\", \"heatmap\", \"legend\", \"axis\", \"tooltip\", \"chart colors\", \"color by series\".",
+   "hint": null
+  },
+  {
+   "name": "deep-research",
+   "description": "Deep research harness — fan-out web searches, fetch sources, adversarially verify claims, synthesize a cited report. (dynamic workflow)",
+   "hint": null
+  },
+  {
+   "name": "design",
+   "description": "Grant or revoke Claude agent access to your Design projects",
+   "hint": "consent | revoke"
+  },
+  {
+   "name": "design-consent",
+   "description": "Grant Claude agent access to your Design projects",
+   "hint": null
+  },
+  {
+   "name": "design-revoke",
+   "description": "Revoke Claude agent access to your Design projects",
+   "hint": null
+  },
+  {
+   "name": "design-sync",
+   "description": "Push a React design system to claude.ai/design. This runs a converter that bundles the real component code (from Storybook or a bare package) and uploads it. Use when the user runs /design-sync or says \"sync my design system to Claude Design\".",
+   "hint": "[<project hint, e.g. \"Acme DS\">]"
+  },
+  {
+   "name": "effort",
+   "description": "Set effort level for model usage",
+   "hint": "<low|medium|high|xhigh|max|auto|ultracode [on|off]>"
+  },
+  {
+   "name": "fewer-permission-prompts",
+   "description": "Scan your transcripts for common read-only Bash and MCP tool calls, then add a prioritized allowlist to project .claude/settings.json to reduce permission prompts.",
+   "hint": null
+  },
+  {
+   "name": "focus",
+   "description": "Toggle focus view: just your prompt, summary, and response",
+   "hint": "[on|off]"
+  },
+  {
+   "name": "goal",
+   "description": "Set a goal — keep working until the condition is met",
+   "hint": null
+  },
+  {
+   "name": "heapdump",
+   "description": "Dump the JS heap to the Desktop; on Linux with no Desktop folder, the home directory",
+   "hint": null
+  },
+  {
+   "name": "import",
+   "description": "Import config from another AI coding agent",
+   "hint": null
+  },
+  {
+   "name": "init",
+   "description": "Initialize a new CLAUDE.md file with codebase documentation",
+   "hint": null
+  },
+  {
+   "name": "insights",
+   "description": "Generate a report analyzing your Claude Code sessions",
+   "hint": null
+  },
+  {
+   "name": "loop",
+   "description": "Run a prompt or slash command on a recurring interval (e.g. /loop 5m /foo). Omit the interval to let the model self-pace.",
+   "hint": "[interval] [prompt]"
+  },
+  {
+   "name": "model",
+   "description": "Set the AI model for Claude Code",
+   "hint": "<model>"
+  },
+  {
+   "name": "output-style",
+   "description": "List output styles or switch to one",
+   "hint": "[style]"
+  },
+  {
+   "name": "recap",
+   "description": "Generate a one-line session recap now",
+   "hint": null
+  },
+  {
+   "name": "reload-skills",
+   "description": "Pick up skills added or changed on disk during this session",
+   "hint": null
+  },
+  {
+   "name": "rename",
+   "description": "Rename the current conversation",
+   "hint": "[name]"
+  },
+  {
+   "name": "run",
+   "description": "Launch and drive this project's app to see a change working. Use when asked to run, start, or screenshot the app, or to confirm a change works in the real app (not just tests). First looks for a project skill that already covers launching the app; otherwise falls back to built-in patterns per project type (CLI, server, TUI, Electron, browser-driven, library).",
+   "hint": null
+  },
+  {
+   "name": "run-skill-generator",
+   "description": "Author or improve the run-<unit> skill - a per-project skill that tells agents how to build, launch, and drive this project's app. Use when the user asks to set up the project, get it running, write run instructions, or verify build/run steps work from a clean environment.",
+   "hint": null
+  },
+  {
+   "name": "security-review",
+   "description": "Complete a security review of the pending changes on the current branch",
+   "hint": null
+  },
+  {
+   "name": "simplify",
+   "description": "Review the changed code for reuse, simplification, efficiency, and altitude cleanups, then apply the fixes. Quality only — it does not hunt for bugs; use /code-review for that.",
+   "hint": "[<target>]"
+  },
+  {
+   "name": "team-onboarding",
+   "description": "Help teammates ramp on Claude Code with a guide from your usage",
+   "hint": null
+  },
+  {
+   "name": "verify",
+   "description": "Verify that a code change actually does what it's supposed to by exercising it end-to-end and observing behavior — drive the affected flow, not just tests or typecheck. Run before committing nontrivial changes; bootstraps this repo's project verify skill if none exists yet. Don't invoke it on a diff that only touches tests, docs, or other code with no runtime surface to drive (a change to product source always has one) — there's nothing to observe.",
+   "hint": null
+  },
+  {
+   "name": "workflow-authoring",
+   "description": "Reference for writing a Workflow tool script (script API and gotchas, resume, quality patterns, worked examples). Load before authoring a script for a workflow the user already opted into; it does not itself authorize running one.",
+   "hint": null
+  },
+  {
+   "name": "workflow-launch-exec",
+   "description": "Execute a server-launched workflow handoff (workflow_launch event sessions only)",
+   "hint": null
+  }
+ ],
+ "model_used": "claude-opus-5-5"
+}

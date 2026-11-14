@@ -12,7 +12,7 @@ conf() {
   printf '%s' "$value"
 }
 
-find_uv() { command -v uv 2>/dev/null || { [[ -x "$HOME/.local/bin/uv" ]] && echo "$HOME/.local/bin/uv"; }; }
+find_uv() { [[ -n "${KREWD_UV:-}" && -x "$KREWD_UV" ]] && { echo "$KREWD_UV"; return; }; command -v uv 2>/dev/null || { [[ -x "$HOME/.local/bin/uv" ]] && echo "$HOME/.local/bin/uv"; }; }
 find_brave() {
   local b; b="$(conf KREWD_BROWSER '')"
   [[ -n "$b" ]] && { echo "$b"; return; }

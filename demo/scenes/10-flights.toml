@@ -1,0 +1,91 @@
+# Live web research on a real site, then the agent turns it into a routine it runs every morning.
+match = ["flight", "dubai", "fare"]
+title = "Cheapest Mumbai to Dubai, 20 to 27 Dec"
+routine = "Flight fare watch"
+plan = ["Search Google Flights for BOM to DXB, 20 to 27 Dec", "Read the fares and the cheapest options", "Check baggage and timings", "Send you the best pick"]
+handover = """## Handover
+Goal: cheapest Mumbai to Dubai return, 20 to 27 Dec. Searched Google Flights; cheapest seen {fares.min}. Next: watch the fare every morning and tell the owner when it drops."""
+fallback = "Fares move a few times a day. Want me to keep an eye on this one for you every morning?"
+
+[[steps]]
+do = "think"
+text = "The owner wants a return fare. Google Flights shows the whole week's prices at once; I'll read them straight from the page and keep the timings in mind."
+[[steps]]
+do = "plan"
+done = 0
+[[steps]]
+do = "browse"
+url = "https://www.google.com/travel/flights?q=Flights%20from%20BOM%20to%20DXB%20on%202026-12-20%20through%202026-12-27&curr=INR&hl=en-IN"
+ms = 2200
+settle_ms = 4000
+[[steps]]
+do = "plan"
+done = 1
+[[steps]]
+do = "js"
+title = "browser-harness: read the fares on the page"
+code = "fares = [p for p in page_text() if p.startswith('₹')]"
+save = "fares"
+expr = """(() => { const t = document.body.innerText; const m = [...t.matchAll(/₹\\s?([\\d,]{4,})/g)].map(x => parseInt(x[1].replace(/,/g, ''))).filter(n => n > 3000 && n < 300000); if (!m.length) return null; m.sort((a, b) => a - b); const f = n => '₹' + n.toLocaleString('en-IN'); return {min: f(m[0]), max: f(m[m.length - 1]), count: m.length}; })()"""
+default = { min = "about ₹19,000", max = "₹60,000+", count = "a dozen" }
+[[steps]]
+do = "js"
+show = false
+expr = "window.scrollBy({top: 650, behavior: 'smooth'}); true"
+after_ms = 1500
+[[steps]]
+do = "shot"
+ms = 700
+[[steps]]
+do = "plan"
+done = 3
+[[steps]]
+do = "usage"
+used = 38400
+[[steps]]
+do = "say"
+text = """**Cheapest return: {fares.min}** for 20 to 27 Dec, Mumbai to Dubai.
+
+- I read {fares.count} fares on Google Flights; they run from {fares.min} up to {fares.max}.
+- The cheapest ones are early-morning departures; the non-stops a little later in the day cost more.
+- Fares this close to Christmas usually climb, so booking in the next week is the safer bet.
+
+Want me to watch this fare every morning and tell you the day it drops?"""
+
+[[followups]]
+match = ["watch", "every morning", "track", "routine", "yes"]
+[[followups.steps]]
+do = "think"
+text = "The owner asked for a daily watch. I'll check existing routines first so I don't make a duplicate, then create one."
+[[followups.steps]]
+do = "krewd"
+args = "routines list"
+[[followups.steps]]
+do = "krewd"
+args = "routines create --title 'Flight fare watch' --trigger morning '0 7 * * *' --instructions 'Open Google Flights for Mumbai (BOM) to Dubai (DXB), 20 to 27 Dec, return. Read the cheapest fare. Tell the owner the fare and how it moved since the last run; flag it clearly if it dropped below 18,000 rupees. Never book anything.' --by agent --note 'Owner asked in chat for a daily fare watch'"
+shown = "routines create --title 'Flight fare watch' --trigger morning '0 7 * * *' --instructions '…' --by agent"
+[[followups.steps]]
+do = "say"
+text = """Done: **Flight fare watch** runs every day at 7:00.
+
+Each morning I open Google Flights, read the cheapest fare for your dates and tell you how it moved. If it drops under ₹18,000 I'll flag it at the top. I'll never book without you."""
+
+[[routine_steps]]
+do = "think"
+text = "Morning fare check. Same search as always; compare with what the notes say about yesterday."
+[[routine_steps]]
+do = "browse"
+url = "https://www.google.com/travel/flights?q=Flights%20from%20BOM%20to%20DXB%20on%202026-12-20%20through%202026-12-27&curr=INR&hl=en-IN"
+ms = 2000
+settle_ms = 4000
+[[routine_steps]]
+do = "js"
+title = "browser-harness: read the fares on the page"
+save = "fares"
+expr = """(() => { const t = document.body.innerText; const m = [...t.matchAll(/₹\\s?([\\d,]{4,})/g)].map(x => parseInt(x[1].replace(/,/g, ''))).filter(n => n > 3000 && n < 300000); if (!m.length) return null; m.sort((a, b) => a - b); const f = n => '₹' + n.toLocaleString('en-IN'); return {min: f(m[0]), max: f(m[m.length - 1]), count: m.length}; })()"""
+default = { min = "about ₹19,000", max = "₹60,000+", count = "a dozen" }
+[[routine_steps]]
+do = "shot"
+[[routine_steps]]
+do = "say"
+text = "**Today's cheapest: {fares.min}** (BOM to DXB, 20 to 27 Dec). Not under ₹18,000 yet, so no action needed. I'll check again tomorrow at 7."

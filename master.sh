@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Krewd's one entry point. Run it with no arguments for a menu, or name an action:
 #   ./master.sh setup | doctor | status | start | stop | restart | logs | attach | token
-#               test | update | app | agent-prompt | help
+#               test | update | app | demo | agent-prompt | help
 # It never prints secrets except the app token, and only when you ask for it ("token").
 set -uo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/deploy/lib.sh"
@@ -352,6 +352,8 @@ ${B}Krewd master script${N} ($REPO)
   test           run the server tests
   update         pull the latest code, reinstall, restart
   app            build the Android app and install it over adb
+  demo ACTION    the throwaway demo server for screenshots and videos:
+                 setup | up | down | seed | reset | status | token | app
   agent-prompt   copy a ready prompt to paste into Claude Code, Codex or any agent
 EOF
 }
@@ -382,6 +384,7 @@ dispatch() {
     test) run_tests ;;
     update) update ;;
     app) app ;;
+    demo) "$REPO/demo/demo.sh" "$@" ;;
     agent-prompt|agent|help-agent) agent_prompt ;;
     help|-h|--help) usage ;;
     "") menu ;;

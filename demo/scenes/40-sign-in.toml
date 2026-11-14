@@ -1,0 +1,49 @@
+# The sign-in sheet: the agent hits a login page and asks; the owner fills it on the phone, and
+# Krewd types it into the page. The agent never sees the password. Public practice site, public test login
+# (username student, password Password123).
+match = ["log in", "login", "sign in", "portal", "statement"]
+title = "Sign in to the practice portal"
+plan = ["Open the portal", "Get the sign-in from you", "Open the account page", "Grab what you asked for"]
+handover = """## Handover
+Signed in to practicetestautomation.com through a Krewd sign-in request (the owner filled it on the phone; the agent never saw it). Landed on the logged-in page."""
+
+[[steps]]
+do = "plan"
+done = 0
+[[steps]]
+do = "browse"
+url = "https://practicetestautomation.com/practice-test-login/"
+ms = 1400
+settle_ms = 2000
+[[steps]]
+do = "think"
+text = "This page needs a username and password. I never ask for passwords in the chat; I'll send a sign-in request to the owner's phone instead."
+[[steps]]
+do = "plan"
+done = 1
+[[steps]]
+do = "say"
+text = "The portal wants you to sign in. I've sent a secure sign-in request to your phone: fill it there (your password manager can fill it too) and Krewd types it into the page. I won't see it."
+[[steps]]
+do = "secret"
+reason = "Sign in to the practice portal to open your account page"
+submit = "#submit"
+declined = "No problem, I stopped at the sign-in page. Nothing was entered."
+[[steps]]
+do = "plan"
+done = 2
+[[steps]]
+do = "js"
+show = false
+expr = "new Promise(r => setTimeout(() => r(location.href), 1500))"
+save = "landed"
+[[steps]]
+do = "shot"
+[[steps]]
+do = "plan"
+done = 4
+[[steps]]
+do = "say"
+text = """**You're signed in.** The portal opened your account page ("Logged In Successfully").
+
+The password went from your phone straight into the page: it never passed through me, the chat or any log."""

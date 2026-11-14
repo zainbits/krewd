@@ -1,0 +1,19 @@
+# Krewd demo engines: the scripted demo agent (demo/agent.py) in two personas. They look like Claude Code
+# and Codex in the app (names, models, modes, commands from demo/personas) but run no model and need no key.
+default = "claude"
+
+[engines.claude]
+name = "Claude Code"
+command = ["@REPO@/server/.venv/bin/python", "@REPO@/demo/agent.py"]
+
+[engines.claude.env]
+DEMO_PERSONA = "claude"
+DEMO_SHARE_DIR = "@DEMO_DIR@/home/outputs"
+
+[engines.codex]
+name = "Codex"
+command = ["@REPO@/server/.venv/bin/python", "@REPO@/demo/agent.py"]
+
+[engines.codex.env]
+DEMO_PERSONA = "codex"
+DEMO_SHARE_DIR = "@DEMO_DIR@/home/outputs"

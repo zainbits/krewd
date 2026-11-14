@@ -1,0 +1,70 @@
+# A routine with bounded retries: not ready yet, so the run asks Krewd to try again later.
+match = ["issue", "triage", "bug report"]
+title = "Triage today's issues"
+routine = "Issue triage"
+plan = ["List new issues", "Reproduce the bugs", "Label and reply", "Draft fixes"]
+handover = """## Handover
+Daily triage of new acme/storefront issues: labelled, reproduced, two fixes drafted on branches."""
+
+[[steps]]
+do = "plan"
+done = 0
+[[steps]]
+do = "run"
+command = "gh issue list -R acme/storefront --state open --search 'created:>=@today' --json number,title,labels"
+ms = 1300
+output = """#497  Coupon field accepts expired codes            (no labels)
+#496  Order history shows the wrong currency         (no labels)
+#495  Dark mode: unreadable text on the receipt page (no labels)"""
+[[steps]]
+do = "plan"
+done = 1
+[[steps]]
+do = "run"
+command = "pnpm test:e2e --grep 'coupon|currency' --reporter=line"
+ms = 2600
+output = """✘ coupon › rejects an expired code (reproduced #497)
+✘ orders › shows prices in the order's currency (reproduced #496)
+2 failed, 41 passed"""
+[[steps]]
+do = "plan"
+done = 3
+[[steps]]
+do = "say"
+text = """**3 new issues, 2 real bugs.**
+
+- **#497 expired coupons accepted:** reproduced; the expiry check compares dates as strings. Fix drafted on `fix/coupon-expiry`.
+- **#496 wrong currency in order history:** reproduced; the list ignores the order's own currency. Fix drafted on `fix/order-currency`.
+- **#495 dark mode receipt:** a design question, labelled `design` and replied to.
+
+Want me to open both PRs?"""
+
+[[routine_steps]]
+do = "run"
+command = "gh run list -R acme/storefront --branch main --limit 1 --json status,conclusion"
+ms = 1200
+output = """[{"status":"in_progress","conclusion":""}]"""
+[[routine_steps]]
+do = "think"
+text = "Main is still building; triaging against a half-finished build gives wrong answers. This is a 'not yet', so ask for the next attempt."
+[[routine_steps]]
+do = "krewd"
+args = "routines later {routine_id} --in 10m --reason 'CI on main is still running'"
+[[routine_steps]]
+do = "say"
+text = "CI on main is still running, so I'll triage once it finishes. Krewd tries again in 10 minutes (attempt 2 of 3)."
+
+[[routine_retry_steps]]
+do = "run"
+command = "gh run list -R acme/storefront --branch main --limit 1 --json status,conclusion"
+ms = 1000
+output = """[{"status":"completed","conclusion":"success"}]"""
+[[routine_retry_steps]]
+do = "run"
+command = "gh issue list -R acme/storefront --state open --search 'created:>=@today' --json number,title"
+ms = 1200
+output = """#497  Coupon field accepts expired codes
+#496  Order history shows the wrong currency"""
+[[routine_retry_steps]]
+do = "say"
+text = "**CI is green, triage done:** 2 new issues, both reproduced and labelled `bug`; fixes drafted on `fix/coupon-expiry` and `fix/order-currency`. Want the PRs?"

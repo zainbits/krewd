@@ -1,0 +1,80 @@
+# Reading research on a real site and writing a brief the owner can download.
+match = ["paper", "arxiv", "research", "brief"]
+title = "This week's AI agent papers, in five minutes"
+routine = "Weekly AI papers brief"
+plan = ["Open the newest cs.AI papers on arXiv", "Pick the ones about agents", "Read the abstracts", "Write the brief"]
+handover = """## Handover
+Weekly brief of new arXiv cs.AI papers on agents; titles read from arxiv.org; brief saved as ~/outputs/agents-brief.md."""
+
+[[steps]]
+do = "plan"
+done = 0
+[[steps]]
+do = "browse"
+url = "https://arxiv.org/list/cs.AI/recent?skip=0&show=50"
+ms = 1600
+settle_ms = 1500
+[[steps]]
+do = "js"
+title = "browser-harness: list the newest titles about agents"
+save = "papers"
+expr = """(() => { const t = [...document.querySelectorAll('.list-title')].map(e => e.innerText.replace(/^Title:\\s*/, '').trim()); const a = t.filter(x => /agent/i.test(x)); const pick = (a.length >= 3 ? a : t).slice(0, 3); return pick.length ? {n: t.length, a: a.length, one: pick[0], two: pick[1] || '', three: pick[2] || ''} : null; })()"""
+default = { n = "50", a = "several", one = "(see the page)", two = "", three = "" }
+[[steps]]
+do = "plan"
+done = 2
+[[steps]]
+do = "js"
+show = false
+expr = "(() => { const l = document.querySelector('a[title=\"Abstract\"]'); if (l) location.href = l.href; return !!l; })()"
+after_ms = 2500
+[[steps]]
+do = "shot"
+[[steps]]
+do = "file"
+name = "agents-brief.md"
+content = """# AI agents: this week's papers
+
+From the newest {papers.n} cs.AI papers on arXiv, {papers.a} are about agents. The three worth your time:
+
+1. {papers.one}
+2. {papers.two}
+3. {papers.three}
+
+Read the abstracts on arxiv.org/list/cs.AI/recent.
+"""
+[[steps]]
+do = "plan"
+done = 4
+[[steps]]
+do = "say"
+text = """**{papers.a} of the newest {papers.n} AI papers are about agents.** The three I'd read:
+
+1. {papers.one}
+2. {papers.two}
+3. {papers.three}
+
+The brief with links is in `~/outputs/agents-brief.md`."""
+
+[[routine_steps]]
+do = "browse"
+url = "https://arxiv.org/list/cs.AI/recent?skip=0&show=50"
+ms = 1500
+[[routine_steps]]
+do = "js"
+title = "browser-harness: list the newest titles about agents"
+save = "papers"
+expr = """(() => { const t = [...document.querySelectorAll('.list-title')].map(e => e.innerText.replace(/^Title:\\s*/, '').trim()); const a = t.filter(x => /agent/i.test(x)); const pick = (a.length >= 3 ? a : t).slice(0, 3); return pick.length ? {n: t.length, a: a.length, one: pick[0], two: pick[1] || '', three: pick[2] || ''} : null; })()"""
+default = { n = "50", a = "several", one = "(see the page)", two = "", three = "" }
+[[routine_steps]]
+do = "file"
+name = "agents-brief.md"
+content = """# AI agents: this week's papers
+
+1. {papers.one}
+2. {papers.two}
+3. {papers.three}
+"""
+[[routine_steps]]
+do = "say"
+text = "**This week's brief is ready:** {papers.a} new agent papers. Top pick: {papers.one}. Full brief: `~/outputs/agents-brief.md`."

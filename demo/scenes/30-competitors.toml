@@ -1,0 +1,105 @@
+# Several real sites in one task, the findings written up as a file the owner downloads.
+match = ["competitor", "pricing", "changelog", "what changed"]
+title = "Competitor pricing check"
+routine = "Competitor pricing watch"
+plan = ["Open each competitor's pricing page", "Read the plans and prices", "Compare with last week's notes", "Write the report"]
+handover = """## Handover
+Weekly pricing check of Linear, Vercel and Supabase pricing pages. Prices read from the live pages; report saved as ~/outputs/pricing-watch.md."""
+
+[[steps]]
+do = "think"
+text = "Three pricing pages. Read the actual numbers from each page rather than trusting a cached summary."
+[[steps]]
+do = "plan"
+done = 0
+[[steps]]
+do = "browse"
+url = "https://linear.app/pricing"
+ms = 1600
+settle_ms = 2500
+[[steps]]
+do = "js"
+title = "browser-harness: read the plan prices"
+save = "linear"
+expr = """(() => { const m = [...new Set([...document.body.innerText.matchAll(/\\$\\s?\\d+(?![\\d.,])/g)].map(x => x[0].replace(/\\s/g, '')))]; return m.length ? m.slice(0, 4).join(', ') : null; })()"""
+default = "see the page"
+[[steps]]
+do = "browse"
+url = "https://vercel.com/pricing"
+ms = 1500
+settle_ms = 2500
+[[steps]]
+do = "js"
+title = "browser-harness: read the plan prices"
+save = "vercel"
+expr = """(() => { const m = [...new Set([...document.body.innerText.matchAll(/\\$\\s?\\d+(?![\\d.,])/g)].map(x => x[0].replace(/\\s/g, '')))]; return m.length ? m.slice(0, 4).join(', ') : null; })()"""
+default = "see the page"
+[[steps]]
+do = "browse"
+url = "https://supabase.com/pricing"
+ms = 1500
+settle_ms = 2500
+[[steps]]
+do = "js"
+title = "browser-harness: read the plan prices"
+save = "supabase"
+expr = """(() => { const m = [...new Set([...document.body.innerText.matchAll(/\\$\\s?\\d+(?![\\d.,])/g)].map(x => x[0].replace(/\\s/g, '')))]; return m.length ? m.slice(0, 4).join(', ') : null; })()"""
+default = "see the page"
+[[steps]]
+do = "shot"
+[[steps]]
+do = "plan"
+done = 3
+[[steps]]
+do = "file"
+name = "pricing-watch.md"
+content = """# Competitor pricing watch
+
+Read live from each pricing page.
+
+| Product | Prices on the page |
+|---|---|
+| Linear | {linear} |
+| Vercel | {vercel} |
+| Supabase | {supabase} |
+
+Notes
+- Every price above was read from the live page, not from memory.
+- Next check: next Monday 09:00.
+"""
+[[steps]]
+do = "plan"
+done = 4
+[[steps]]
+do = "say"
+text = """**Pricing as of today**, read from the live pages:
+
+- **Linear:** {linear}
+- **Vercel:** {vercel}
+- **Supabase:** {supabase}
+
+Full report: `~/outputs/pricing-watch.md`. I can run this every Monday and only ping you when a number changes."""
+
+[[routine_steps]]
+do = "browse"
+url = "https://linear.app/pricing"
+ms = 1400
+[[routine_steps]]
+do = "js"
+title = "browser-harness: read the plan prices"
+save = "linear"
+expr = """(() => { const m = [...new Set([...document.body.innerText.matchAll(/\\$\\s?\\d+(?![\\d.,])/g)].map(x => x[0].replace(/\\s/g, '')))]; return m.length ? m.slice(0, 4).join(', ') : null; })()"""
+default = "see the page"
+[[routine_steps]]
+do = "browse"
+url = "https://supabase.com/pricing"
+ms = 1400
+[[routine_steps]]
+do = "js"
+title = "browser-harness: read the plan prices"
+save = "supabase"
+expr = """(() => { const m = [...new Set([...document.body.innerText.matchAll(/\\$\\s?\\d+(?![\\d.,])/g)].map(x => x[0].replace(/\\s/g, '')))]; return m.length ? m.slice(0, 4).join(', ') : null; })()"""
+default = "see the page"
+[[routine_steps]]
+do = "say"
+text = "**No pricing changes this week.** Linear {linear}; Supabase {supabase}. Same as last Monday's notes."
