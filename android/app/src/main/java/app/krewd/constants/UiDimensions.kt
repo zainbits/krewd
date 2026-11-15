@@ -20,22 +20,6 @@ object ShellDimensions {
     val CARD_CORNER = 20.dp
 }
 
-object LiquidNavDimensions {
-    val BAR_HEIGHT = 64.dp
-    val SELECTED_PILL_WIDTH = 64.dp
-    val GROUP_GAP = 10.dp
-    val SIDE_MARGIN = 12.dp
-    val BOTTOM_GAP = 8.dp
-    val BORDER_WIDTH = 1.dp
-
-    /** Outer bottom corner radius when the display reports no rounded corners (emulators, square screens). */
-    val FALLBACK_OUTER_CORNER_RADIUS = 32.dp
-    val ICON_SIZE = 24.dp
-    val ICON_LABEL_GAP = 2.dp
-    val RIPPLE_RADIUS = 28.dp
-    const val LABEL_SELECTED_SCALE = 0.85f
-}
-
 object Timing {
     const val LONG_POLL_SECONDS = 25
     const val CONNECT_TIMEOUT_MS = 4_000

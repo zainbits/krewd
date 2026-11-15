@@ -102,7 +102,6 @@ import app.krewd.Connection
 import app.krewd.KrewdViewModel
 import app.krewd.R
 import app.krewd.UiState
-import app.krewd.constants.LiquidNavDimensions
 import app.krewd.constants.ShellDimensions
 import app.krewd.data.BrowserFrame
 import app.krewd.data.BrowserTab
@@ -114,6 +113,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
+import io.github.zainbits.meniscus.MeniscusNavBarDefaults
 
 private const val TAB_REFRESH_MS = 3_000L
 private const val DOUBLE_TAP_MS = 300L
@@ -170,7 +170,7 @@ fun BrowserScreen(state: UiState, viewModel: KrewdViewModel, landscape: Boolean)
     )
 
     val navClearance = if (landscape) 0.dp else
-        WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() + LiquidNavDimensions.BOTTOM_GAP + LiquidNavDimensions.BAR_HEIGHT + 8.dp
+        WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() + MeniscusNavBarDefaults.BottomGap + MeniscusNavBarDefaults.Height + 8.dp
 
     Column(
         Modifier
