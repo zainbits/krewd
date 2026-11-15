@@ -81,7 +81,6 @@ import app.krewd.LiveInfo
 import app.krewd.LocalKrewdColors
 import app.krewd.R
 import app.krewd.UiState
-import app.krewd.constants.LiquidNavDimensions
 import app.krewd.constants.ShellDimensions
 import app.krewd.data.Approval
 import app.krewd.data.Routine
@@ -94,6 +93,7 @@ import java.time.OffsetDateTime
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import kotlin.math.roundToInt
+import io.github.zainbits.meniscus.MeniscusNavBarDefaults
 
 /** Height of the floating "Ask Krewd" bar and its gap above the nav bar. */
 val ASK_BAR_HEIGHT = 58.dp
@@ -239,7 +239,7 @@ fun TasksScreen(state: UiState, viewModel: KrewdViewModel, padding: PaddingValue
         }
 
         // The dock: a fade so rows slide under it, then the Ask Krewd bar above the nav bar.
-        val navRoom = LiquidNavDimensions.BOTTOM_GAP + LiquidNavDimensions.BAR_HEIGHT
+        val navRoom = MeniscusNavBarDefaults.BottomGap + MeniscusNavBarDefaults.Height
         Box(
             Modifier
                 .align(Alignment.BottomCenter)
@@ -254,7 +254,7 @@ fun TasksScreen(state: UiState, viewModel: KrewdViewModel, padding: PaddingValue
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .windowInsetsPadding(WindowInsets.navigationBars)
-                .padding(start = LiquidNavDimensions.SIDE_MARGIN, end = LiquidNavDimensions.SIDE_MARGIN, bottom = navRoom + ASK_BAR_GAP),
+                .padding(start = MeniscusNavBarDefaults.SideMargin, end = MeniscusNavBarDefaults.SideMargin, bottom = navRoom + ASK_BAR_GAP),
         )
     }
     }

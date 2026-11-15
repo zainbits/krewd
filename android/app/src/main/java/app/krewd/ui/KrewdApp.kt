@@ -50,10 +50,10 @@ import app.krewd.Connection
 import app.krewd.KrewdViewModel
 import app.krewd.NavTab
 import app.krewd.R
-import app.krewd.constants.LiquidNavDimensions
 import app.krewd.constants.ShellDimensions
-import app.krewd.liquidnav.LiquidNavBar
-import app.krewd.liquidnav.LiquidNavItem
+import io.github.zainbits.meniscus.MeniscusNavBar
+import io.github.zainbits.meniscus.MeniscusNavBarDefaults
+import io.github.zainbits.meniscus.MeniscusNavItem
 
 private enum class Tab(val title: String, val label: String, val icon: Int) {
     Tasks("Crew", "Tasks", R.drawable.ic_chat_24),
@@ -62,7 +62,7 @@ private enum class Tab(val title: String, val label: String, val icon: Int) {
     Settings("Settings", "Settings", R.drawable.ic_tune_24),
 }
 
-private val navItems = Tab.entries.map { LiquidNavItem(it.label, it.icon) }
+private val navItems = Tab.entries.map { MeniscusNavItem(it.label, it.icon) }
 
 @Composable
 fun KrewdApp(viewModel: KrewdViewModel) {
@@ -138,7 +138,7 @@ fun KrewdApp(viewModel: KrewdViewModel) {
                         )
                         .padding(start = ShellDimensions.TITLE_PILL_START_MARGIN, top = ShellDimensions.TITLE_PILL_TOP_GAP),
                 )
-                if (!(tab == Tab.Browser && landscape)) LiquidNavBar(
+                if (!(tab == Tab.Browser && landscape)) MeniscusNavBar(
                     items = navItems,
                     selectedIndex = tabIndex,
                     onSelect = { viewModel.navigate(it) },
@@ -149,9 +149,9 @@ fun KrewdApp(viewModel: KrewdViewModel) {
                                 .only(WindowInsetsSides.Bottom + WindowInsetsSides.Horizontal),
                         )
                         .padding(
-                            start = LiquidNavDimensions.SIDE_MARGIN,
-                            end = LiquidNavDimensions.SIDE_MARGIN,
-                            bottom = LiquidNavDimensions.BOTTOM_GAP,
+                            start = MeniscusNavBarDefaults.SideMargin,
+                            end = MeniscusNavBarDefaults.SideMargin,
+                            bottom = MeniscusNavBarDefaults.BottomGap,
                         ),
                 )
             }
@@ -165,7 +165,7 @@ fun KrewdApp(viewModel: KrewdViewModel) {
                 .align(Alignment.BottomCenter)
                 .windowInsetsPadding(WindowInsets.navigationBars)
                 .padding(
-                    bottom = LiquidNavDimensions.BOTTOM_GAP + LiquidNavDimensions.BAR_HEIGHT + 12.dp +
+                    bottom = MeniscusNavBarDefaults.BottomGap + MeniscusNavBarDefaults.Height + 12.dp +
                         if (state.openSessionId == null && tabIndex == NavTab.TASKS) ASK_BAR_HEIGHT + ASK_BAR_GAP else 0.dp,
                     start = 16.dp,
                     end = 16.dp,
@@ -229,7 +229,7 @@ private fun shellContentPadding(titlePill: Boolean = true, extraBottom: androidx
         end = bars.calculateEndPadding(dir) + ShellDimensions.CONTENT_HORIZONTAL_PADDING,
         top = bars.calculateTopPadding() + ShellDimensions.TITLE_PILL_TOP_GAP +
             (if (titlePill) ShellDimensions.TITLE_PILL_HEIGHT + ShellDimensions.CONTENT_CLEARANCE else 0.dp),
-        bottom = bars.calculateBottomPadding() + LiquidNavDimensions.BOTTOM_GAP +
-            LiquidNavDimensions.BAR_HEIGHT + ShellDimensions.CONTENT_CLEARANCE + extraBottom,
+        bottom = bars.calculateBottomPadding() + MeniscusNavBarDefaults.BottomGap +
+            MeniscusNavBarDefaults.Height + ShellDimensions.CONTENT_CLEARANCE + extraBottom,
     )
 }
