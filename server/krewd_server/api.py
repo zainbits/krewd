@@ -131,7 +131,11 @@ LOOPBACK = {"127.0.0.1", "::1", "localhost"}
 
 
 def verified_channel(request: Request) -> bool:
-    return bool(request.scope.get("krewd_tls")) or (request.client is not None and request.client.host in LOOPBACK)
+    if request.scope.get("krewd_tls"):
+        return True
+    # The socket's own peer, not the X-Forwarded-For caller: Tailscale Serve connects from loopback for a phone.
+    peer = request.scope.get("krewd_peer", request.client.host if request.client else None)
+    return peer in LOOPBACK
 
 
 class LoginCode(BaseModel):

@@ -115,3 +115,34 @@ async def test_https_and_plain_servers_run_side_by_side(tmp_path):
     finally:
         plain.should_exit = secure.should_exit = True
         await asyncio.gather(*tasks)
+
+
+async def _channel(scope_client, headers):
+    """Runs one request through the plain server's wrapper and returns (client host, verified channel)."""
+    from starlette.requests import Request
+
+    from krewd_server.__main__ import peer_marked
+    from krewd_server.api import verified_channel
+
+    seen = {}
+
+    async def app(scope, receive, send):
+        request = Request(scope)
+        seen["client"] = request.client.host if request.client else None
+        seen["verified"] = verified_channel(request)
+
+    scope = {"type": "http", "method": "POST", "path": "/", "scheme": "http", "query_string": b"",
+             "headers": [(k.encode(), v.encode()) for k, v in headers], "client": scope_client, "server": None}
+    await peer_marked(app)(scope, None, None)
+    return seen["client"], seen["verified"]
+
+
+async def test_tailscale_serve_counts_as_a_verified_channel_but_keeps_the_caller():
+    # Tailscale Serve (or any local HTTPS proxy) connects from loopback and names the phone
+    assert await _channel(("127.0.0.1", 5000), [("x-forwarded-for", "100.71.18.45")]) == ("100.71.18.45", True)
+    assert await _channel(("127.0.0.1", 5000), []) == ("127.0.0.1", True)
+
+
+async def test_a_direct_plain_caller_is_not_verified_even_if_it_claims_loopback():
+    # plain HTTP on a network address (KREWD_TLS=off): a forged header neither verifies nor changes the caller
+    assert await _channel(("192.168.0.50", 5000), [("x-forwarded-for", "127.0.0.1")]) == ("192.168.0.50", False)

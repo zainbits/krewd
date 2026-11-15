@@ -12,6 +12,7 @@ from urllib.parse import urlencode
 
 import asyncpg
 import uvicorn
+from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from . import __version__, db, tls
 from .api import create_app
@@ -86,6 +87,24 @@ def tls_marked(app):
     return marked
 
 
+def peer_marked(app):
+    """Plain HTTP: keeps the socket's real peer (`scope["krewd_peer"]`) before the proxy headers replace the client.
+
+    An HTTPS proxy on this machine (Tailscale Serve, Caddy...) connects from loopback and names the original caller
+    in X-Forwarded-For. The client address then shows the caller (logs, the token's "only on this machine" rule),
+    while the peer still proves the request came through that local proxy, which already encrypted it.
+    """
+    forwarded = ProxyHeadersMiddleware(app, trusted_hosts="127.0.0.1")
+
+    async def marked(scope, receive, send):
+        if scope["type"] in ("http", "websocket"):
+            client = scope.get("client")
+            scope["krewd_peer"] = client[0] if client else None  # in place: the access log reads the same scope
+        await forwarded(scope, receive, send)
+
+    return marked
+
+
 def https_addresses(settings: Settings, addresses: list[str]) -> list[str]:
     """The listening addresses that get HTTPS: every one but loopback (unless KREWD_TLS=off)."""
     if settings.tls == "off":
@@ -111,7 +130,7 @@ async def serve() -> None:
     https = [sock for address, sock in sockets if address in secure]
     # The plain server owns the app's lifespan (hub, browser watcher); the HTTPS one only serves requests.
     if plain:
-        servers.append((_Server(uvicorn.Config(app, log_level="info", proxy_headers=True)), plain))
+        servers.append((_Server(uvicorn.Config(peer_marked(app), log_level="info", proxy_headers=False)), plain))
     if https:
         config = uvicorn.Config(
             tls_marked(app), log_level="info", proxy_headers=False, lifespan="on" if not plain else "off",
