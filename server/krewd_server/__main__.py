@@ -173,6 +173,7 @@ def print_connect(settings: Settings, token: str) -> None:
         print("Scan this with a new phone's camera (or open the link there), then tap your security key on the phone.\n")
     segno.make(link, error="m").terminal(compact=True)
     print("\n" + link)
+    print("\nOn this same phone (a terminal app, or a QR app that only copies): copy the link, then in Krewd tap Settings > Paste connect code.")
 
 
 def main() -> None:

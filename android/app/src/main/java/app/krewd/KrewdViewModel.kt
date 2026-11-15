@@ -246,6 +246,20 @@ class KrewdViewModel(private val app: Application) {
         _state.update { it.copy(pendingConnect = ConnectionSettings(addresses, token, pin, keep?.deviceId.orEmpty()), navTab = NavTab.SETTINGS) }
     }
 
+    /**
+     * Pasted text that holds a krewd://connect link, for the owner on the same phone as the code: a phone camera or
+     * QR app often only copies the link, and a terminal copy can wrap it over several lines. Returns false when none.
+     */
+    fun pasteConnectCode(text: String?): Boolean {
+        val link = text?.let(::findConnectLink)
+        if (link == null) {
+            _state.update { it.copy(message = "No Krewd connect code to paste. On the server, run ./master.sh token and copy its krewd://connect link") }
+            return false
+        }
+        openConnectLink(android.net.Uri.parse(link))
+        return true
+    }
+
     fun answerConnectLink(accept: Boolean) {
         val pending = _state.value.pendingConnect ?: return
         _state.update { it.copy(pendingConnect = null) }
@@ -332,9 +346,9 @@ class KrewdViewModel(private val app: Application) {
             } catch (e: Exception) {
                 api = null
                 val reason = when {
-                    e is ApiException && e.code == 401 -> "The token was not accepted"
+                    e is ApiException && e.code == 401 -> "The server did not accept this phone's token. $RECONNECT_HINT"
                     e is javax.net.ssl.SSLException || e.cause is java.security.cert.CertificateException ->
-                        "The server's certificate is not the one this app trusts. On the server, run ./master.sh token and open its code here"
+                        "The server's certificate is not the one this app trusts. $RECONNECT_HINT"
                     else -> e.message ?: e.javaClass.simpleName
                 }
                 if (_state.value.restarting) sawDown = true
@@ -1534,3 +1548,24 @@ private fun sha256(data: ByteArray): ByteArray = java.security.MessageDigest.get
 private fun b64(data: ByteArray): String = android.util.Base64.encodeToString(data, android.util.Base64.NO_WRAP)
 
 private fun unb64(text: String): ByteArray = android.util.Base64.decode(text, android.util.Base64.DEFAULT)
+
+/** What to do when the server does not take this phone: shown with the reason, in Settings. */
+const val RECONNECT_HINT = "On the server, run ./master.sh token, copy its krewd://connect link, then tap Paste connect code in Settings > Server."
+
+/**
+ * The krewd://connect link in pasted text, or null. A terminal copy can break the link over lines, so line breaks
+ * inside it are dropped; a space or any character a link cannot hold (the next prompt, a quote) ends it.
+ */
+internal fun findConnectLink(text: String): String? {
+    val start = text.indexOf("krewd://connect")
+    if (start < 0) return null
+    val link = StringBuilder()
+    for (c in text.substring(start)) {
+        when {
+            c == '\n' || c == '\r' -> continue
+            c.isLetterOrDigit() && c.code < 128 || c in "%&=?:/._~+-" -> link.append(c)
+            else -> break
+        }
+    }
+    return link.toString().takeIf { "?" in it }
+}

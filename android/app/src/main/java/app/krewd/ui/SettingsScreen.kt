@@ -24,6 +24,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
@@ -31,6 +32,7 @@ import androidx.compose.ui.unit.dp
 import app.krewd.Connection
 import app.krewd.KrewdViewModel
 import app.krewd.UiState
+import app.krewd.findConnectLink
 import app.krewd.data.ConnectionSettings
 
 @Composable
@@ -41,6 +43,7 @@ fun SettingsScreen(state: UiState, viewModel: KrewdViewModel, padding: PaddingVa
     var showToken by remember { mutableStateOf(false) }
     var confirmRestart by remember { mutableStateOf(false) }
     val online = state.connection is Connection.Online
+    val clipboard = LocalClipboardManager.current
     LaunchedEffect(online) { if (online) viewModel.loadProfiles() }
 
     state.pendingConnect?.let { pending ->
@@ -94,11 +97,15 @@ fun SettingsScreen(state: UiState, viewModel: KrewdViewModel, padding: PaddingVa
                         Connection.Connecting -> "Connecting…"
                         Connection.NotSetUp -> if (saved.addresses.isNotEmpty() && saved.token.isBlank())
                             "Set this phone up with your security key (Security, below)."
-                        else "On the server, run ./master.sh token and open its code on this phone, or enter the address and token."
+                        else "On the server, run ./master.sh token. Scan its QR code from another device, or copy its krewd://connect link and tap Paste connect code."
                     },
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                // The connect code on this same phone: a QR app or terminal copies the link instead of opening it.
+                val pasteCode = { viewModel.pasteConnectCode(clipboard.getText()?.text) }
+                if (online) OutlinedButton(onClick = { pasteCode() }, modifier = Modifier.fillMaxWidth()) { Text("Paste connect code") }
+                else Button(onClick = { pasteCode() }, modifier = Modifier.fillMaxWidth()) { Text("Paste connect code") }
                 OutlinedTextField(
                     value = addresses, onValueChange = { addresses = it },
                     label = { Text("Server addresses") },
@@ -125,12 +132,16 @@ fun SettingsScreen(state: UiState, viewModel: KrewdViewModel, padding: PaddingVa
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                Button(
-                    onClick = { viewModel.saveSettings(saved.copy(addresses = ConnectionSettings.parseAddresses(addresses), token = token)) },
+                OutlinedButton(
+                    onClick = {
+                        // A connect link pasted into a field does what Paste connect code does.
+                        if (findConnectLink(addresses + "\n" + token) != null) viewModel.pasteConnectCode(addresses + "\n" + token)
+                        else viewModel.saveSettings(saved.copy(addresses = ConnectionSettings.parseAddresses(addresses), token = token))
+                    },
                     modifier = Modifier.fillMaxWidth(),
                 ) { Text("Save and connect") }
                 Text(
-                    "On the server, ./master.sh token shows a code that fills all of this in.",
+                    "On the server, ./master.sh token shows a code that fills all of this in: scan its QR code, or copy its link and paste it here.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
