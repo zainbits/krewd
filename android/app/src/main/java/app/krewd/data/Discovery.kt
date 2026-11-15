@@ -15,13 +15,20 @@ import java.util.concurrent.Executors
 object Discovery {
     private const val SERVICE = "_krewd._tcp"
 
+    /**
+     * Where NsdManager delivers service-info callbacks. One for the whole process, never shut down: Android
+     * delivers the last callbacks (onServiceInfoCallbackUnregistered) after the search ends, and a shut-down
+     * executor rejects them on Android's own thread, which crashes the app.
+     */
+    private val executor = Executors.newSingleThreadExecutor { Thread(it, "krewd-discovery").apply { isDaemon = true } }
+
     /** HTTPS addresses found within [timeoutMs]. Blocking: call from Dispatchers.IO. */
     fun find(context: Context, pin: String, timeoutMs: Long = 3_000): List<String> {
         val nsd = context.getSystemService(NsdManager::class.java) ?: return emptyList()
         val wanted = pin.removePrefix("sha256/").take(12)
         val found = ConcurrentHashMap<String, Unit>()
-        val executor = Executors.newSingleThreadExecutor()
         val callbacks = ArrayList<NsdManager.ServiceInfoCallback>()
+        var closed = false // guarded by callbacks: no callback is registered once the search has ended
         val discovery = object : NsdManager.DiscoveryListener {
             override fun onServiceFound(service: NsdServiceInfo) {
                 val callback = object : NsdManager.ServiceInfoCallback {
@@ -36,8 +43,12 @@ object Discovery {
                     override fun onServiceLost() {}
                     override fun onServiceInfoCallbackUnregistered() {}
                 }
-                synchronized(callbacks) { callbacks += callback }
-                runCatching { nsd.registerServiceInfoCallback(service, executor, callback) }
+                synchronized(callbacks) {
+                    if (closed) return
+                    if (runCatching { nsd.registerServiceInfoCallback(service, executor, callback) }.isSuccess) {
+                        callbacks += callback
+                    }
+                }
             }
             override fun onServiceLost(service: NsdServiceInfo) {}
             override fun onDiscoveryStarted(serviceType: String) {}
@@ -55,8 +66,10 @@ object Discovery {
             emptyList()
         } finally {
             runCatching { nsd.stopServiceDiscovery(discovery) }
-            synchronized(callbacks) { callbacks.forEach { runCatching { nsd.unregisterServiceInfoCallback(it) } } }
-            executor.shutdown()
+            synchronized(callbacks) {
+                closed = true
+                callbacks.forEach { runCatching { nsd.unregisterServiceInfoCallback(it) } }
+            }
         }
     }
 }
