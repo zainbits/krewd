@@ -147,6 +147,27 @@ def normalise_config(raw: Any) -> list[dict[str, Any]]:
     return found
 
 
+def rebase_config(
+    options: list[dict[str, Any]], wanted: dict[str, Any], mode: str | None = None
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """An agent's options as one chat sees them: the chat's picks where they are still choices (its mode, picked
+    through the modes list, for a mode option), else the agent's current values. Returns the options and the picks
+    that are still possible."""
+    def offered(option: dict[str, Any], value: Any) -> bool:
+        return not option.get("options") or any(c.get("value") == value for c in option["options"])
+
+    by_id = {o["id"]: o for o in options}
+    kept = {k: v for k, v in wanted.items() if k in by_id and offered(by_id[k], v)}
+    rebased = []
+    for o in options:
+        if o["id"] in kept:
+            o = {**o, "current": kept[o["id"]]}
+        elif mode and o.get("category") == "mode" and offered(o, mode):
+            o = {**o, "current": mode}
+        rebased.append(dict(o))
+    return rebased, kept
+
+
 def _reported_model(meta: Any) -> str | None:
     """The model an agent says it used, from usage metadata such as {"_claude/model": "..."}."""
     if not isinstance(meta, dict):
@@ -303,6 +324,8 @@ class Hub:
         if info.get("config_options") is not None and engine and engine.gateway:
             profile = self._profile_of(engine)
             self.listed_on[engine_id] = profile.id if profile else ""
+        if info.get("config_options"):
+            await self._rebase_chats(engine_id, info["config_options"])
         current = self.engine_info.setdefault(engine_id, {})
         changes = {k: v for k, v in info.items() if v is not None and current.get(k) != v}
         if not changes:
@@ -321,6 +344,39 @@ class Hub:
             current.get("steering"),
             current.get("commands"),
         )
+
+    def _live(self, session_id: uuid.UUID, engine_id: str) -> bool:
+        """The chat's agent session is open in the agent's current process (its options are the agent's own)."""
+        rt = self.runtimes.get(session_id)
+        proc = self.procs.get(engine_id)
+        return bool(rt and rt.engine == engine_id and rt.agent_session and proc and proc.alive
+                    and rt.generation == proc.generation)
+
+    async def _rebase_chats(self, engine_id: str, options: list[dict[str, Any]]) -> None:
+        """Chats on the agent that are not open in its current process take the options it lists now.
+
+        A chat keeps the options it was started with, but after a switch of profile or sign-in the agent's models
+        are another gateway's: the app would offer models the agent no longer has, even after a restart. Each chat
+        keeps its own picks where the new list still has them; a pick it no longer has is dropped, so reopening the
+        chat does not ask the agent for it.
+        """
+        for table, key in (("sessions", "id"), ("session_agents", "session_id")):
+            where = "engine = $1" + (" and not archived" if table == "sessions" else "")
+            rows = await self.pool.fetch(
+                f"select {key} as id, mode, config_wanted, config_options from {table} where {where}", engine_id
+            )
+            for row in rows:
+                if table == "sessions" and self._live(row["id"], engine_id):
+                    continue
+                rebased, wanted = rebase_config(options, row["config_wanted"] or {}, row["mode"])
+                if rebased == (row["config_options"] or []) and wanted == (row["config_wanted"] or {}):
+                    continue
+                await self.pool.execute(
+                    f"update {table} set config_options = $3, config_wanted = $4 where {key} = $1 and engine = $2",
+                    row["id"], engine_id, rebased, wanted,
+                )
+                if table == "sessions":
+                    await self.emit_session(row["id"])
 
     async def _probe(self, engine_id: str) -> None:
         """Open and drop a throwaway session to learn an engine's models and options."""
@@ -1102,22 +1158,32 @@ class Hub:
         elif rt.generation != proc.generation:
             params = {"sessionId": rt.agent_session, "cwd": cwd, "mcpServers": []}
             caps = proc.capabilities
+            result: dict[str, Any] = {}
             if "resume" in (caps.get("sessionCapabilities") or {}):
                 try:
-                    await proc.request("session/resume", params, timeout=120)
+                    result = await proc.request("session/resume", params, timeout=120) or {}
                     reopened = True
                 except AcpError as exc:
                     log.warning("session/resume failed, trying session/load: %s", exc)
             if not reopened and caps.get("loadSession"):
                 self.suppressed.add(rt.agent_session)
                 try:
-                    await proc.request("session/load", params, timeout=300)
+                    result = await proc.request("session/load", params, timeout=300) or {}
                     reopened = True
                 finally:
                     self.suppressed.discard(rt.agent_session)
             if not reopened:
                 raise AcpError("This agent cannot reopen the session after a restart. Start a new task.")
             rt.generation = proc.generation
+            # What the reopened session offers now (another gateway's models after a switch of profile).
+            options = normalise_config(result.get("configOptions"))
+            if options:
+                # The agent's own current values; picks it still offers are sent again below, the rest dropped.
+                wanted = rebase_config(options, await self.pool.fetchval(
+                    "select config_wanted from sessions where id = $1", rt.id) or {})[1]
+                await self.pool.execute(
+                    "update sessions set config_options = $2, config_wanted = $3 where id = $1", rt.id, options, wanted
+                )
         else:
             return proc
         row = await self.pool.fetchrow("select mode, config_wanted, config_options from sessions where id = $1", rt.id)

@@ -486,3 +486,33 @@ async def test_codex_signs_in_with_a_device_code(managed):
         assert agent["flow"]["state"] == "done" and agent["logged_in"] is True
 
 
+
+
+async def test_chats_take_the_new_model_list_when_their_agent_switches_gateway(managed, gateway):
+    """A chat keeps its agent's options; after a switch of profile they are the new gateway's, also without a turn."""
+    async with client(managed) as c:
+        await add_gw(c, gateway)
+        _, chat = await reply_to(managed, "fake", "hello")
+        sid = uuid.UUID(chat["id"])
+        await managed.update_session(sid, {"config": {"model": "big", "effort": "high"}})
+        models = lambda s: [o for o in s["config_options"] if o["id"] == "model"][0]  # noqa: E731
+        assert [ch["value"] for ch in models(await managed.get_session(sid))["options"]] == ["small", "big"]
+
+        await c.put("/api/agents/fake/profile", json={"profile": "gw"})
+        for _ in range(200):  # the app reads the engines again until the agent has listed its new models
+            engine = next(e for e in managed.engines() if e["id"] == "fake")
+            if engine["config_options"]:
+                break
+            await asyncio.sleep(0.05)
+        session = await managed.get_session(sid)
+        assert [ch["value"] for ch in models(session)["options"]] == ["gw-small", "gw-big"]
+        assert models(session)["current"] == "gw-small"
+        # a model the new gateway does not have is not asked for again; the other pick stays
+        assert session["config"] == {"effort": "high"}
+        assert [o["current"] for o in session["config_options"] if o["id"] == "effort"] == ["high"]
+
+        # the chat continues on the gateway, its picker still the gateway's
+        reply, _ = await reply_to(managed, "fake", "env ANTHROPIC_BASE_URL", session=chat)
+        assert reply == gateway
+        session = await managed.get_session(sid)
+        assert [ch["value"] for ch in models(session)["options"]] == ["gw-small", "gw-big"]

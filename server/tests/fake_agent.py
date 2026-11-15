@@ -25,11 +25,16 @@ async def advertise(sid: str) -> None:
                  "availableCommands": [{"name": c, "description": c} for c in COMMANDS]})
 
 
+# On a gateway profile (Krewd gives it the gateway's key) the agent has that gateway's models, as real agents do.
+MODELS = ["gw-small", "gw-big"] if os.environ.get("ANTHROPIC_AUTH_TOKEN") or os.environ.get("MODEL_PROVIDER") \
+    else ["small", "big"]
+
+
 def config_options(sid: str) -> list[dict]:
-    values = config.setdefault(sid, {"model": "small", "effort": "default"})
+    values = config.setdefault(sid, {"model": MODELS[0], "effort": "default"})
     return [
         {"id": "model", "name": "Model", "category": "model", "type": "select", "currentValue": values["model"],
-         "options": [{"value": "small", "name": "Small"}, {"value": "big", "name": "Big"}]},
+         "options": [{"value": m, "name": m.title()} for m in MODELS]},
         {"id": "effort", "name": "Effort", "category": "thought_level", "type": "select",
          "currentValue": values["effort"],
          "options": [{"group": "levels", "name": "Levels", "options": [
@@ -129,7 +134,7 @@ async def run_prompt(request_id: int, sid: str, text: str, params: dict) -> None
     for chunk in ("Hello ", "world"):
         update(sid, {"sessionUpdate": "agent_message_chunk", "messageId": "m1", "content": {"type": "text", "text": chunk}})
         await asyncio.sleep(0.01)
-    model = config.get(sid, {}).get("model", "small")
+    model = config.get(sid, {}).get("model", MODELS[0])
     update(sid, {"sessionUpdate": "usage_update", "used": 10, "size": 100, "_meta": {"_fake/model": f"fake-{model}-1"}})
     links = [b.get("name") for b in params["prompt"] if b.get("type") == "resource_link"]
     if links:

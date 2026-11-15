@@ -877,18 +877,41 @@ class KrewdViewModel(private val app: Application) {
     }
 
     /** What a new task on [engineId] can choose: the engine's advertised options, else its latest task's. */
+    /**
+     * What the agent lists now (models, effort, permission mode). Empty while the server is listing them again, for
+     * a new agent or after a switch of profile or sign-in: never an older chat's options, which can be another
+     * gateway's models.
+     */
     fun engineConfig(engineId: String?): List<ConfigOption> {
         val s = _state.value
         val engine = s.engines.firstOrNull { it.id == engineId } ?: s.engines.firstOrNull { it.isDefault }
-        return engine?.config?.takeIf { it.isNotEmpty() }
-            ?: s.sessions.firstOrNull { it.engine == engine?.id && it.config.isNotEmpty() }?.config
-            ?: emptyList()
+        return engine?.config.orEmpty()
     }
 
     /** Re-read engines (their options appear once the server has probed a new engine). */
     fun refreshEngines() = act { client ->
         val engines = client.state().engines
         _state.update { it.copy(engines = engines) }
+    }
+
+    private var relistJob: Job? = null
+
+    /**
+     * After a switch of profile, a sign-in or a sign-out the server restarts the agent and lists its models again
+     * (about 8 s). Read the engines again until [engine] has its new list, so every picker shows it without a restart.
+     */
+    private fun followRelist(engine: String) {
+        relistJob?.cancel()
+        relistJob = scope.launch(Dispatchers.IO) {
+            repeat(15) {
+                delay(3_000)
+                val client = api ?: return@launch
+                val engines = runCatching { client.state().engines }.getOrNull() ?: return@repeat
+                _state.update { it.copy(engines = engines) }
+                val info = engines.firstOrNull { it.id == engine } ?: return@launch
+                if (info.config.isNotEmpty() || info.problem != null) return@launch
+            }
+        }
     }
 
     // profiles and sign-ins (Settings)
@@ -944,7 +967,13 @@ class KrewdViewModel(private val app: Application) {
         reloadProfiles(client)
     }
 
-    fun refreshLogins() = act { client -> _state.update { it.copy(logins = client.logins()) } }
+    fun refreshLogins() = act { client ->
+        val logins = client.logins()
+        val before = _state.value.logins.associateBy { it.engine }
+        _state.update { it.copy(logins = logins) }
+        // A sign-in that finished by itself (Codex) restarts an agent on its sign-in account: follow its new list.
+        logins.firstOrNull { it.loggedIn == true && before[it.engine]?.loggedIn != true }?.let { followRelist(it.engine) }
+    }
 
     fun startLogin(engine: String, done: (String?) -> Unit) = withResult(done) { client ->
         client.startLogin(engine)
@@ -954,6 +983,7 @@ class KrewdViewModel(private val app: Application) {
     fun submitLoginCode(engine: String, code: String, done: (String?) -> Unit) = withResult(done) { client ->
         client.submitLoginCode(engine, code.trim())
         reloadProfiles(client)
+        followRelist(engine)
     }
 
     fun cancelLogin(engine: String) = act { client ->
@@ -964,11 +994,13 @@ class KrewdViewModel(private val app: Application) {
     fun logout(engine: String) = act { client ->
         client.logout(engine)
         reloadProfiles(client)
+        followRelist(engine)
     }
 
     fun setAgentProfile(engine: String, profile: String?) = act { client ->
         client.setAgentProfile(engine, profile)
         reloadProfiles(client)
+        followRelist(engine)
     }
 
     /** Runs [block] off the main thread and reports null (it worked) or the error message to [done], on the main thread. */

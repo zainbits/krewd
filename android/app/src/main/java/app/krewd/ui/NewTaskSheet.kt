@@ -74,7 +74,7 @@ fun NewTaskSheet(state: UiState, viewModel: KrewdViewModel, initialEngine: Strin
     val saved = remember(engine?.id) { viewModel.engineDefaults(engine?.id) }
     var autoApprove by remember(engine?.id) { mutableStateOf(saved.autoApprove) }
     // Picks that differ from the engine's defaults; only these are sent.
-    var picks by remember(engine?.id, options.size) {
+    var picks by remember(engine?.id, options) {
         mutableStateOf(
             saved.config.filter { (id, value) ->
                 val option = options.firstOrNull { it.id == id }

@@ -625,7 +625,7 @@ private fun RoutineEditor(state: UiState, viewModel: KrewdViewModel, existing: R
     // The agent's own settings (model, effort, permission mode...): the routine's picks for its agent, else the
     // last picks for that agent from the new-task card. A different agent starts from its own.
     val options = ConfigOption.ordered(viewModel.engineConfig(engineId))
-    var picks by remember(engineId, options.size) {
+    var picks by remember(engineId, options) {
         mutableStateOf(
             (if (existing != null && engineId == existing.engine) existing.config else viewModel.engineDefaults(engineId).config)
                 .filter { (id, value) -> options.any { o -> o.id == id && o.choices.any { it.value == value } } },
