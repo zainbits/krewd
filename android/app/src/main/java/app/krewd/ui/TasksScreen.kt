@@ -1,24 +1,18 @@
 package app.krewd.ui
 
-import androidx.compose.animation.core.Animatable
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.Orientation
-import androidx.compose.foundation.gestures.draggable
-import androidx.compose.foundation.gestures.rememberDraggableState
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
-import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -50,7 +44,6 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -71,7 +64,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.Dp
-import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.krewd.Connection
@@ -86,13 +78,11 @@ import app.krewd.data.Approval
 import app.krewd.data.Routine
 import app.krewd.data.SessionInfo
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 import java.time.Instant
 import java.time.LocalDate
 import java.time.OffsetDateTime
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
-import kotlin.math.roundToInt
 import io.github.zainbits.meniscus.MeniscusNavBarDefaults
 
 /** Height of the floating "Ask Krewd" bar and its gap above the nav bar. */
@@ -591,10 +581,12 @@ private fun TaskRowItem(session: SessionInfo, state: UiState, viewModel: KrewdVi
     var confirm by remember { mutableStateOf(false) }
     var close by remember { mutableStateOf<() -> Unit>({}) }
     Box(Modifier.padding(vertical = 2.dp)) {
-        SwipeToReveal(
+        LiquidSwipeReveal(
             pinned = session.pinned,
             onPin = { closeReveal -> closeReveal(); viewModel.setPinned(session.id, !session.pinned) },
             onDelete = { closeReveal -> close = closeReveal; confirm = true },
+            pinIcon = R.drawable.ic_pin_24,
+            deleteIcon = R.drawable.ic_delete_24,
         ) {
             TaskRow(session, lookFor(session.engine, state.engines), onClick = { viewModel.openSession(session.id) })
         }
@@ -617,8 +609,10 @@ private fun TaskRowItem(session: SessionInfo, state: UiState, viewModel: KrewdVi
 
 @Composable
 private fun TaskRow(session: SessionInfo, look: KrewdLook, onClick: () -> Unit) {
+    // Surface's own onClick clips the press ripple to the card's rounded shape.
     Surface(
-        modifier = Modifier.fillMaxWidth().clickable(onClick = onClick),
+        onClick = onClick,
+        modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(ShellDimensions.CARD_CORNER),
         color = MaterialTheme.colorScheme.surfaceContainer,
     ) {
@@ -647,74 +641,6 @@ private fun TaskRow(session: SessionInfo, look: KrewdLook, onClick: () -> Unit) 
             }
             Text(shortAge(session.updatedAt), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.outline)
         }
-    }
-}
-
-private val DELETE_WIDTH = 96.dp
-private val PIN_WIDTH = 88.dp
-
-/**
- * Slide a row left to reveal Pin and Delete. Releasing past half the buttons keeps them open; a tap on
- * a button calls it with a function that slides the row back (for Cancel, or after pinning).
- */
-@Composable
-private fun SwipeToReveal(
-    pinned: Boolean,
-    onPin: (close: () -> Unit) -> Unit,
-    onDelete: (close: () -> Unit) -> Unit,
-    content: @Composable () -> Unit,
-) {
-    val revealPx = with(LocalDensity.current) { (DELETE_WIDTH + PIN_WIDTH).toPx() }
-    val offset = remember { Animatable(0f) }
-    val scope = rememberCoroutineScope()
-    val close: () -> Unit = { scope.launch { offset.animateTo(0f) } }
-    Box(Modifier.fillMaxWidth().height(IntrinsicSize.Min)) {
-        Box(
-            Modifier
-                .matchParentSize()
-                .clip(RoundedCornerShape(ShellDimensions.CARD_CORNER))
-                .background(MaterialTheme.colorScheme.errorContainer),
-            contentAlignment = Alignment.CenterEnd,
-        ) {
-            Row(Modifier.fillMaxHeight()) {
-                Column(
-                    Modifier
-                        .width(PIN_WIDTH)
-                        .fillMaxHeight()
-                        .background(MaterialTheme.colorScheme.secondaryContainer)
-                        .clickable(enabled = offset.value < -revealPx / 2) { onPin(close) },
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.Center,
-                ) {
-                    Icon(painterResource(R.drawable.ic_pin_24), contentDescription = null, tint = MaterialTheme.colorScheme.onSecondaryContainer)
-                    Text(if (pinned) "Unpin" else "Pin", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSecondaryContainer)
-                }
-                Column(
-                    Modifier
-                        .width(DELETE_WIDTH)
-                        .fillMaxHeight()
-                        .clickable(enabled = offset.value < -revealPx / 2) { onDelete(close) },
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.Center,
-                ) {
-                    Icon(painterResource(R.drawable.ic_delete_24), contentDescription = null, tint = MaterialTheme.colorScheme.onErrorContainer)
-                    Text("Delete", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onErrorContainer)
-                }
-            }
-        }
-        Box(
-            Modifier
-                .offset { IntOffset(offset.value.roundToInt(), 0) }
-                .draggable(
-                    orientation = Orientation.Horizontal,
-                    state = rememberDraggableState { delta ->
-                        scope.launch { offset.snapTo((offset.value + delta).coerceIn(-revealPx * 1.3f, 0f)) }
-                    },
-                    onDragStopped = { velocity ->
-                        offset.animateTo(if (offset.value < -revealPx / 2 || velocity < -1500f) -revealPx else 0f)
-                    },
-                ),
-        ) { content() }
     }
 }
 
