@@ -50,6 +50,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -141,6 +142,9 @@ fun ChatScreen(state: UiState, viewModel: KrewdViewModel) {
     // always scrolls clear of the composer however tall it grows.
     var bottomStack by remember { mutableStateOf(ShellDimensions.COMPOSER_MIN_HEIGHT * 2) }
     Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surface)) {
+        // Rows that open and close keep their top edge in place (KeepInPlace.kt).
+        val holdRow = remember(listState) { { key: Any -> listState.holdRow(key) } }
+        CompositionLocalProvider(LocalHoldRow provides holdRow) {
         LazyColumn(
             state = listState,
             modifier = Modifier.fillMaxSize(),
@@ -167,6 +171,7 @@ fun ChatScreen(state: UiState, viewModel: KrewdViewModel) {
             if (state.timelineLoading && rows.isEmpty()) {
                 item(key = "loading") { CircularProgressIndicator(Modifier.padding(24.dp)) }
             }
+        }
         }
 
         val pipTab = state.pipTab(session)
@@ -540,7 +545,7 @@ private fun ChatRow(item: ChatItem, viewModel: KrewdViewModel, busy: Boolean, co
             "switch" -> SwitchPendingRow(item, viewModel.state.value.engine(item.switchTo)?.name ?: item.switchTo ?: "another agent")
             else -> UserRow(item, busy, commands, onResend = { item.clientId?.let(viewModel::resend) })
         }
-        is TextItem -> if (item.isThought) ThoughtRow(item.text) else SelectionContainer { Markdown(item.text) }
+        is TextItem -> if (item.isThought) ThoughtRow(item.key, item.text) else SelectionContainer { Markdown(item.text) }
         is ToolItem -> ToolRow(item, viewModel::toolImage)
         is PlanItem -> SectionCard {
             Text("Plan", style = MaterialTheme.typography.labelLarge)
@@ -733,10 +738,11 @@ private fun ColumnScope.DeliveryLine(item: UserItem, busy: Boolean, color: Color
 }
 
 @Composable
-private fun ThoughtRow(text: String) {
+private fun ThoughtRow(key: String, text: String) {
     var open by remember { mutableStateOf(false) }
+    val hold = LocalHoldRow.current
     Column(
-        Modifier.fillMaxWidth().clickable { open = !open }.animateContentSize().padding(horizontal = 4.dp),
+        Modifier.fillMaxWidth().clickable { hold(key); open = !open }.animateContentSize().padding(horizontal = 4.dp),
     ) {
         Text(
             if (open) text else "Thinking: " + text.lineSequence().firstOrNull().orEmpty(),
@@ -751,31 +757,7 @@ private fun ThoughtRow(text: String) {
 
 @Composable
 private fun ToolRow(item: ToolItem, loadImage: suspend (String) -> ImageBitmap?) {
-    var open by remember { mutableStateOf(false) }
-    Surface(
-        shape = RoundedCornerShape(14.dp),
-        color = MaterialTheme.colorScheme.surfaceContainerLow,
-        modifier = Modifier.fillMaxWidth().clickable { open = !open }.animateContentSize(),
-    ) {
-        Column(Modifier.padding(horizontal = 12.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                ToolStatus(item.status)
-                Text(
-                    item.title,
-                    style = MaterialTheme.typography.bodySmall,
-                    fontFamily = FontFamily.Monospace,
-                    maxLines = if (open) 6 else 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f),
-                )
-            }
-            if (open) {
-                item.input?.let { MonoBlock(it, maxLines = 30) }
-                item.output?.let { MonoBlock(it, maxLines = 60) }
-                item.images.forEach { ToolImage(it, loadImage) }
-            }
-        }
-    }
+    ToolCard(item) { item.images.forEach { ToolImage(it, loadImage) } }
 }
 
 /** A picture from a tool result, full card width. */
@@ -816,14 +798,5 @@ private fun ToolImage(name: String, load: suspend (String) -> ImageBitmap?) {
     }
 }
 
-@Composable
-private fun ToolStatus(status: String?) {
-    val size = 16.dp
-    when (status) {
-        "completed" -> Text("✓", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelLarge)
-        "failed" -> Text("✕", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.labelLarge)
-        else -> CircularProgressIndicator(Modifier.size(size), strokeWidth = 2.dp)
-    }
-}
 
 
