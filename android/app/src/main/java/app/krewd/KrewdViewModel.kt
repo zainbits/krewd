@@ -20,6 +20,8 @@ import app.krewd.data.ConnectionSettings
 import app.krewd.data.KrewdApi
 import app.krewd.data.Credentials
 import app.krewd.data.Device
+import app.krewd.data.OwnerKey
+import app.krewd.data.Passkeys
 import app.krewd.data.Keys
 import app.krewd.data.Presence
 import app.krewd.data.PresenceCancelled
@@ -105,6 +107,10 @@ data class UiState(
     val secrets: List<SecretAsk> = emptyList(),
     /** Settings > Security: the owner's phones; null until loaded. */
     val devices: List<Device>? = null,
+    /** Settings > Security: the owner's keys (security key, phone passkeys); null until loaded. */
+    val ownerKeys: List<OwnerKey>? = null,
+    /** The server's passkey domain; null: passkeys are off on the server. */
+    val passkeyRpId: String? = null,
     /** While pairing or removing a phone: what the owner should do now ("Hold your security key..."). */
     val securityStep: String? = null,
     val navTab: Int = NavTab.TASKS,
@@ -1371,8 +1377,37 @@ class KrewdViewModel(private val app: Application) {
     fun loadSecurity() = act { client ->
         val o = client.securityState()
         val devices = o.optJSONArray("devices").objects().map(Device::from)
-        _state.update { it.copy(devices = devices) }
+        val keys = o.optJSONArray("keys").objects().map(OwnerKey::from)
+        _state.update { it.copy(devices = devices, ownerKeys = keys, passkeyRpId = o.optStringOrNull("passkey_rp_id")) }
     }
+
+    /**
+     * An owner key's signature over what the server expects for [purpose] (the same 32 bytes for both kinds of key):
+     * the request fields, `assertion` (security key) or `passkey`. [n] is the nonce answer, which lists the keys.
+     */
+    private suspend fun ownerSign(front: android.app.Activity, n: JSONObject, purpose: String, payload: String, method: OwnerMethod,
+                                  allowPasskeys: List<String>? = null): JSONObject {
+        val nonce = n.getString("nonce")
+        val challenge = sha256("krewd-u2f-v1\n$purpose\n$nonce\n$payload".toByteArray())
+        val keys = n.optJSONArray("keys").objects().map(OwnerKey::from)
+        return when (method) {
+            OwnerMethod.PASSKEY -> {
+                val rp = n.optStringOrNull("passkey_rp_id") ?: throw java.io.IOException("Passkeys are not set up on the Krewd server")
+                val allow = allowPasskeys ?: keys.filter { it.passkey }.mapNotNull { it.credentialId }
+                if (allow.isEmpty()) throw java.io.IOException("No phone passkey is registered with Krewd yet")
+                _state.update { it.copy(securityStep = "Confirm with your passkey") }
+                JSONObject().put("passkey", Passkeys.sign(front, rp, challenge, allow))
+            }
+            OwnerMethod.SECURITY_KEY -> {
+                val handle = keys.firstOrNull { !it.passkey }?.keyHandle ?: n.optStringOrNull("key_handle")
+                    ?: throw java.io.IOException("No security key is registered with Krewd")
+                val tap = U2f.tap(front, unb64(n.getString("app_param")), challenge, keyHandle = unb64(handle), step = keyStep)
+                JSONObject().put("assertion", b64(tap.assertion))
+            }
+        }
+    }
+
+    private fun JSONObject.merge(other: JSONObject): JSONObject = apply { other.keys().forEach { put(it, other.get(it)) } }
 
     /** A client for pairing: the normal check, or, for a phone with no pin yet, the capturing one (see Tls.Capture). */
     private fun pairingClient(settings: ConnectionSettings, setup: Credentials): KrewdApi {
@@ -1402,7 +1437,7 @@ class KrewdViewModel(private val app: Application) {
      * Pairs this phone with a tap of the owner's security key. The first phone (setup token) registers the key in
      * the same tap; later phones need only the key. Afterwards the token is gone from this phone.
      */
-    fun pairPhone(name: String, done: (String?) -> Unit) {
+    fun pairPhone(name: String, method: OwnerMethod, done: (String?) -> Unit) {
         val front = activity?.get() ?: return done("Open Krewd first")
         keyJob = scope.launch {
             val error = try {
@@ -1422,25 +1457,33 @@ class KrewdViewModel(private val app: Application) {
                 val (deviceKey, presenceKey) = keys
                 val payload = "$deviceId|${b64(sha256(deviceKey))}|${b64(sha256(presenceKey))}|$pinSeen"
                 val challenge = sha256("krewd-u2f-v1\npair\n$nonce\n$payload".toByteArray())
-                val tap = U2f.tap(
-                    front, unb64(n.getString("app_param")), challenge,
-                    keyHandle = n.optStringOrNull("key_handle")?.let(::unb64),
-                    registerChallenge = if (first) sha256("krewd-register\n$nonce".toByteArray()) else null,
-                    step = keyStep,
-                )
-                _state.update { it.copy(securityStep = "Checking with Krewd…") }
+                val register = sha256("krewd-u2f-v1\nregister\n$nonce\n".toByteArray())
                 val body = JSONObject().put("nonce", nonce).put("device_id", deviceId).put("name", name.ifBlank { android.os.Build.MODEL })
                     .put("pin_seen", pinSeen).put("device_key", b64(deviceKey)).put("presence_key", b64(presenceKey))
                     .put("device_sig", b64(Keys.signWithDevice("krewd-device-v1\npair\n$nonce\n$pinSeen".toByteArray())))
-                    .put("assertion", b64(tap.assertion))
-                tap.registration?.let { body.put("registration", b64(it)) }
+                when {
+                    first && method == OwnerMethod.PASSKEY -> {
+                        // Set up with a passkey: make it, then sign this phone's keys with it (two fingerprint prompts).
+                        val rp = n.optStringOrNull("passkey_rp_id") ?: throw java.io.IOException("Passkeys are not set up on the Krewd server")
+                        _state.update { it.copy(securityStep = "Save a passkey for Krewd") }
+                        val reg = Passkeys.create(front, rp, register, emptyList())
+                        body.put("passkey_registration", reg).put("key_name", "Passkey (${android.os.Build.MODEL})")
+                        body.merge(ownerSign(front, n, "pair", payload, method, allowPasskeys = listOf(reg.getString("credential_id"))))
+                    }
+                    first -> {
+                        val tap = U2f.tap(front, unb64(n.getString("app_param")), challenge, registerChallenge = register, step = keyStep)
+                        body.put("assertion", b64(tap.assertion)).put("registration", b64(tap.registration!!))
+                    }
+                    else -> body.merge(ownerSign(front, n, "pair", payload, method))
+                }
+                _state.update { it.copy(securityStep = "Checking with Krewd…") }
                 val result = withContext(Dispatchers.IO) { client.pair(body, withToken = first) }
                 val capture = client.captured()
                 val pin = if (capture != null && !capture.trustedBySystem) capture.pin.orEmpty() else settings.pin
                 val paired = settings.copy(token = "", deviceId = result.getString("device_id"), pin = pin)
                 prefs.save(paired)
                 creds = Credentials.of(paired).also { it.session = result.optStringOrNull("session") }
-                _state.update { it.copy(settings = prefs.load(), message = "This phone is set up with your security key") }
+                _state.update { it.copy(settings = prefs.load(), message = if (method == OwnerMethod.PASSKEY) "This phone is set up with your passkey" else "This phone is set up with your security key") }
                 connect()
                 null
             } catch (e: kotlinx.coroutines.CancellationException) {
@@ -1455,31 +1498,98 @@ class KrewdViewModel(private val app: Application) {
     }
 
     /** Removes a phone from Krewd, with a tap of the owner's security key. */
-    fun removeDevice(device: Device, done: (String?) -> Unit) {
+    fun removeDevice(device: Device, method: OwnerMethod, done: (String?) -> Unit) {
         val front = activity?.get() ?: return done("Open Krewd first")
         val client = api ?: return done("Not connected to Krewd")
         keyJob = scope.launch {
             val error = try {
                 val n = withContext(Dispatchers.IO) { client.nonce("revoke") }
-                val nonce = n.getString("nonce")
-                val tap = U2f.tap(front, unb64(n.getString("app_param")), sha256("krewd-u2f-v1\nrevoke\n$nonce\n${device.id}".toByteArray()),
-                    keyHandle = unb64(n.getString("key_handle")), step = keyStep)
-                withContext(Dispatchers.IO) {
-                    client.revokeDevice(device.id, JSONObject().put("nonce", nonce).put("assertion", b64(tap.assertion)))
-                }
-                if (device.current) {
-                    Keys.delete()
-                    prefs.save(prefs.load().copy(deviceId = ""))
-                    _state.update { it.copy(settings = prefs.load()) }
-                    connect()
-                } else {
-                    loadSecurity()
-                }
+                val body = JSONObject().put("nonce", n.getString("nonce")).merge(ownerSign(front, n, "revoke", device.id, method))
+                withContext(Dispatchers.IO) { client.revokeDevice(device.id, body) }
+                if (device.current) forgetThisPhone() else loadSecurity()
                 null
             } catch (e: kotlinx.coroutines.CancellationException) {
                 "Cancelled"
             } catch (e: Exception) {
                 e.message ?: "Could not remove the phone"
+            } finally {
+                _state.update { it.copy(securityStep = null) }
+            }
+            done(error)
+        }
+    }
+
+    /** This phone was removed from Krewd: drop its keys, so it can be set up again. */
+    private fun forgetThisPhone() {
+        Keys.delete()
+        prefs.save(prefs.load().copy(deviceId = ""))
+        _state.update { it.copy(settings = prefs.load(), devices = null, ownerKeys = null) }
+        connect()
+    }
+
+    /**
+     * Adds an owner key: a passkey made on this phone ([kind] "passkey") or a security key ("u2f", when there is
+     * none), confirmed with a key already registered ([confirm]).
+     */
+    fun addOwnerKey(kind: String, confirm: OwnerMethod, done: (String?) -> Unit) {
+        val front = activity?.get() ?: return done("Open Krewd first")
+        val client = api ?: return done("Not connected to Krewd")
+        keyJob = scope.launch {
+            val error = try {
+                _state.update { it.copy(securityStep = "Getting ready…") }
+                val n = withContext(Dispatchers.IO) { client.nonce("add-key") }
+                val nonce = n.getString("nonce")
+                val register = sha256("krewd-u2f-v1\nregister\n$nonce\n".toByteArray())
+                val body = JSONObject().put("nonce", nonce).put("kind", kind)
+                val blob: ByteArray
+                if (kind == "passkey") {
+                    val rp = n.optStringOrNull("passkey_rp_id") ?: throw java.io.IOException("Passkeys are not set up on the Krewd server")
+                    val existing = n.optJSONArray("keys").objects().map(OwnerKey::from).mapNotNull { it.credentialId }
+                    _state.update { it.copy(securityStep = "Save a passkey for Krewd") }
+                    val reg = Passkeys.create(front, rp, register, existing)
+                    body.put("passkey_registration", reg).put("name", "Passkey (${android.os.Build.MODEL})")
+                    blob = unb64(reg.getString("attestation_object"))
+                } else {
+                    _state.update { it.copy(securityStep = "Now the new security key") }
+                    val tap = U2f.tap(front, unb64(n.getString("app_param")), register, registerChallenge = register, step = keyStep)
+                    blob = tap.registration!!
+                    body.put("registration", b64(blob)).put("name", "Security key")
+                }
+                // An owner key already registered signs for the new one (its exact registration).
+                body.merge(ownerSign(front, n, "add-key", b64(sha256(blob)), confirm))
+                _state.update { it.copy(securityStep = "Checking with Krewd…") }
+                withContext(Dispatchers.IO) { client.addOwnerKey(body) }
+                _state.update { it.copy(message = if (kind == "passkey") "Passkey added: it can now set up and remove phones" else "Security key added") }
+                loadSecurity()
+                null
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                "Cancelled"
+            } catch (e: Exception) {
+                e.message ?: "Could not add the key"
+            } finally {
+                _state.update { it.copy(securityStep = null) }
+            }
+            done(error)
+        }
+    }
+
+    /** Removes an owner key, confirmed with an owner key (it may be the same one); phones added with it go too. */
+    fun removeOwnerKey(key: OwnerKey, confirm: OwnerMethod, done: (String?) -> Unit) {
+        val front = activity?.get() ?: return done("Open Krewd first")
+        val client = api ?: return done("Not connected to Krewd")
+        keyJob = scope.launch {
+            val error = try {
+                val n = withContext(Dispatchers.IO) { client.nonce("remove-key") }
+                val body = JSONObject().put("nonce", n.getString("nonce")).merge(ownerSign(front, n, "remove-key", key.id, confirm))
+                val result = withContext(Dispatchers.IO) { client.removeOwnerKey(key.id, body) }
+                val gone = result.optJSONArray("phones_removed")?.let { a -> (0 until a.length()).map { a.getString(it) } }.orEmpty()
+                _state.update { it.copy(message = "${key.name} removed" + if (gone.isNotEmpty()) ", with ${gone.size} phone(s) added with it" else "") }
+                if (prefs.load().deviceId in gone) forgetThisPhone() else loadSecurity()
+                null
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                "Cancelled"
+            } catch (e: Exception) {
+                e.message ?: "Could not remove the key"
             } finally {
                 _state.update { it.copy(securityStep = null) }
             }
@@ -1574,6 +1684,9 @@ data class LiveTask(
 
 /** What a running task is doing, for the UI: [kind] is read, write, think or needs. */
 data class LiveInfo(val activity: String, val since: Long, val kind: String, val steps: Int)
+
+/** How the owner confirms: the FIDO security key or a phone passkey. */
+enum class OwnerMethod { SECURITY_KEY, PASSKEY }
 
 private fun sha256(data: ByteArray): ByteArray = java.security.MessageDigest.getInstance("SHA-256").digest(data)
 

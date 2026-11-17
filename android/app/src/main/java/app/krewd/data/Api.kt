@@ -298,6 +298,11 @@ class KrewdApi(
         call("POST", "/api/security/devices/$id/revoke", body)
     }
 
+    fun addOwnerKey(body: JSONObject): JSONObject = JSONObject(call("POST", "/api/security/keys", body))
+
+    fun removeOwnerKey(id: String, body: JSONObject): JSONObject =
+        JSONObject(call("POST", "/api/security/keys/" + java.net.URLEncoder.encode(id, "UTF-8") + "/remove", body))
+
     fun serverPrefs(): JSONObject = obj("GET", "/api/prefs")
 
     fun setPref(key: String, value: Any?) {

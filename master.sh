@@ -125,10 +125,16 @@ PY
   curl -fsS -m 3 "http://127.0.0.1:$(port)/api/health" >/dev/null 2>&1 && ok "server answers on port $(port)" \
     || bad "server does not answer on port $(port)" "./master.sh logs"
   if [[ -f "$CONFIG_DIR/owner.json" ]]; then
-    [[ "$(stat -c %a "$CONFIG_DIR/owner.json" 2>/dev/null)" == 600 ]] && ok "security key registered (phones pair with it)" \
+    [[ "$(stat -c %a "$CONFIG_DIR/owner.json" 2>/dev/null)" == 600 ]] && ok "owner key registered (phones pair with it)" \
       || warn "owner.json is not mode 600" "chmod 600 $CONFIG_DIR/owner.json"
   else
-    warn "no security key yet: anyone with the setup token can use Krewd" "in the app: Settings > Security > Set up with security key"
+    warn "no owner key yet: anyone with the setup token can use Krewd" "in the app: Settings > Security > Set up with security key (or passkey)"
+  fi
+  local rp; rp="$(conf KREWD_PASSKEY_RP_ID "")"
+  if [[ -n "$rp" ]]; then
+    if curl -fsS -m 5 "https://$rp/.well-known/assetlinks.json" 2>/dev/null | grep -q '"app.krewd"'; then ok "passkeys on ($rp serves assetlinks.json for app.krewd)"
+    else warn "passkeys: https://$rp/.well-known/assetlinks.json does not name app.krewd, so Android refuses the passkey" "publish the statement from curl -s http://127.0.0.1:$(port)/.well-known/assetlinks.json there"; fi
+    [[ -n "$(conf KREWD_PASSKEY_CERTS "")" ]] || bad "KREWD_PASSKEY_RP_ID is set but KREWD_PASSKEY_CERTS is not" "add the app's signing certificate SHA-256 to $ENV_FILE"
   fi
   if [[ "$(conf KREWD_TLS auto)" == off ]]; then
     warn "KREWD_TLS=off: the home network gets plain HTTP, readable by anyone on it" "remove KREWD_TLS from krewd.env, then ./master.sh restart"

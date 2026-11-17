@@ -58,7 +58,7 @@ them from anywhere.
   secure sheet on the phone, where Bitwarden or any Android password manager offers the saved login for that
   very site and Krewd types it into
   the page. The agent never sees it, and nothing is stored or logged.
-- **Hardware-key security.** Phones pair with your FIDO security key (USB-C or NFC). Keys and
+- **Hardware-key security.** Phones pair with your FIDO security key (USB-C or NFC) or your phone passkey. Keys and
   sign-ins need your fingerprint. HTTPS everywhere with Krewd's own pinned certificate; one QR code
   connects a new phone.
 - **Files both ways.** Attach anything to a task; agents hand files back as downloads.

@@ -11,7 +11,7 @@
     krewd schedule CRON [--timezone TZ]      check a schedule and show its next runs
     krewd chat history CHAT [--last N] [--after SEQ]     a chat's messages (owner, agents), e.g. after a switch
     krewd secret request [--field KIND[:LABEL[:SELECTOR]]]... [--submit enter|none|SELECTOR] --reason TEXT [--tab ID]
-    krewd security status | revoke PHONE | reset          the owner's phones and security key (this machine only)
+    krewd security status | revoke PHONE | remove-key ID | reset   the owner's phones and keys (this machine only)
 
 A routine has one or more named triggers (cron schedules), e.g. check-in "55 9 * * 1-5" and check-out
 "0 19 * * 1-5". Every run goes into the routine's own chat and is told which trigger fired. A trigger can
@@ -263,9 +263,22 @@ def _secret(args: argparse.Namespace) -> int:
 def _security(args: argparse.Namespace) -> int:
     state = call("GET", "/api/security")
     if args.security_action == "status":
-        print("Security key: " + ("registered" if state["paired"] else "none yet (setup: ./master.sh token)"))
+        keys = state.get("keys", [])
+        print("Owner keys: " + (str(len(keys)) if keys else "none yet (setup: ./master.sh token)"))
+        names = {k["id"]: k["name"] for k in keys}
+        for k in keys:
+            kind = "phone passkey" if k["kind"] == "passkey" else "security key"
+            print(f"  {k['id']}  {k['name']} ({kind})")
+        print("Passkeys: " + (f"on, for {state['passkey_rp_id']}" if state.get("passkey_rp_id") else
+                              "off (KREWD_PASSKEY_RP_ID and KREWD_PASSKEY_CERTS in krewd.env)"))
+        print("Phones:")
         for d in state["devices"]:
-            print(f"  {d['id'][:8]}  {d['name']}  added {_when(d['created_at'])}, last seen {_when(d['last_seen'])}")
+            via = names.get(d.get("key") or "", "no valid key")
+            print(f"  {d['id'][:8]}  {d['name']}  added with {via} {_when(d['created_at'])}, last seen {_when(d['last_seen'])}")
+        return 0
+    if args.security_action == "remove-key":
+        result = call("POST", f"/api/security/keys/{args.key}/remove")
+        print(f"Removed {result['removed']}." + (f" Phones removed with it: {len(result['phones_removed'])}." if result["phones_removed"] else ""))
         return 0
     if args.security_action == "revoke":
         ids = [d["id"] for d in state["devices"] if d["id"].startswith(args.phone.lower())]
@@ -275,7 +288,7 @@ def _security(args: argparse.Namespace) -> int:
         print("Removed. That phone can no longer use Krewd.")
         return 0
     call("POST", "/api/security/reset")
-    print("Reset: no security key and no phones now. Run ./master.sh token and open its code on your phone to set up again.")
+    print("Reset: no owner keys and no phones now. Run ./master.sh token and open its code on your phone to set up again.")
     return 0
 
 
@@ -306,7 +319,9 @@ def main(argv: list[str] | None = None) -> int:
     secsub = sec.add_subparsers(dest="security_action", required=True)
     secsub.add_parser("status")
     secsub.add_parser("revoke").add_argument("phone", help="the phone's id or its first characters")
-    secsub.add_parser("reset", help="lost phone and key: remove the key and every phone, make a new setup token")
+    secsub.add_parser("remove-key", help="remove an owner key (not the last one); phones added with it go too").add_argument(
+        "key", help="the key's id (krewd security status)")
+    secsub.add_parser("reset", help="lost phone and keys: remove every owner key and phone, make a new setup token")
 
     sched = sub.add_parser("schedule", help="check a 5-field cron schedule and show its next runs")
     sched.add_argument("cron")

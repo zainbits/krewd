@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import dataclasses
 import json
 import os
 import sys
@@ -15,12 +16,13 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 
 import krewd_server.api as api_module
-from krewd_server import db, tls
+from krewd_server import db, passkeys, tls
 from krewd_server.__main__ import tls_marked
 from krewd_server.api import create_app
 from krewd_server.config import Engine, Settings, load_env_file
 from krewd_server.hub import Hub
-from krewd_server.security import APP_PARAM, challenge_param, device_message, pair_payload, presence_message
+from krewd_server.security import (APP_PARAM, challenge_param, device_message, key_digest, pair_payload, presence_message,
+                                   register_challenge)
 
 load_env_file()
 DATABASE_URL = os.environ.get("KREWD_TEST_DATABASE_URL")
@@ -177,7 +179,7 @@ async def test_first_phone_pairs_with_the_setup_token_which_then_stays_on_the_ma
         assert made.status_code == 201, made.text
         assert (await c.get("/api/state")).status_code == 401  # the setup token is gone
     owner = hub.settings.token_file.parent / "owner.json"
-    assert owner.stat().st_mode & 0o777 == 0o600 and json.loads(owner.read_text())["counter"] == key.counter
+    assert owner.stat().st_mode & 0o777 == 0o600 and json.loads(owner.read_text())["keys"][0]["counter"] == key.counter
     new_token = hub.settings.token_file.read_text().strip()
     assert new_token != SETUP
     async with local(app, new_token) as c:  # the krewd command on the machine itself
@@ -311,3 +313,165 @@ async def test_sign_in_requests_go_from_the_phone_into_the_page_and_nowhere_else
     async with local(app, token) as agent:
         done = (await agent.get(f"/api/secrets/{req['id']}/wait?timeout=1")).json()
         assert done["status"] == "filled" and secret not in json.dumps(done)
+
+
+# phone passkeys
+
+RP_ID = "owner.example.com"
+CERT = "7d4f9ce39a3ba7d14e972ffd7483192f0182dfb5ec6782522d913ba9ee44ddac"
+
+
+def _cbor(v) -> bytes:
+    def head(major: int, n: int) -> bytes:
+        if n < 24:
+            return bytes([major << 5 | n])
+        for info, size in ((24, 1), (25, 2), (26, 4)):
+            if n < 1 << (8 * size):
+                return bytes([major << 5 | info]) + n.to_bytes(size, "big")
+        raise ValueError
+    if isinstance(v, int):
+        return head(0, v) if v >= 0 else head(1, -1 - v)
+    if isinstance(v, bytes):
+        return head(2, len(v)) + v
+    if isinstance(v, str):
+        return head(3, len(v.encode())) + v.encode()
+    if isinstance(v, dict):
+        return head(5, len(v)) + b"".join(_cbor(k) + _cbor(x) for k, x in v.items())
+    raise TypeError(v)
+
+
+class FakePasskey:
+    """A phone passkey as Android's Credential Manager answers for the Krewd app (origin = its signing certificate)."""
+
+    def __init__(self, rp_id: str = RP_ID, cert: str = CERT) -> None:
+        self.private = ec.generate_private_key(ec.SECP256R1())
+        self.id = os.urandom(16)
+        self.rp_hash = __import__("hashlib").sha256(rp_id.encode()).digest()
+        self.origin = passkeys.apk_origin(cert)
+
+    def client_data(self, kind: str, challenge: bytes) -> bytes:
+        return json.dumps({"type": kind, "challenge": passkeys.b64url(challenge), "origin": self.origin}).encode()
+
+    def registration(self, nonce: str) -> dict:
+        nums = self.private.public_key().public_numbers()
+        cose = _cbor({1: 2, 3: -7, -1: 1, -2: nums.x.to_bytes(32, "big"), -3: nums.y.to_bytes(32, "big")})
+        auth = self.rp_hash + bytes([0x45]) + (0).to_bytes(4, "big") + bytes(16) + len(self.id).to_bytes(2, "big") + self.id + cose
+        att = _cbor({"fmt": "none", "attStmt": {}, "authData": auth})
+        return {"client_data": b64(self.client_data("webauthn.create", register_challenge(nonce))), "attestation_object": b64(att)}
+
+    def sign(self, challenge: bytes) -> dict:
+        auth = self.rp_hash + bytes([0x05]) + (0).to_bytes(4, "big")  # Google Password Manager keeps the counter at 0
+        cd = self.client_data("webauthn.get", challenge)
+        sig = self.private.sign(auth + __import__("hashlib").sha256(cd).digest(), ec.ECDSA(hashes.SHA256()))
+        return {"credential_id": passkeys.b64url(self.id), "client_data": b64(cd), "authenticator_data": b64(auth), "signature": b64(sig)}
+
+
+@pytest.fixture
+def pk_app(hub):
+    hub.settings = dataclasses.replace(hub.settings, passkey_rp_id=RP_ID, passkey_certs=(CERT,))
+    return create_app(hub, SETUP, lifespan_hub=False)
+
+
+async def pair_pk(c, phone: FakePhone, pk: FakePasskey, pin: str, first: bool) -> httpx.Response:
+    n = (await nonce(c, "pair"))["nonce"]
+    payload = pair_payload(phone.id, phone.spki(phone.device), phone.spki(phone.presence), pin)
+    body = {
+        "nonce": n, "device_id": phone.id, "name": "Pixel", "pin_seen": pin,
+        "device_key": b64(phone.spki(phone.device)), "presence_key": b64(phone.spki(phone.presence)),
+        "device_sig": phone.sign(phone.device, device_message("pair", n, pin)),
+        "passkey": pk.sign(challenge_param("pair", n, payload)),
+    }
+    if first:
+        body["passkey_registration"] = pk.registration(n)
+    return await c.post("/api/security/pair", json=body)
+
+
+async def test_a_phone_passkey_sets_krewd_up_and_pairs_phones(hub, pk_app):
+    pin = tls.pin(hub.settings.tls_cert)
+    pk, phone, second = FakePasskey(), FakePhone(), FakePhone()
+    async with lan(pk_app, SETUP) as c:
+        n = await nonce(c, "pair")
+        assert n["passkey_rp_id"] == RP_ID and n["keys"] == []
+        assert (await pair_pk(c, phone, FakePasskey(cert="00" * 32), pin, first=True)).status_code == 403  # another app
+        assert (await pair_pk(c, phone, FakePasskey(rp_id="evil.example"), pin, first=True)).status_code == 403
+        assert (await pair_pk(c, phone, pk, pin, first=True)).status_code == 201
+    async with lan(pk_app) as c:
+        assert (await pair_pk(c, second, FakePasskey(), pin, first=False)).status_code == 403  # not an owner key
+        assert (await pair_pk(c, second, pk, pin, first=False)).status_code == 201  # synced passkey, counter stays 0
+        assert (await session(c, second, pin)).status_code == 200
+    async with local(pk_app, hub.settings.token_file.read_text().strip()) as c:
+        state = (await c.get("/api/security")).json()
+        assert [k["kind"] for k in state["keys"]] == ["passkey"]
+        assert {d["key"] for d in state["devices"]} == {state["keys"][0]["id"]}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=pk_app), base_url="http://krewd") as c:
+        links = (await c.get("/.well-known/assetlinks.json")).json()
+        assert links[0]["target"]["package_name"] == "app.krewd"
+        assert links[0]["target"]["sha256_cert_fingerprints"][0].startswith("7D:4F:9C")
+
+
+async def test_passkey_next_to_the_security_key_added_and_removed_with_an_owner_key(hub, pk_app):
+    pin = tls.pin(hub.settings.tls_cert)
+    key, pk, phone, other = FakeKey(), FakePasskey(), FakePhone(), FakePhone()
+    async with lan(pk_app, SETUP) as c:
+        sess = (await pair(c, phone, key, pin, first=True)).json()["session"]
+    async with lan(pk_app, sess) as c:
+        # Adding a passkey needs a signature from a key already registered.
+        n = (await nonce(c, "add-key"))["nonce"]
+        reg = pk.registration(n)
+        blob = base64.b64decode(reg["attestation_object"])
+        wrong = {"nonce": n, "kind": "passkey", "name": "Pixel passkey", "passkey_registration": reg,
+                 "assertion": b64(FakeKey().sign(challenge_param("add-key", n, key_digest(blob))))}
+        assert (await c.post("/api/security/keys", json=wrong)).status_code == 403
+        n = (await nonce(c, "add-key"))["nonce"]
+        reg = pk.registration(n)
+        body = {"nonce": n, "kind": "passkey", "name": "Pixel passkey", "passkey_registration": reg,
+                "assertion": b64(key.sign(challenge_param("add-key", n, key_digest(base64.b64decode(reg["attestation_object"])))))}
+        added = await c.post("/api/security/keys", json=body)
+        assert added.status_code == 201, added.text
+        pk_id = added.json()["id"]
+        assert [k["kind"] for k in (await c.get("/api/security")).json()["keys"]] == ["u2f", "passkey"]
+    async with lan(pk_app) as c:
+        # Both keys pair phones now.
+        assert (await pair_pk(c, other, pk, pin, first=False)).status_code == 201
+        assert (await pair(c, FakePhone(), key, pin, first=False)).status_code == 201
+    async with lan(pk_app, sess) as c:
+        # Revoking a phone with the passkey.
+        third = FakePhone()
+        async with lan(pk_app) as c2:
+            assert (await pair(c2, third, key, pin, first=False)).status_code == 201
+        n = (await nonce(c, "revoke"))["nonce"]
+        r = await c.post(f"/api/security/devices/{third.id}/revoke", json={"nonce": n, "passkey": pk.sign(challenge_param("revoke", n, third.id))})
+        assert r.status_code == 200
+        # Removing the passkey (signed by the security key): the phone added with it goes too.
+        n = (await nonce(c, "remove-key"))["nonce"]
+        r = await c.post(f"/api/security/keys/{pk_id}/remove", json={"nonce": n, "assertion": b64(key.sign(challenge_param("remove-key", n, pk_id)))})
+        assert r.status_code == 200, r.text
+        assert r.json()["phones_removed"] == [other.id]
+        state = (await c.get("/api/security")).json()
+        assert [k["kind"] for k in state["keys"]] == ["u2f"]
+        # The last key stays.
+        u2f_id = state["keys"][0]["id"]
+        n = (await nonce(c, "remove-key"))["nonce"]
+        r = await c.post(f"/api/security/keys/{u2f_id}/remove", json={"nonce": n, "assertion": b64(key.sign(challenge_param("remove-key", n, u2f_id)))})
+        assert r.status_code == 409
+    async with lan(pk_app) as c:
+        assert (await session(c, other, pin)).status_code == 401
+        assert (await session(c, phone, pin)).status_code == 200
+
+
+async def test_owner_json_from_before_passkeys_still_works(hub, app):
+    pin = tls.pin(hub.settings.tls_cert)
+    key, phone = FakeKey(), FakePhone()
+    async with lan(app, SETUP) as c:
+        assert (await pair(c, phone, key, pin, first=True)).status_code == 201
+    owner = hub.settings.token_file.parent / "owner.json"
+    k = json.loads(owner.read_text())["keys"][0]
+    owner.write_text(json.dumps({"public_key": k["public_key"], "key_handle": k["key_handle"], "counter": k["counter"]}))
+    # Phones paired before passkeys have no "key" in their proof.
+    row = await hub.pool.fetchrow("select proof from devices")
+    proof = {f: v for f, v in row["proof"].items() if f != "key"}
+    await hub.pool.execute("update devices set proof = $1", proof)
+    fresh = create_app(hub, hub.settings.token_file.read_text().strip(), lifespan_hub=False)
+    async with lan(fresh) as c:
+        assert (await session(c, phone, pin)).status_code == 200
+        assert (await pair(c, FakePhone(), key, pin, first=False)).status_code == 201

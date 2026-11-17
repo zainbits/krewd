@@ -25,7 +25,9 @@ agent you allowed to act does with that permission. Report those to their own pr
 
 ## How Krewd protects you
 
-- Phones pair only with the owner's FIDO security key; each phone proves itself with a key kept in
+- Phones pair only with an owner key: the owner's FIDO security key or their phone passkey (synced by the
+  phone's password manager, so whoever controls that account can use it; the security key alone is the
+  stronger choice). Each phone proves itself with a key kept in
   its secure hardware, and sensitive requests also need the owner's fingerprint.
 - Every network address is HTTPS with Krewd's own certificate, which the app pins. Plain HTTP is
   served only on loopback.

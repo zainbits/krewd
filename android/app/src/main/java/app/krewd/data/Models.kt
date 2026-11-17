@@ -467,9 +467,19 @@ data class SecretAsk(
 data class SecretField(val name: String, val label: String, val kind: String)
 
 /** One of the owner's phones (Settings > Security). */
-data class Device(val id: String, val name: String, val createdAt: String, val lastSeen: String?, val current: Boolean) {
+data class Device(val id: String, val name: String, val createdAt: String, val lastSeen: String?, val current: Boolean, val key: String? = null) {
     companion object {
         fun from(o: JSONObject) = Device(o.optString("id"), o.optString("name"), o.optString("created_at"),
-            o.optStringOrNull("last_seen"), o.optBoolean("current"))
+            o.optStringOrNull("last_seen"), o.optBoolean("current"), o.optStringOrNull("key"))
+    }
+}
+
+/** One of the owner's keys: the FIDO security key ("u2f") or a phone passkey ("passkey"). */
+data class OwnerKey(val id: String, val kind: String, val name: String, val keyHandle: String?, val credentialId: String?) {
+    val passkey: Boolean get() = kind == "passkey"
+
+    companion object {
+        fun from(o: JSONObject) = OwnerKey(o.optString("id"), o.optString("kind"), o.optString("name"),
+            o.optStringOrNull("key_handle"), o.optStringOrNull("credential_id"))
     }
 }

@@ -85,6 +85,10 @@ class Settings:
     mdns: bool = True  # announce the HTTPS address on the local network, so the app finds it by itself
     # Other addresses the app should know (a Tailscale or public HTTPS name), for the connect link.
     urls: tuple[str, ...] = ()
+    # Phone passkeys as owner keys: the relying party id (a public domain whose /.well-known/assetlinks.json names
+    # the app) and the SHA-256 of the app's signing certificate(s). No rp id: passkeys are off.
+    passkey_rp_id: str | None = None
+    passkey_certs: tuple[str, ...] = ()
 
     @property
     def shared(self) -> list[Path]:
@@ -199,6 +203,9 @@ def load_settings() -> Settings:
         tls_key=Path(os.path.expanduser(os.environ.get("KREWD_TLS_KEY", str(CONFIG_DIR / "tls.key")))),
         mdns=os.environ.get("KREWD_MDNS", "1").strip().lower() not in ("0", "off", "no", "false"),
         urls=tuple(u.strip().rstrip("/") for u in os.environ.get("KREWD_URLS", "").split(",") if u.strip()),
+        passkey_rp_id=os.environ.get("KREWD_PASSKEY_RP_ID", "").strip().lower() or None,
+        passkey_certs=tuple(c.strip().replace(":", "").lower() for c in os.environ.get("KREWD_PASSKEY_CERTS", "").split(",")
+                            if c.strip()),
     )
 
 

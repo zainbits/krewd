@@ -352,7 +352,27 @@ def create_app(hub: Hub, token: str, lifespan_hub: bool = True) -> FastAPI:
     async def security_state(request: Request) -> dict[str, Any]:
         principal: Principal = request.state.principal
         return {"paired": security.paired, "you": principal.kind,
-                "devices": await security.devices(principal.device_id) if security.paired else []}
+                "devices": await security.devices(principal.device_id) if security.paired else [],
+                "keys": security.public_keys(), "passkey_rp_id": security.settings.passkey_rp_id if security.passkeys_on else None}
+
+    @app.post("/api/security/keys", status_code=201, dependencies=auth)
+    async def security_add_key(request: Request) -> dict[str, Any]:
+        """A new owner key (phone passkey or security key), signed for by an owner key already registered."""
+        if not verified_channel(request):
+            raise HTTPException(403, "Owner keys are only added over HTTPS")
+        return await security.add_key(await json_body(request), request.state.principal)
+
+    @app.post("/api/security/keys/{key_id}/remove", dependencies=auth)
+    async def security_remove_key(key_id: str, request: Request) -> dict[str, Any]:
+        body = await json_body(request) if (await request.body()) else {}
+        return await security.remove_key(key_id, body, request.state.principal)
+
+    @app.get("/.well-known/assetlinks.json")
+    async def assetlinks() -> Any:
+        """What the passkey domain (KREWD_PASSKEY_RP_ID) must serve, so Android lets the app use passkeys for it."""
+        if not security.settings.passkey_certs:
+            raise HTTPException(404, "passkeys are not set up")
+        return security.assetlinks()
 
     @app.post("/api/security/devices/{device_id}/revoke", dependencies=auth)
     async def security_revoke(device_id: uuid.UUID, request: Request) -> dict[str, Any]:
