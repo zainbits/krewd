@@ -30,7 +30,9 @@ import app.krewd.data.Tls
 import app.krewd.data.U2f
 import app.krewd.data.objects
 import app.krewd.data.optStringOrNull
+import app.krewd.data.ChatRef
 import app.krewd.data.Discovery
+import app.krewd.data.Proposal
 import app.krewd.data.EngineDefaults
 import app.krewd.data.EngineInfo
 import app.krewd.data.Event
@@ -86,6 +88,7 @@ data class OutgoingMessage(
     val tabs: List<BrowserTab>,
     val delivery: String?,
     val failed: Boolean = false,
+    val chats: List<ChatRef> = emptyList(),
 )
 
 object NavTab {
@@ -128,6 +131,12 @@ data class UiState(
     val drafts: Map<String, List<PendingFile>> = emptyMap(),
     /** Browser tabs added to the next message ("Add to chat"), per session. */
     val draftTabs: Map<String, List<BrowserTab>> = emptyMap(),
+    /** Chats attached with @ to the unsent message, per chat (or new-task sheet): kept with its text on the phone. */
+    val draftChats: Map<String, List<ChatRef>> = emptyMap(),
+    /** Side sessions, sub-agents and messages to other chats that agents drafted, waiting for the owner. */
+    val proposals: List<Proposal> = emptyList(),
+    /** Archived chats, loaded when @ needs them (null: not loaded). */
+    val archived: List<SessionInfo>? = null,
     val outbox: List<OutgoingMessage> = emptyList(),
     /** Picture-in-picture picked by hand from the Browser screen, per session. */
     val pipTabs: Map<String, String> = emptyMap(),
@@ -158,6 +167,8 @@ data class UiState(
     val openRoutine: Routine? get() = routineDetail?.takeIf { it.id == openRoutineId } ?: routines.firstOrNull { it.id == openRoutineId }
     fun routine(id: String?): Routine? = routines.firstOrNull { it.id == id }
     fun draft(key: String): List<PendingFile> = drafts[key].orEmpty()
+    fun chatsOf(key: String): List<ChatRef> = draftChats[key].orEmpty()
+    fun session(id: String?): SessionInfo? = sessions.firstOrNull { it.id == id }
     val browserTab: BrowserTab? get() = browser?.tabs?.firstOrNull { it.id == browserTabId }
     val openSession: SessionInfo? get() = sessions.firstOrNull { it.id == openSessionId }
     fun engine(id: String?): EngineInfo? = engines.firstOrNull { it.id == id }
@@ -171,6 +182,15 @@ data class UiState(
 }
 
 const val NEW_DRAFT = "new"
+
+/** At most this many chats attached with @ to one message. */
+const val MAX_DRAFT_CHATS = 5
+
+/** The draft key of the new-task sheet when it starts a side session of [parentId]. */
+fun sideDraft(parentId: String) = "side-$parentId"
+
+/** The draft key of the sheet that sends proposal [id]. */
+fun proposalDraft(id: String) = "proposal-$id"
 const val MAX_SAVED_PROMPTS = 12
 /** Width of the tab stills on working cards, in pixels. */
 const val SNAPSHOT_WIDTH = 360
@@ -187,7 +207,13 @@ class KrewdViewModel(private val app: Application) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val prefs = Prefs(app)
     private val notifier = Notifier(app)
-    private val _state = MutableStateFlow(UiState(settings = prefs.load(), highQuality = prefs.highQuality(), savedPrompts = prefs.savedPrompts(), newTaskText = prefs.textDraft(NEW_DRAFT)))
+    private val _state = MutableStateFlow(
+        UiState(
+            settings = prefs.load(), highQuality = prefs.highQuality(), savedPrompts = prefs.savedPrompts(),
+            newTaskText = prefs.textDraft(NEW_DRAFT),
+            draftChats = prefs.chatDraftKeys().associateWith { prefs.chatDraft(it) }.filterValues { it.isNotEmpty() },
+        ),
+    )
     val state: StateFlow<UiState> = _state.asStateFlow()
 
     @Volatile private var api: KrewdApi? = null
@@ -318,6 +344,8 @@ class KrewdViewModel(private val app: Application) {
                 val sessions = client.sessions().filterNot { it.id == _state.value.pendingDelete?.id }
                 val approvals = client.approvals()
                 val secrets = runCatching { client.secrets() }.getOrDefault(emptyList())
+                // Older servers have no proposals.
+                val proposals = runCatching { client.proposals() }.getOrDefault(emptyList())
                 syncPrefs(client)
                 val routines = runCatching { client.routines() }.getOrDefault(_state.value.routines)
                 val wasRestarting = _state.value.restarting && sawDown
@@ -328,6 +356,8 @@ class KrewdViewModel(private val app: Application) {
                         sessions = sessions,
                         approvals = approvals,
                         secrets = secrets,
+                        proposals = proposals,
+                        archived = null,
                         routines = routines,
                         restarting = if (wasRestarting) false else it.restarting,
                         message = if (wasRestarting) "Krewd is back" else it.message,
@@ -414,6 +444,17 @@ class KrewdViewModel(private val app: Application) {
             }
             "error" -> lastError[sid] = event.payload.optString("message", "Something went wrong")
             "routine" -> routineEvent(event.payload)
+            "proposal" -> {
+                val proposal = Proposal.from(event.payload)
+                val known = _state.value.proposals.any { it.id == proposal.id }
+                _state.update { s ->
+                    val rest = s.proposals.filterNot { it.id == proposal.id }
+                    s.copy(proposals = if (proposal.pending) rest + proposal else rest)
+                }
+                if (proposal.pending && !known && !viewing(sid)) {
+                    notifier.approval(sid, titleOf(sid), engineName(sid), "proposes ${proposal.what}: ${proposal.title}")
+                }
+            }
             "secret" -> {
                 val ask = SecretAsk.from(event.payload)
                 _state.update { s ->
@@ -682,14 +723,95 @@ class KrewdViewModel(private val app: Application) {
 
     // actions
 
-    fun newTask(text: String, autoApprove: Boolean, engine: String?, config: Map<String, String>) = act { client ->
-        val files = readyUploads(NEW_DRAFT)
+    /**
+     * Starts a task from the new-task sheet ([draft] holds its files and @ chats). With [parentId] it is a side
+     * session of that chat, a sub-agent when [returns]; then the parent stays open (its strip shows the new chat).
+     */
+    fun newTask(
+        text: String, autoApprove: Boolean, engine: String?, config: Map<String, String>,
+        draft: String = NEW_DRAFT, parentId: String? = null, returns: Boolean = false,
+    ) = act { client ->
+        val files = readyUploads(draft)
+        val chats = _state.value.chatsOf(draft)
         val engineId = engine ?: _state.value.engines.firstOrNull { it.isDefault }?.id
-        val session = client.createSession(text, autoApprove, engine, config, files)
+        val session = client.createSession(text, autoApprove, engine, config, files, chats = chats, parentId = parentId, returns = returns)
         engineId?.let { id -> prefs.updateEngine(id) { it.copy(autoApprove = autoApprove, config = it.config + config) } }
-        clearDraft(NEW_DRAFT)
+        clearDraft(draft)
+        launchMain { setDraftChats(draft, emptyList()) }
         _state.update { it.copy(sessions = upsert(it.sessions, session)) }
-        launchMain { openSession(session.id) }
+        if (parentId == null) launchMain { openSession(session.id) }
+        else _state.update { it.copy(message = "Started ${if (returns) "sub-agent" else "side session"} “${session.title}”") }
+    }
+
+    // chats attached with @, side sessions, sub-agents and proposals
+
+    fun addDraftChat(key: String, chat: ChatRef) {
+        val now = _state.value.chatsOf(key)
+        if (now.any { it.id == chat.id }) return
+        if (now.size >= MAX_DRAFT_CHATS) {
+            toast("Up to $MAX_DRAFT_CHATS chats per message")
+            return
+        }
+        setDraftChats(key, now + chat)
+    }
+
+    fun removeDraftChat(key: String, id: String) = setDraftChats(key, _state.value.chatsOf(key).filterNot { it.id == id })
+
+    fun setDraftChats(key: String, chats: List<ChatRef>) {
+        prefs.setChatDraft(key, chats)
+        _state.update { s -> s.copy(draftChats = if (chats.isEmpty()) s.draftChats - key else s.draftChats + (key to chats)) }
+    }
+
+    /** Archived chats for @, once per connection; older servers or errors leave it empty. */
+    fun loadArchived() {
+        if (_state.value.archived != null) return
+        _state.update { it.copy(archived = emptyList()) }
+        val client = api ?: return
+        scope.launch(Dispatchers.IO) {
+            val list = runCatching { client.archivedSessions() }.getOrDefault(emptyList())
+            _state.update { it.copy(archived = list) }
+        }
+    }
+
+    /** Sends an agent's proposal as the owner edited it; [done] gets the chat it started or messaged, or an error. */
+    fun sendProposal(
+        proposal: Proposal, text: String, title: String?, engine: String?, config: Map<String, String>, returns: Boolean,
+        draft: String, done: (String?, String?) -> Unit,
+    ) {
+        val chats = _state.value.chatsOf(draft)
+        request({ client ->
+            val body = JSONObject().put("text", text).put("returns", returns)
+            if (!title.isNullOrBlank()) body.put("title", title)
+            if (!proposal.isPrompt) {
+                engine?.let { body.put("engine", it) }
+                if (config.isNotEmpty()) body.put("config", JSONObject(config))
+            }
+            if (chats.isNotEmpty()) body.put("chats", org.json.JSONArray(chats.map { JSONObject().put("id", it.id) }))
+            client.sendProposal(proposal.id, body)
+        }) { sent, error ->
+            if (sent != null) {
+                setDraftChats(draft, emptyList())
+                _state.update { s -> s.copy(proposals = s.proposals.filterNot { it.id == proposal.id }) }
+                val what = when {
+                    proposal.isPrompt -> "Sent to ${proposal.targetTitle ?: "the chat"}"
+                    returns -> "Started the sub-agent"
+                    else -> "Started the side session"
+                }
+                _state.update { it.copy(message = what) }
+            }
+            done(sent?.resultId, error)
+        }
+    }
+
+    fun dismissProposal(proposal: Proposal) = act { client ->
+        client.dismissProposal(proposal.id)
+        _state.update { s -> s.copy(proposals = s.proposals.filterNot { it.id == proposal.id }) }
+    }
+
+    /** A side session: send its finished replies back to the parent (a sub-agent) or not. */
+    fun setReturns(id: String, on: Boolean) = act { client ->
+        val session = client.updateSession(id, JSONObject().put("returns", on))
+        _state.update { it.copy(sessions = upsert(it.sessions, session)) }
     }
 
     /** What a new task on [engineId] starts with: the owner's last picks for that agent. */
@@ -759,9 +881,11 @@ class KrewdViewModel(private val app: Application) {
             files = _state.value.draft(id).filter { it.uploadId != null },
             tabs = _state.value.draftTabs[id].orEmpty(),
             delivery = delivery,
+            chats = _state.value.chatsOf(id),
         )
         clearDraft(id)
         prefs.setTextDraft(id, "")
+        setDraftChats(id, emptyList())
         _state.update { it.copy(outbox = it.outbox + message, draftTabs = it.draftTabs - id) }
         deliver(message)
     }
@@ -780,7 +904,7 @@ class KrewdViewModel(private val app: Application) {
         }
         scope.launch(Dispatchers.IO) {
             try {
-                client.send(message.sessionId, message.text, message.uploads, message.tabs, message.delivery, message.clientId)
+                client.send(message.sessionId, message.text, message.uploads, message.tabs, message.delivery, message.clientId, message.chats)
                 dropStored(message.clientId)
             } catch (e: ApiException) {
                 // The server answered but refused: show why; resending would fail the same way.
@@ -823,6 +947,7 @@ class KrewdViewModel(private val app: Application) {
             clientId = it.clientId,
             delivery = it.delivery,
             state = if (it.failed) "failed" else "sending",
+            chats = it.chats,
         )
     }
 

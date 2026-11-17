@@ -105,7 +105,23 @@ data class SessionInfo(
     val compact: String = "handover",
     /** The agent's own slash commands and skills, suggested in the composer. */
     val commands: List<AgentCommand> = emptyList(),
+    /** Set on a side session: the chat it was started from. */
+    val parentId: String? = null,
+    val parentTitle: String? = null,
+    /** A side session whose finished replies go back to its parent: a sub-agent. */
+    val returns: Boolean = false,
+    /** Chats that owe this one a reply (its sub-agents at work, chats it sent a message to). */
+    val waitingOn: List<String> = emptyList(),
 ) {
+    val isSide: Boolean get() = parentId != null
+
+    /** "Sub-agent" or "Side" for a side session, null for an ordinary chat. */
+    val sideLabel: String? get() = when {
+        parentId == null -> null
+        returns -> "Sub-agent"
+        else -> "Side"
+    }
+
     val contextPercent: Int? get() = if (contextUsed != null && contextSize != null && contextSize > 0) (contextUsed * 100 / contextSize).toInt() else null
 
     val isBusy: Boolean get() = status == "running" || status == "waiting"
@@ -140,8 +156,72 @@ data class SessionInfo(
                 routineId = o.optStringOrNull("routine_id"),
                 compact = o.optString("compact", "handover"),
                 commands = AgentCommand.list(o.optJSONArray("commands")),
+                parentId = o.optStringOrNull("parent_id"),
+                parentTitle = o.optStringOrNull("parent_title"),
+                returns = o.optBoolean("returns"),
+                waitingOn = o.optJSONArray("waiting_on").strings(),
             )
         }
+    }
+}
+
+/** A Krewd chat attached to a message with @: its id, its title then, and how it relates to the chat it went to. */
+data class ChatRef(val id: String, val title: String, val relation: String? = null) {
+    fun toJson(): JSONObject = JSONObject().put("id", id).put("title", title).apply { relation?.let { put("relation", it) } }
+
+    companion object {
+        fun list(a: JSONArray?): List<ChatRef> = a.objects().mapNotNull {
+            val id = it.optString("id")
+            if (id.isBlank()) null else ChatRef(id, it.optString("title").ifBlank { "Chat" }, it.optStringOrNull("relation"))
+        }
+    }
+}
+
+/**
+ * What an agent drafted and only the owner starts: a new side session or sub-agent ([kind] "new"), or a message to
+ * another chat ("prompt"). [status]: pending, sent, dismissed, void (its target chat was deleted).
+ */
+data class Proposal(
+    val id: String,
+    val sessionId: String,
+    val sessionTitle: String?,
+    val kind: String,
+    val targetId: String?,
+    val targetTitle: String?,
+    val title: String,
+    val text: String,
+    val engine: String?,
+    val returns: Boolean,
+    val status: String,
+    val resultId: String?,
+    val createdAt: String,
+) {
+    val pending: Boolean get() = status == "pending"
+    val isPrompt: Boolean get() = kind == "prompt"
+
+    /** "a sub-agent", "a side session" or "a message to <chat>". */
+    val what: String get() = when {
+        isPrompt -> "a message to ${targetTitle ?: "another chat"}"
+        returns -> "a sub-agent"
+        else -> "a side session"
+    }
+
+    companion object {
+        fun from(o: JSONObject) = Proposal(
+            id = o.optString("id"),
+            sessionId = o.optString("session_id"),
+            sessionTitle = o.optStringOrNull("session_title"),
+            kind = o.optString("kind", "new"),
+            targetId = o.optStringOrNull("target_id"),
+            targetTitle = o.optStringOrNull("target_title"),
+            title = o.optString("title"),
+            text = o.optString("text"),
+            engine = o.optStringOrNull("engine"),
+            returns = o.optBoolean("returns"),
+            status = o.optString("status", "pending"),
+            resultId = o.optStringOrNull("result_id"),
+            createdAt = o.optString("created_at"),
+        )
     }
 }
 

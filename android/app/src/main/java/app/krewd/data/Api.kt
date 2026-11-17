@@ -184,6 +184,19 @@ class Prefs(context: Context) {
         if (text.isBlank()) drafts.edit().remove(key).apply() else drafts.edit().putString(key, text).apply()
     }
 
+    /** Chats attached with @ to the unsent message for [key], kept with its text. */
+    fun chatDraft(key: String): List<ChatRef> = runCatching {
+        ChatRef.list(JSONArray(drafts.getString("chats:$key", null) ?: "[]"))
+    }.getOrDefault(emptyList())
+
+    fun setChatDraft(key: String, chats: List<ChatRef>) {
+        if (chats.isEmpty()) drafts.edit().remove("chats:$key").apply()
+        else drafts.edit().putString("chats:$key", JSONArray(chats.map { it.toJson() }).toString()).apply()
+    }
+
+    /** Every draft key with chats attached, to load them at start. */
+    fun chatDraftKeys(): List<String> = drafts.all.keys.filter { it.startsWith("chats:") }.map { it.removePrefix("chats:") }
+
     companion object {
         private val SYNCED = setOf("last_engine", "pip_wide_width", "pip_tall_height", "browser_high_quality", "browser_cursor")
     }
@@ -347,6 +360,15 @@ class KrewdApi(
 
     fun sessions(): List<SessionInfo> = arr("GET", "/api/sessions").objects().map(SessionInfo::from)
 
+    fun archivedSessions(): List<SessionInfo> = arr("GET", "/api/sessions?archived=true").objects().map(SessionInfo::from)
+
+    /** Side sessions, sub-agents and messages to other chats that agents drafted and wait for the owner to send. */
+    fun proposals(): List<Proposal> = arr("GET", "/api/proposals?status=pending").objects().map(Proposal::from)
+
+    fun sendProposal(id: String, body: JSONObject): Proposal = Proposal.from(obj("POST", "/api/proposals/$id/send", body))
+
+    fun dismissProposal(id: String): Proposal = Proposal.from(obj("POST", "/api/proposals/$id/dismiss", JSONObject()))
+
     fun createSession(
         text: String,
         autoApprove: Boolean,
@@ -355,10 +377,17 @@ class KrewdApi(
         attachments: List<String> = emptyList(),
         tabs: List<BrowserTab> = emptyList(),
         mode: String? = null,
+        chats: List<ChatRef> = emptyList(),
+        parentId: String? = null,
+        returns: Boolean = false,
+        title: String? = null,
     ): SessionInfo {
         val body = JSONObject().put("text", text).put("auto_approve", autoApprove)
         if (attachments.isNotEmpty()) body.put("attachments", JSONArray(attachments))
         if (tabs.isNotEmpty()) body.put("tabs", tabsJson(tabs))
+        if (chats.isNotEmpty()) body.put("chats", chatsJson(chats))
+        if (parentId != null) body.put("parent_id", parentId).put("returns", returns)
+        if (!title.isNullOrBlank()) body.put("title", title)
         if (mode != null) body.put("mode", mode)
         if (engine != null) body.put("engine", engine)
         if (config.isNotEmpty()) body.put("config", JSONObject(config))
@@ -372,13 +401,16 @@ class KrewdApi(
      * Sends a message. [clientId] makes a resend safe (the server keeps one copy); [delivery] is steer,
      * queue or interrupt, or null for the server's default. Returns the stored message.
      */
-    fun send(id: String, text: String, attachments: List<String>, tabs: List<BrowserTab>, delivery: String?, clientId: String): JSONObject {
+    fun send(id: String, text: String, attachments: List<String>, tabs: List<BrowserTab>, delivery: String?, clientId: String, chats: List<ChatRef> = emptyList()): JSONObject {
         val body = JSONObject().put("text", text).put("client_id", clientId)
         if (attachments.isNotEmpty()) body.put("attachments", JSONArray(attachments))
         if (tabs.isNotEmpty()) body.put("tabs", tabsJson(tabs))
+        if (chats.isNotEmpty()) body.put("chats", chatsJson(chats))
         if (delivery != null) body.put("delivery", delivery)
         return obj("POST", "/api/sessions/$id/messages", body).optJSONObject("message") ?: JSONObject()
     }
+
+    private fun chatsJson(chats: List<ChatRef>) = JSONArray(chats.map { JSONObject().put("id", it.id) })
 
     private fun tabsJson(tabs: List<BrowserTab>) =
         JSONArray(tabs.map { JSONObject().put("id", it.id).put("title", it.title).put("url", it.url) })

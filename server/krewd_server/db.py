@@ -10,7 +10,8 @@ import asyncpg
 
 SCHEMA_VERSION = 6
 MIGRATIONS = {1: "schema.sql", 2: "schema_v2.sql", 3: "schema_v3.sql", 4: "schema_v4.sql", 5: "schema_v5.sql",
-              6: "schema_v6.sql", 7: "schema_v7.sql", 8: "schema_v8.sql"}
+              6: "schema_v6.sql", 7: "schema_v7.sql", 8: "schema_v8.sql",
+              9: "schema_v9.sql"}
 
 
 async def _init_connection(conn: asyncpg.Connection) -> None:
@@ -35,7 +36,11 @@ async def migrate(pool: asyncpg.Pool) -> None:
 SESSION_COLUMNS = (
     "id, engine, title, status, mode, modes, auto_approve, usage, last_text, pinned, archived, created_at, updated_at,"
     " agent, config_options, config_wanted, model_used, browser_tab, commands,"
-    " (select r.id from routines r where r.session_id = s.id order by r.created_at limit 1) as routine_id"
+    " (select r.id from routines r where r.session_id = s.id order by r.created_at limit 1) as routine_id,"
+    " parent_id, returns, (select p.title from sessions p where p.id = s.parent_id) as parent_title,"
+    # The chats this one waits on: each owes it a reply (a sub-agent's or a prompted chat's) not sent yet.
+    " array(select distinct m.session_id from messages m where m.return_to = s.id and m.returned_at is null"
+    " and m.state <> 'cancelled') as waiting_on"
 )
 
 
@@ -93,6 +98,12 @@ def session_json(row: asyncpg.Record, pending_approvals: int = 0) -> dict[str, A
         # The agent's own slash commands and skills (ACP available_commands_update), for the composer's suggestions.
         "commands": command_list(row["commands"]),
         "pending_approvals": pending_approvals,
+        # Side sessions: the parent chat, and whether this chat's finished replies go back to it (a sub-agent).
+        "parent_id": str(row["parent_id"]) if row["parent_id"] else None,
+        "parent_title": row["parent_title"],
+        "returns": row["returns"],
+        "kind": ("subagent" if row["returns"] else "side") if row["parent_id"] else None,
+        "waiting_on": [str(i) for i in row["waiting_on"] or []],
         "created_at": row["created_at"].isoformat(),
         "updated_at": row["updated_at"].isoformat(),
     }
@@ -119,8 +130,28 @@ def message_json(row: asyncpg.Record) -> dict[str, Any]:
         "delivered_how": row["delivered_how"],
         "purpose": row["purpose"],
         "meta": row["meta"],
+        "return_to": str(row["return_to"]) if row["return_to"] else None,
         "created_at": row["created_at"].isoformat(),
         "delivered_at": row["delivered_at"].isoformat() if row["delivered_at"] else None,
+    }
+
+
+def proposal_json(row: asyncpg.Record) -> dict[str, Any]:
+    return {
+        "id": str(row["id"]),
+        "session_id": str(row["session_id"]),
+        "session_title": row["session_title"] if "session_title" in row.keys() else None,
+        "kind": row["kind"],
+        "target_id": str(row["target_id"]) if row["target_id"] else None,
+        "target_title": row["target_title"] if "target_title" in row.keys() else None,
+        "title": row["title"],
+        "text": row["text"],
+        "engine": row["engine"],
+        "returns": row["returns"],
+        "status": row["status"],
+        "result_id": str(row["result_id"]) if row["result_id"] else None,
+        "created_at": row["created_at"].isoformat(),
+        "decided_at": _iso(row["decided_at"]),
     }
 
 

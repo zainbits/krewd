@@ -1,6 +1,7 @@
 """A tiny ACP agent for tests. Prompt words steer it: perm, slow, crash. Supports `_session/steering`."""
 
 import asyncio
+import re
 import json
 import os
 import sys
@@ -63,6 +64,8 @@ async def ask(method: str, params: dict) -> dict:
 async def prompt(request_id: int, params: dict) -> None:
     sid = params["sessionId"]
     text = " ".join(block.get("text", "") for block in params["prompt"])
+    # Krewd tells a new agent session its chat id first; tests look at what follows.
+    text = re.sub(r"\s*\(This is Krewd chat [0-9a-f-]+\.\)$", "", text)
     running[sid] = []
     try:
         await run_prompt(request_id, sid, text, params)

@@ -93,7 +93,11 @@ import app.krewd.constants.ShellDimensions
 import app.krewd.data.AgentCommand
 import app.krewd.data.ApprovalItem
 import app.krewd.data.ChatItem
+import app.krewd.data.ChatRef
 import app.krewd.data.FilesItem
+import app.krewd.data.LinkItem
+import app.krewd.data.Proposal
+import app.krewd.data.ProposalItem
 import app.krewd.data.NoticeItem
 import app.krewd.data.PendingFile
 import app.krewd.data.PlanItem
@@ -142,6 +146,12 @@ fun ChatScreen(state: UiState, viewModel: KrewdViewModel) {
     // Height of everything pinned at the bottom (composer, chips, keyboard), measured, so the last message
     // always scrolls clear of the composer however tall it grows.
     var bottomStack by remember { mutableStateOf(ShellDimensions.COMPOSER_MIN_HEIGHT * 2) }
+    // The strip of linked chats under the title (parent, side sessions, chats this one waits on), measured too.
+    var stripHeight by remember(state.openSessionId) { mutableStateOf(0.dp) }
+    var reviewing by remember(state.openSessionId) { mutableStateOf<String?>(null) }
+    var sideOpen by rememberSaveable(state.openSessionId) { mutableStateOf(false) }
+    val known: (String) -> Boolean = { id -> state.session(id) != null || state.archived.orEmpty().any { it.id == id } }
+    val hasStrip = session != null && (session.parentId != null || session.waitingOn.isNotEmpty() || state.sessions.any { it.parentId == session.id })
     Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surface)) {
         // Rows that open and close keep their top edge in place (KeepInPlace.kt).
         val holdRow = remember(listState) { { key: Any -> listState.holdRow(key) } }
@@ -153,7 +163,7 @@ fun ChatScreen(state: UiState, viewModel: KrewdViewModel) {
                 start = ShellDimensions.CONTENT_HORIZONTAL_PADDING,
                 end = ShellDimensions.CONTENT_HORIZONTAL_PADDING,
                 top = bars.calculateTopPadding() + ShellDimensions.TITLE_PILL_TOP_GAP +
-                    ShellDimensions.TITLE_PILL_HEIGHT + ShellDimensions.CONTENT_CLEARANCE,
+                    ShellDimensions.TITLE_PILL_HEIGHT + ShellDimensions.CONTENT_CLEARANCE + (if (hasStrip) stripHeight else 0.dp),
                 bottom = bottomStack + ShellDimensions.CONTENT_CLEARANCE,
             ),
             reverseLayout = true,
@@ -168,7 +178,9 @@ fun ChatScreen(state: UiState, viewModel: KrewdViewModel) {
                     onOpen = { filling = ask.id },
                 )
             }
-            items(rows, key = { it.key }) { item -> ChatRow(item, viewModel, session?.isBusy == true, commands) }
+            items(rows, key = { it.key }) { item ->
+                ChatRow(item, state, viewModel, session?.isBusy == true, commands, known, onReview = { reviewing = it })
+            }
             if (state.timelineLoading && rows.isEmpty()) {
                 item(key = "loading") { CircularProgressIndicator(Modifier.padding(24.dp)) }
             }
@@ -182,7 +194,8 @@ fun ChatScreen(state: UiState, viewModel: KrewdViewModel) {
                 tabId = pipTab,
                 label = listOfNotNull(state.engine(session.engine)?.name, tab?.host?.ifBlank { null }).joinToString(" · "),
                 viewModel = viewModel,
-                top = bars.calculateTopPadding() + ShellDimensions.TITLE_PILL_TOP_GAP + ShellDimensions.TITLE_PILL_HEIGHT,
+                top = bars.calculateTopPadding() + ShellDimensions.TITLE_PILL_TOP_GAP + ShellDimensions.TITLE_PILL_HEIGHT +
+                    (if (hasStrip) stripHeight else 0.dp),
                 bottom = bottomStack,
                 onClose = { viewModel.hidePip(session.id, pipTab) },
                 onOpen = { viewModel.openBrowserAt(pipTab) },
@@ -190,8 +203,31 @@ fun ChatScreen(state: UiState, viewModel: KrewdViewModel) {
         }
 
         signIns.firstOrNull { it.id == filling }?.let { ask -> SecretSheet(ask = ask, viewModel = viewModel, onDismiss = { filling = null }) }
-        ChatTopBar(state, viewModel, onSettings = { settingsOpen = true })
-        if (settingsOpen && session != null) ChatSettingsSheet(state, viewModel, session, onDismiss = { settingsOpen = false })
+        Column(Modifier.align(Alignment.TopCenter).fillMaxWidth()) {
+            ChatTopBar(state, viewModel, onSettings = { settingsOpen = true })
+            if (session != null) {
+                LinkedChatsStrip(
+                    state, session, onOpen = viewModel::openSession,
+                    modifier = Modifier
+                        .onSizeChanged { stripHeight = with(density) { it.height.toDp() } }
+                        .padding(horizontal = ShellDimensions.TITLE_PILL_START_MARGIN)
+                        .padding(top = 6.dp),
+                )
+            }
+        }
+        if (settingsOpen && session != null) {
+            ChatSettingsSheet(state, viewModel, session, onDismiss = { settingsOpen = false }, onSideSession = { settingsOpen = false; sideOpen = true })
+        }
+        if (sideOpen && session != null) {
+            NewTaskSheet(state, viewModel, session.engine, onDismiss = { sideOpen = false }, onOpenSettings = {}, parent = session)
+        }
+        reviewing?.let { id ->
+            val proposal = state.proposals.firstOrNull { it.id == id }
+                ?: (state.timeline.firstOrNull { it is ProposalItem && it.proposal.id == id } as? ProposalItem)?.proposal
+            if (proposal != null) {
+                NewTaskSheet(state, viewModel, proposal.engine ?: session?.engine, onDismiss = { reviewing = null }, onOpenSettings = {}, proposal = proposal)
+            }
+        }
 
         Column(
             Modifier
@@ -204,6 +240,8 @@ fun ChatScreen(state: UiState, viewModel: KrewdViewModel) {
                 val files = state.draft(session.id)
                 PendingFiles(files, onRemove = { viewModel.removeAttachment(session.id, it) }, modifier = Modifier.padding(start = 4.dp, bottom = 4.dp))
                 val tabs = state.draftTabs[session.id].orEmpty()
+                val chats = state.chatsOf(session.id)
+                DraftChatChips(chats, onRemove = { viewModel.removeDraftChat(session.id, it) }, Modifier.padding(start = 4.dp, bottom = 4.dp))
                 if (tabs.isNotEmpty()) {
                     Row(Modifier.padding(start = 4.dp, bottom = 4.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         tabs.forEach { tab ->
@@ -232,7 +270,13 @@ fun ChatScreen(state: UiState, viewModel: KrewdViewModel) {
                     steering = state.engine(session.engine)?.steering == true,
                     commands = commands,
                     files = files,
-                    hasTabs = tabs.isNotEmpty(),
+                    hasTabs = tabs.isNotEmpty() || chats.isNotEmpty(),
+                    mentions = { typed ->
+                        if (typed.isNotEmpty()) viewModel.loadArchived()
+                        mentionCandidates(state, session.id, typed, chats.mapTo(HashSet()) { it.id })
+                    },
+                    engines = state.engines,
+                    onMention = { viewModel.addDraftChat(session.id, it) },
                     onSend = viewModel::send,
                     onStop = viewModel::stop,
                     onAttach = pick,
@@ -325,6 +369,9 @@ private fun Composer(
     commands: List<AgentCommand>,
     files: List<PendingFile>,
     hasTabs: Boolean,
+    mentions: (String) -> List<MentionCandidate>,
+    engines: List<app.krewd.data.EngineInfo>,
+    onMention: (ChatRef) -> Unit,
     onSend: (String, String?) -> Unit,
     onStop: () -> Unit,
     onAttach: () -> Unit,
@@ -339,7 +386,8 @@ private fun Composer(
         value = next
     }
     val text = value.text
-    val query = if (value.selection.collapsed) commandQuery(text, value.selection.start) else null
+    val mention = if (value.selection.collapsed) mentionQuery(text, value.selection.start) else null
+    val query = if (value.selection.collapsed && mention == null) commandQuery(text, value.selection.start) else null
     val matches = remember(commands, query) { matchCommands(commands, query) }
     // The agent's own commands and skills show as pills, so they read apart from plain text.
     var layout by remember { mutableStateOf<TextLayoutResult?>(null) }
@@ -361,7 +409,12 @@ private fun Composer(
         shadowElevation = 2.dp,
     ) {
         Column(Modifier.padding(start = 6.dp, end = 6.dp, top = 4.dp, bottom = 6.dp)) {
-            if (query != null) {
+            if (mention != null) {
+                ChatSuggestions(mentions(mention.typed), engines, onPick = {
+                    edit(removeMention(value, mention))
+                    onMention(it.ref())
+                }, Modifier.padding(top = 2.dp))
+            } else if (query != null) {
                 CommandSuggestions(matches, onPick = { edit(applyCommand(value, query, it)) }, Modifier.padding(top = 2.dp))
             }
             BasicTextField(
@@ -377,7 +430,7 @@ private fun Composer(
                     Box {
                         if (text.isEmpty()) {
                             Text(
-                                if (busy) "Steer the agent…" else "Reply to Krewd…",
+                                if (busy) "Steer the agent…" else "Reply to Krewd · @ adds a chat",
                                 style = MaterialTheme.typography.bodyLarge,
                                 color = colors.onSurfaceVariant,
                             )
@@ -551,13 +604,35 @@ private fun TokenLine(label: String, tokens: Long) {
 }
 
 @Composable
-private fun ChatRow(item: ChatItem, viewModel: KrewdViewModel, busy: Boolean, commands: List<AgentCommand>) {
+private fun ChatRow(
+    item: ChatItem,
+    state: UiState,
+    viewModel: KrewdViewModel,
+    busy: Boolean,
+    commands: List<AgentCommand>,
+    known: (String) -> Boolean,
+    onReview: (String) -> Unit,
+) {
     when (item) {
         is UserItem -> when (item.purpose) {
             "routine" -> RoutineRunRow(item)
             "compact" -> CompactRow(item)
-            "switch" -> SwitchPendingRow(item, viewModel.state.value.engine(item.switchTo)?.name ?: item.switchTo ?: "another agent")
-            else -> UserRow(item, busy, commands, onResend = { item.clientId?.let(viewModel::resend) })
+            "switch" -> SwitchPendingRow(item, state.engine(item.switchTo)?.name ?: item.switchTo ?: "another agent")
+            "result", "prompt" -> FromChatRow(item, exists = item.fromId?.let(known) == true, onOpen = { item.fromId?.let(viewModel::openSession) })
+            else -> UserRow(item, busy, commands, known, onOpenChat = viewModel::openSession, onResend = { item.clientId?.let(viewModel::resend) })
+        }
+        is LinkItem -> LinkRow(item, exists = known(item.chatId), onOpen = { viewModel.openSession(item.chatId) })
+        is ProposalItem -> {
+            // The live list knows the newest state; the timeline row keeps the one it was given.
+            val proposal: Proposal = state.proposals.firstOrNull { it.id == item.proposal.id } ?: item.proposal
+            ProposalCard(
+                proposal = proposal,
+                chatTitle = null,
+                look = null,
+                onReview = { onReview(proposal.id) },
+                onDismiss = { viewModel.dismissProposal(proposal) },
+                onOpenResult = { id -> if (known(id)) viewModel.openSession(id) },
+            )
         }
         is TextItem -> if (item.isThought) ThoughtRow(item.key, item.text) else SelectionContainer { Markdown(item.text) }
         is ToolItem -> ToolRow(item, viewModel::toolImage)
@@ -588,7 +663,14 @@ private fun ChatRow(item: ChatItem, viewModel: KrewdViewModel, busy: Boolean, co
 }
 
 @Composable
-private fun UserRow(item: UserItem, busy: Boolean, commands: List<AgentCommand>, onResend: () -> Unit) {
+private fun UserRow(
+    item: UserItem,
+    busy: Boolean,
+    commands: List<AgentCommand>,
+    known: (String) -> Boolean,
+    onOpenChat: (String) -> Unit,
+    onResend: () -> Unit,
+) {
     val failed = item.state == "failed"
     val onBubble = if (failed) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onPrimaryContainer
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
@@ -620,6 +702,7 @@ private fun UserRow(item: UserItem, busy: Boolean, commands: List<AgentCommand>,
                         )
                     }
                 }
+                if (item.chats.isNotEmpty()) SentChatChips(item.chats, known, onBubble, onOpenChat)
                 if (item.attachments.isNotEmpty()) SentFiles(item.attachments, onBubble)
                 DeliveryLine(item, busy, onBubble)
             }

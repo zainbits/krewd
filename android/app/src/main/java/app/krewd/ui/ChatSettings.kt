@@ -16,6 +16,11 @@ import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.Switch
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.clickable
+import androidx.compose.ui.Alignment
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -50,7 +55,7 @@ fun chatSubtitle(state: UiState, session: SessionInfo): String {
  */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
-fun ChatSettingsSheet(state: UiState, viewModel: KrewdViewModel, session: SessionInfo, onDismiss: () -> Unit) {
+fun ChatSettingsSheet(state: UiState, viewModel: KrewdViewModel, session: SessionInfo, onDismiss: () -> Unit, onSideSession: () -> Unit = {}) {
     val sheet = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val scope = rememberCoroutineScope()
     val close: () -> Unit = { scope.launch { sheet.hide() }.invokeOnCompletion { onDismiss() } }
@@ -72,6 +77,30 @@ fun ChatSettingsSheet(state: UiState, viewModel: KrewdViewModel, session: Sessio
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(start = 4.dp, top = 8.dp),
                 )
+            }
+
+            session.parentId?.let { parentId ->
+                val parentTitle = state.session(parentId)?.title ?: session.parentTitle ?: "the parent chat"
+                SheetLabel(session.sideLabel?.let { "$it of $parentTitle" } ?: "Side session")
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 56.dp)
+                        .clickable(enabled = online) { viewModel.setReturns(session.id, !session.returns) }
+                        .padding(horizontal = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Send replies to $parentTitle", style = MaterialTheme.typography.bodyLarge, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        Text(
+                            if (session.returns) "On: each reply this chat finishes goes back there (a sub-agent)."
+                            else "Off: nothing goes back (a side session).",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(checked = session.returns, onCheckedChange = { viewModel.setReturns(session.id, it) }, enabled = online)
+                }
             }
 
             AgentOptions(
@@ -103,6 +132,10 @@ fun ChatSettingsSheet(state: UiState, viewModel: KrewdViewModel, session: Sessio
             }
 
             FlowRow(Modifier.fillMaxWidth().padding(top = 18.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                session.parentId?.let { parentId ->
+                    if (state.session(parentId) != null) ActionButton(R.drawable.ic_chat_24, "Open parent") { close(); viewModel.openSession(parentId) }
+                }
+                ActionButton(R.drawable.ic_add_24, "New side session") { onSideSession() }
                 ActionButton(R.drawable.ic_compress_24, "Compact") { confirmCompact = true }
                 ActionButton(R.drawable.ic_pin_24, if (session.pinned) "Unpin" else "Pin") { viewModel.setPinned(session.id, !session.pinned) }
                 ActionButton(R.drawable.ic_web_24, "Watch the browser") { close(); viewModel.openBrowserAt(session.browserTab?.id) }

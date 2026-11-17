@@ -36,16 +36,22 @@ class TabRef(BaseModel):
     url: str = Field(default="", max_length=4000)
 
 
+class ChatRef(BaseModel):
+    """A Krewd chat attached to a message with @."""
+    id: uuid.UUID
+
+
 class WithAttachments(BaseModel):
     text: str = ""
     attachments: list[str] = Field(default_factory=list, max_length=50)  # upload ids from POST /api/uploads
     tabs: list[TabRef] = Field(default_factory=list, max_length=10)
+    chats: list[ChatRef] = Field(default_factory=list, max_length=5)
     client_id: str | None = Field(default=None, max_length=64)  # makes a resend idempotent
 
     @model_validator(mode="after")
     def text_or_files(self):
-        if not self.text.strip() and not self.attachments and not self.tabs:
-            raise ValueError("send some text, an attachment or a tab")
+        if not self.text.strip() and not self.attachments and not self.tabs and not self.chats:
+            raise ValueError("send some text, an attachment, a tab or a chat")
         return self
 
 
@@ -54,6 +60,29 @@ class NewSession(WithAttachments):
     mode: str | None = None
     auto_approve: bool = False
     config: dict[str, str] | None = None
+    parent_id: uuid.UUID | None = None  # a side session of that chat
+    returns: bool = False  # with a parent: a sub-agent, whose finished replies go back to it
+    title: str | None = Field(default=None, max_length=200)
+
+
+class NewProposal(BaseModel):
+    session_id: uuid.UUID | None = None  # the proposing chat; without it, the one chat running a turn
+    kind: Literal["new", "prompt"] = "new"
+    text: str = Field(min_length=1, max_length=50000)
+    title: str = Field(default="", max_length=200)
+    engine: str | None = Field(default=None, max_length=100)
+    returns: bool = False
+    target_id: uuid.UUID | None = None  # kind prompt
+
+
+class ProposalSend(BaseModel):
+    text: str | None = Field(default=None, max_length=50000)
+    title: str | None = Field(default=None, max_length=200)
+    engine: str | None = Field(default=None, max_length=100)
+    mode: str | None = None
+    config: dict[str, str] | None = None
+    returns: bool | None = None
+    chats: list[ChatRef] = Field(default_factory=list, max_length=5)
 
 
 class Message(WithAttachments):
@@ -68,6 +97,7 @@ class SessionChanges(BaseModel):
     archived: bool | None = None
     mode: str | None = None
     config: dict[str, str] | None = None
+    returns: bool | None = None  # a side session: send its finished replies back to the parent (sub-agent) or not
 
 
 class TriggerFields(BaseModel):
@@ -579,6 +609,8 @@ def create_app(hub: Hub, token: str, lifespan_hub: bool = True) -> FastAPI:
         return await hub.create_session(
             body.text, body.engine, body.mode, body.auto_approve, body.config, body.attachments,
             tabs=[t.model_dump() for t in body.tabs], client_id=body.client_id,
+            chats=[{"id": str(c.id)} for c in body.chats], parent_id=body.parent_id, returns=body.returns,
+            title=body.title,
         )
 
     @app.get("/api/sessions/{session_id}", dependencies=auth)
@@ -611,9 +643,39 @@ def create_app(hub: Hub, token: str, lifespan_hub: bool = True) -> FastAPI:
         await hub.get_session(session_id)
         message = await hub.send(
             session_id, body.text, body.attachments, tabs=[t.model_dump() for t in body.tabs],
-            delivery=body.delivery, client_id=body.client_id,
+            delivery=body.delivery, client_id=body.client_id, chats=[{"id": str(c.id)} for c in body.chats],
         )
         return {"ok": True, "message": message}
+
+    @app.get("/api/sessions/{session_id}/links", dependencies=auth)
+    async def links(session_id: uuid.UUID) -> dict[str, Any]:
+        """The chat's parent, its side sessions and sub-agents, and the chats it waits on for a reply."""
+        return await hub.links(session_id)
+
+    # Proposals: a side session, sub-agent or message to another chat an agent drafted; only the owner sends one.
+
+    @app.get("/api/proposals", dependencies=auth)
+    async def proposals(status: str | None = "pending", session_id: uuid.UUID | None = None) -> list[dict[str, Any]]:
+        return await hub.list_proposals(status or None, session_id)
+
+    @app.post("/api/proposals", dependencies=auth, status_code=201)
+    async def new_proposal(body: NewProposal) -> dict[str, Any]:
+        return await hub.propose(body.session_id, body.kind, body.text, body.title, body.engine, body.returns,
+                                 body.target_id)
+
+    @app.post("/api/proposals/{proposal_id}/send", dependencies=auth)
+    async def send_proposal(request: Request, proposal_id: uuid.UUID, body: ProposalSend) -> dict[str, Any]:
+        # The agents use the machine's own token; a proposal only starts when the owner sends it from the phone.
+        if request.state.principal.kind == "local":
+            raise HTTPException(403, "only the owner sends a proposal, from the Krewd app")
+        return await hub.send_proposal(
+            proposal_id, body.text, body.title, body.engine, body.mode, body.config, body.returns,
+            [{"id": str(c.id)} for c in body.chats],
+        )
+
+    @app.post("/api/proposals/{proposal_id}/dismiss", dependencies=auth)
+    async def dismiss_proposal(proposal_id: uuid.UUID) -> dict[str, Any]:
+        return await hub.dismiss_proposal(proposal_id)
 
     @app.post("/api/sessions/{session_id}/cancel", dependencies=auth)
     async def cancel(session_id: uuid.UUID) -> dict[str, Any]:

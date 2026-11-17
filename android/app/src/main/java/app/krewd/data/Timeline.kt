@@ -32,7 +32,22 @@ data class UserItem(
     val maxAttempts: Int = 1,
     /** For a switch: the agent (engine id) the chat moves to. */
     val switchTo: String? = null,
+    /** Krewd chats attached with @. */
+    val chats: List<ChatRef> = emptyList(),
+    /** For a reply sent back ("result") or a message from another chat ("prompt"): that chat. */
+    val fromId: String? = null,
+    val fromTitle: String? = null,
+    /** For a reply sent back: false when it is a note saying why no reply comes. */
+    val ok: Boolean = true,
+    /** For a reply sent back: "sub-agent" or "chat". */
+    val fromKind: String? = null,
 ) : ChatItem
+
+/** This chat started a side session or sub-agent, or sent a message to another chat ([kind] side, subagent, prompt). */
+data class LinkItem(override val key: String, val kind: String, val chatId: String, val title: String, val returns: Boolean) : ChatItem
+
+/** An agent's proposal in its own chat; later events for it replace the row. */
+data class ProposalItem(override val key: String, val proposal: Proposal) : ChatItem
 
 /** The chat moved to another agent; [summary] is the handover the previous agent wrote. */
 data class SwitchItem(override val key: String, val fromName: String, val toName: String, val summary: String?) : ChatItem
@@ -104,6 +119,11 @@ class Timeline {
                     attempt = p.optJSONObject("meta")?.optInt("attempt", 1) ?: 1,
                     maxAttempts = p.optJSONObject("meta")?.optInt("max_attempts", 1) ?: 1,
                     switchTo = p.optJSONObject("meta")?.optStringOrNull("to"),
+                    chats = ChatRef.list(p.optJSONArray("chats")),
+                    fromId = p.optJSONObject("meta")?.optStringOrNull("from"),
+                    fromTitle = p.optJSONObject("meta")?.optStringOrNull("from_title"),
+                    ok = p.optJSONObject("meta")?.optBoolean("ok", true) ?: true,
+                    fromKind = p.optJSONObject("meta")?.optStringOrNull("kind"),
                 )
                 add(item)
                 if (messageId != null) messages[messageId] = item.key
@@ -151,6 +171,15 @@ class Timeline {
                 put("approval-${approval.id}", ApprovalItem("approval-${approval.id}", approval))
             }
             "error" -> add(NoticeItem("error-${event.seq}", p.optString("message", "Something went wrong"), isError = true))
+            "link" -> {
+                val chat = p.optStringOrNull("chat_id") ?: return false
+                add(LinkItem("link-${event.seq}", p.optString("kind", "side"), chat, p.optString("title").ifBlank { "Chat" }, p.optBoolean("returns")))
+            }
+            "proposal" -> {
+                val proposal = Proposal.from(p)
+                if (proposal.id.isBlank()) return false
+                put("proposal-${proposal.id}", ProposalItem("proposal-${proposal.id}", proposal))
+            }
             "switch" -> add(
                 SwitchItem(
                     "switch-${event.seq}",

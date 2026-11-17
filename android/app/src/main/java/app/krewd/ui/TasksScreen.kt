@@ -18,6 +18,7 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
@@ -116,7 +117,9 @@ fun TasksScreen(state: UiState, viewModel: KrewdViewModel, padding: PaddingValue
     val sessions = state.sessions.filter { !it.archived }
     val pending = state.approvals.filter { it.pending }
     val signIns = state.secrets.filter { it.pending }
+    val proposals = state.proposals.filter { it.pending }
     var filling by remember { mutableStateOf<String?>(null) }
+    var reviewing by rememberSaveable { mutableStateOf<String?>(null) }
     val running = sessions.filter { it.status == "running" || it.status == "waiting" }
         .filter { s -> pending.none { it.sessionId == s.id } }
     val rest = sessions.filter { s -> s !in running && pending.none { it.sessionId == s.id } }
@@ -141,7 +144,7 @@ fun TasksScreen(state: UiState, viewModel: KrewdViewModel, padding: PaddingValue
             item(key = "header") { HomeHeader(state.connection, onOpenSettings) }
             item(key = "hero") {
                 Hero(
-                    needs = pending.size + signIns.size,
+                    needs = pending.size + signIns.size + proposals.size,
                     working = running.size,
                     next = upcoming.firstOrNull(),
                 )
@@ -149,8 +152,24 @@ fun TasksScreen(state: UiState, viewModel: KrewdViewModel, padding: PaddingValue
             if (members.isNotEmpty()) item(key = "roster") {
                 Roster(members, needsOf = { id -> pending.count { a -> sessions.firstOrNull { it.id == a.sessionId }?.engine == id } }, onTap = ask)
             }
+            val needs = proposals.size + signIns.size + pending.size
+            if (needs > 0) item(key = "needs-title") { SectionTitle("Needs you", needs.toString()) }
+            if (proposals.isNotEmpty()) {
+                items(proposals.size, key = { "proposal-" + proposals[it].id }) { i ->
+                    val proposal = proposals[i]
+                    val from = state.session(proposal.sessionId)
+                    ProposalCard(
+                        proposal = proposal,
+                        chatTitle = from?.title ?: proposal.sessionTitle,
+                        look = lookFor(from?.engine, state.engines),
+                        onReview = { reviewing = proposal.id },
+                        onDismiss = { viewModel.dismissProposal(proposal) },
+                        onOpenResult = null,
+                        shape = groupShape(i, proposals.size),
+                    )
+                }
+            }
             if (signIns.isNotEmpty()) {
-                if (pending.isEmpty()) item(key = "needs-title") { SectionTitle("Needs you", signIns.size.toString()) }
                 items(signIns.size, key = { "secret-" + signIns[it].id }) { i ->
                     val ask = signIns[i]
                     SecretCard(
@@ -163,7 +182,6 @@ fun TasksScreen(state: UiState, viewModel: KrewdViewModel, padding: PaddingValue
                 }
             }
             if (pending.isNotEmpty()) {
-                item(key = "needs-title") { SectionTitle("Needs you", (pending.size + signIns.size).toString()) }
                 items(pending.size, key = { "needs-" + pending[it].id }) { i ->
                     val approval = pending[i]
                     val session = sessions.firstOrNull { it.id == approval.sessionId }
@@ -253,6 +271,15 @@ fun TasksScreen(state: UiState, viewModel: KrewdViewModel, padding: PaddingValue
     }
 
     if (asking) NewTaskSheet(state, viewModel, askEngine, onDismiss = { asking = false }, onOpenSettings = onOpenSettings)
+    reviewing?.let { id ->
+        val proposal = state.proposals.firstOrNull { it.id == id }
+        if (proposal == null) {
+            LaunchedEffect(id) { reviewing = null }
+        } else {
+            NewTaskSheet(state, viewModel, proposal.engine ?: state.session(proposal.sessionId)?.engine, onDismiss = { reviewing = null },
+                onOpenSettings = onOpenSettings, proposal = proposal)
+        }
+    }
 }
 
 private fun localDate(iso: String): LocalDate? =
@@ -446,7 +473,15 @@ private fun WorkingCard(session: SessionInfo, live: LiveInfo?, look: KrewdLook, 
                         overflow = TextOverflow.Ellipsis,
                     )
                 }
-                Text(session.title, style = MaterialTheme.typography.titleMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(session.title, style = MaterialTheme.typography.titleMedium, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+                    session.sideLabel?.let { SideTag(it) }
+                    if (session.waitingOn.isNotEmpty()) SideTag("waiting on ${session.waitingOn.size}")
+                }
+                session.parentId?.let { pid ->
+                    val parent = viewModel.state.value.session(pid)
+                    ParentLine(parent?.title ?: session.parentTitle ?: "Parent chat", parent?.let { p -> { viewModel.openSession(p.id) } })
+                }
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text(engineName, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.outline)
                     if (live != null) {
@@ -591,7 +626,11 @@ private fun TaskRowItem(session: SessionInfo, state: UiState, viewModel: KrewdVi
             pinIcon = R.drawable.ic_pin_24,
             deleteIcon = R.drawable.ic_delete_24,
         ) {
-            TaskRow(session, lookFor(session.engine, state.engines), onClick = { viewModel.openSession(session.id) })
+            TaskRow(
+                session, lookFor(session.engine, state.engines), onClick = { viewModel.openSession(session.id) },
+                parentTitle = session.parentId?.let { state.session(it)?.title ?: session.parentTitle },
+                onParent = session.parentId?.takeIf { state.session(it) != null }?.let { id -> { viewModel.openSession(id) } },
+            )
         }
     }
     if (confirm) {
@@ -611,7 +650,7 @@ private fun TaskRowItem(session: SessionInfo, state: UiState, viewModel: KrewdVi
 }
 
 @Composable
-private fun TaskRow(session: SessionInfo, look: KrewdLook, onClick: () -> Unit) {
+private fun TaskRow(session: SessionInfo, look: KrewdLook, onClick: () -> Unit, parentTitle: String? = null, onParent: (() -> Unit)? = null) {
     // Surface's own onClick clips the press ripple to the card's rounded shape.
     Surface(
         onClick = onClick,
@@ -630,7 +669,10 @@ private fun TaskRow(session: SessionInfo, look: KrewdLook, onClick: () -> Unit) 
                         Icon(painterResource(R.drawable.ic_pin_24), contentDescription = "Pinned", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(15.dp))
                     }
                     Text(session.title, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+                    session.sideLabel?.let { SideTag(it) }
+                    if (session.waitingOn.isNotEmpty()) SideTag("waiting on ${session.waitingOn.size}")
                 }
+                if (parentTitle != null) ParentLine(parentTitle, onParent)
                 if (session.lastText.isNotBlank()) {
                     Text(
                         plainPreview(session.lastText),
@@ -645,6 +687,21 @@ private fun TaskRow(session: SessionInfo, look: KrewdLook, onClick: () -> Unit) 
             Text(shortAge(session.updatedAt), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.outline)
         }
     }
+}
+
+/** "↳ parent title" under a side session's title: one tap opens the parent. */
+@Composable
+private fun ParentLine(title: String, onOpen: (() -> Unit)?) {
+    Text(
+        "↳ $title",
+        style = MaterialTheme.typography.labelMedium,
+        color = if (onOpen != null) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+        modifier = Modifier
+            .padding(top = 2.dp)
+            .then(if (onOpen != null) Modifier.clickable(onClickLabel = "Open the parent chat", onClick = onOpen).heightIn(min = 32.dp) else Modifier),
+    )
 }
 
 /** A one-line preview of an agent's Markdown reply: link text without its address, no emphasis or code marks. */

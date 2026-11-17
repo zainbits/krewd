@@ -33,7 +33,7 @@ TOKEN = "test-token"
 async def hub(tmp_path):
     pool = await db.connect(DATABASE_URL)
     await pool.execute(
-        "drop table if exists session_agents, routine_triggers, routine_runs, routine_versions, routines, messages, events, approvals, sessions,"
+        "drop table if exists proposals, session_agents, routine_triggers, routine_runs, routine_versions, routines, messages, events, approvals, sessions,"
         " engines, devices, app_prefs, browser_locations, schema_version cascade"
     )
     settings = Settings(
@@ -918,3 +918,133 @@ async def test_trim_and_delete_free_a_chats_space(hub):
     assert attachment.exists() and transcript.exists()  # the agent may read these again
     await hub.delete_session(sid)
     assert not attachment.exists() and not transcript.exists()
+
+
+# chats that work for each other: side sessions, sub-agents, prompts to another chat
+
+
+async def results(hub: Hub, sid) -> list[dict]:
+    return [e["payload"] for e in await hub.events(0, sid) if e["kind"] == "user" and e["payload"].get("purpose") == "result"]
+
+
+async def test_a_sub_agents_reply_is_steered_back_into_its_parent(hub):
+    parent = await hub.create_session("slow")
+    pid = uuid.UUID(parent["id"])
+    await wait_for(hub, pid, "text", lambda p: p["role"] == "thought")
+    child = await hub.create_session("quick job", parent_id=pid, returns=True)
+    cid = uuid.UUID(child["id"])
+    assert child["kind"] == "subagent" and child["parent_id"] == str(pid) and child["parent_title"]
+    link = await wait_for(hub, pid, "link")
+    assert link == {"kind": "subagent", "chat_id": str(cid), "title": "quick job", "returns": True}
+    first = await wait_for(hub, cid, "user")
+    assert first["chats"][0]["id"] == str(pid) and first["chats"][0]["relation"] == "this chat's parent"
+    assert first["return_to"] == str(pid)
+    result = await wait_for(hub, pid, "user", lambda p: p.get("purpose") == "result")
+    assert "Hello world" in result["text"] and result["meta"]["from"] == str(cid) and result["meta"]["ok"]
+    assert result["delivery"] == "steer"
+    end = await wait_for(hub, pid, "turn_end")
+    assert "steered=Sub-agent" in assistant_text(await hub.events(0, pid))
+    assert end["stop_reason"] == "end_turn"
+    assert (await hub.get_session(pid))["waiting_on"] == []
+    links = await hub.links(pid)
+    assert [c["id"] for c in links["children"]] == [str(cid)]
+    assert (await hub.links(cid))["parent"]["id"] == str(pid)
+
+
+async def test_a_side_session_sends_nothing_back_but_its_parent_hears_of_it(hub):
+    parent = await hub.create_session("hi")
+    pid = uuid.UUID(parent["id"])
+    await wait_for(hub, pid, "turn_end")
+    child = await hub.create_session("look around", parent_id=pid)
+    cid = uuid.UUID(child["id"])
+    assert child["kind"] == "side" and child["waiting_on"] == []
+    await wait_for(hub, cid, "turn_end")
+    await asyncio.sleep(0.4)
+    assert await results(hub, pid) == []
+    carry = await hub.pool.fetchval("select carry from sessions where id = $1", pid)
+    assert "side session" in carry and str(cid) in carry
+    # Turning it into a sub-agent later: its next reply goes back.
+    await hub.update_session(cid, {"returns": True})
+    await hub.send(cid, "and now?")
+    result = await wait_for(hub, pid, "user", lambda p: p.get("purpose") == "result")
+    assert result["meta"]["from"] == str(cid)
+
+
+async def test_proposals_start_only_when_the_owner_sends_them(hub):
+    idle = await hub.create_session("hi")
+    iid = uuid.UUID(idle["id"])
+    await wait_for(hub, iid, "turn_end")
+    parent = await hub.create_session("slow")
+    pid = uuid.UUID(parent["id"])
+    await wait_for(hub, pid, "turn_start")
+    with pytest.raises(Exception, match="running turn"):
+        await hub.propose(iid, "new", "not asked")
+    proposal = await hub.propose(None, "new", "Check the fares to Pune", title="Fares", returns=True)
+    assert proposal["status"] == "pending" and proposal["session_id"] == str(pid)
+    assert (await wait_for(hub, pid, "proposal"))["id"] == proposal["id"]
+    assert [p["id"] for p in await hub.list_proposals()] == [proposal["id"]]
+    sent = await hub.send_proposal(uuid.UUID(proposal["id"]), text="Check the fares to Pune, Friday", returns=False)
+    assert sent["status"] == "sent"
+    child = await hub.get_session(uuid.UUID(sent["result_id"]))
+    assert child["title"] == "Fares" and child["parent_id"] == str(pid) and child["kind"] == "side"
+    with pytest.raises(Exception, match="sent"):
+        await hub.send_proposal(uuid.UUID(proposal["id"]))
+    other = await hub.propose(pid, "new", "Something else")
+    dismissed = await hub.dismiss_proposal(uuid.UUID(other["id"]))
+    assert dismissed["status"] == "dismissed" and await hub.list_proposals() == []
+    carry = await hub.pool.fetchval("select carry from sessions where id = $1", pid)
+    assert "started your proposed side session" in carry and "dismissed" in carry
+
+
+async def test_a_prompt_goes_only_to_an_attached_chat_and_its_reply_comes_back(hub):
+    b = await hub.create_session("hi")
+    bid = uuid.UUID(b["id"])
+    stranger = await hub.create_session("hi there")
+    await wait_for(hub, bid, "turn_end")
+    a = await hub.create_session("slow", chats=[{"id": str(bid)}])
+    aid = uuid.UUID(a["id"])
+    await wait_for(hub, aid, "turn_start")
+    with pytest.raises(Exception, match="attached"):
+        await hub.propose(aid, "prompt", "psst", target_id=uuid.UUID(stranger["id"]))
+    proposal = await hub.propose(aid, "prompt", "What did you find?", target_id=bid, returns=True)
+    assert proposal["target_title"]
+    await hub.send_proposal(uuid.UUID(proposal["id"]))
+    asked = await wait_for(hub, bid, "user", lambda p: p.get("purpose") == "prompt")
+    assert asked["text"].startswith('Message from Krewd chat "') and asked["return_to"] == str(aid)
+    assert asked["delivery"] == "queue"
+    result = await wait_for(hub, aid, "user", lambda p: p.get("purpose") == "result")
+    assert result["meta"]["kind"] == "chat" and "Hello world" in result["text"]
+    assert (await hub.get_session(aid))["waiting_on"] == []
+    who = [m["from"] for m in await hub.transcript(bid)]
+    assert any(w.startswith('Krewd chat "') for w in who)
+
+
+async def test_stop_keeps_replies_from_other_chats(hub):
+    parent = await hub.create_session("slow")
+    pid = uuid.UUID(parent["id"])
+    await wait_for(hub, pid, "turn_start")
+    result = await hub.send(pid, "a reply from elsewhere", delivery="queue", purpose="result", meta={"from": "x"})
+    mine = await hub.send(pid, "later", delivery="queue")
+    await hub.cancel(pid)
+    assert (await wait_for(hub, pid, "message", lambda p: p["id"] == mine["id"]))["state"] == "cancelled"
+    started = await wait_for(hub, pid, "message", lambda p: p["id"] == result["id"], timeout=15)
+    assert started["state"] == "delivered"
+
+
+async def test_a_deleted_or_interrupted_sub_agent_tells_its_parent(hub):
+    parent = await hub.create_session("hi")
+    pid = uuid.UUID(parent["id"])
+    await wait_for(hub, pid, "turn_end")
+    gone = await hub.create_session("slow", parent_id=pid, returns=True)
+    await wait_for(hub, uuid.UUID(gone["id"]), "turn_start")
+    await hub.delete_session(uuid.UUID(gone["id"]))
+    note = await wait_for(hub, pid, "user", lambda p: p.get("purpose") == "result")
+    assert not note["meta"]["ok"] and "No reply comes back" in note["text"]
+    cut = await hub.create_session("slow", parent_id=pid, returns=True)
+    cid = uuid.UUID(cut["id"])
+    await wait_for(hub, cid, "turn_start")
+    assert (await hub.get_session(pid))["waiting_on"] == [str(cid)]
+    await hub._recover()  # what a restart does to the turns it cut off
+    note = await wait_for(hub, pid, "user", lambda p: p.get("purpose") == "result" and p["meta"]["from"] == str(cid))
+    assert "interrupted by a Krewd restart" in note["text"]
+    assert (await hub.get_session(pid))["waiting_on"] == []

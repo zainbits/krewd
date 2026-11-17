@@ -53,21 +53,51 @@ import app.krewd.KrewdViewModel
 import app.krewd.NEW_DRAFT
 import app.krewd.R
 import app.krewd.UiState
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.KeyboardCapitalization
 import app.krewd.data.ConfigOption
+import app.krewd.data.Proposal
+import app.krewd.data.SessionInfo
+import app.krewd.proposalDraft
+import app.krewd.sideDraft
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
  * The new task, as a sheet over the Krewd tab: what to do, who does it (tap a face), one settings line, and
  * saved prompts. [initialEngine] is the agent whose face was tapped, else the last one used.
+ *
+ * The same sheet starts a side session of [parent] (from a chat's settings), and sends an agent's [proposal] as
+ * the owner edits it: a new side session or sub-agent (with its agent and settings), or a message to another chat.
  */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class, ExperimentalFoundationApi::class)
 @Composable
-fun NewTaskSheet(state: UiState, viewModel: KrewdViewModel, initialEngine: String?, onDismiss: () -> Unit, onOpenSettings: () -> Unit) {
+fun NewTaskSheet(
+    state: UiState,
+    viewModel: KrewdViewModel,
+    initialEngine: String?,
+    onDismiss: () -> Unit,
+    onOpenSettings: () -> Unit,
+    parent: SessionInfo? = null,
+    proposal: Proposal? = null,
+) {
     val sheet = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val scope = rememberCoroutineScope()
     val close: () -> Unit = { scope.launch { sheet.hide() }.invokeOnCompletion { onDismiss() } }
-    var engineId by remember { mutableStateOf(initialEngine ?: viewModel.lastEngine()) }
+    // Which draft the text, files and @ chats belong to: the new task's, a side session's, or a proposal's.
+    val draftKey = proposal?.let { proposalDraft(it.id) } ?: parent?.let { sideDraft(it.id) } ?: NEW_DRAFT
+    val plainTask = proposal == null && parent == null
+    val promptOnly = proposal?.isPrompt == true
+    // The chat this is about: the side session's parent, or the chat whose agent proposed it. It goes along by itself.
+    val aboutId = parent?.id ?: proposal?.sessionId
+    val aboutTitle = parent?.title ?: proposal?.let { p -> state.session(p.sessionId)?.title ?: p.sessionTitle } ?: "this chat"
+    var returns by remember(draftKey) { mutableStateOf(proposal?.returns ?: false) }
+    var title by remember(draftKey) { mutableStateOf(proposal?.title.orEmpty()) }
+    var sending by remember { mutableStateOf(false) }
+    var engineId by remember { mutableStateOf(proposal?.engine ?: initialEngine ?: viewModel.lastEngine()) }
     val engine = state.engines.firstOrNull { it.id == engineId } ?: state.engines.firstOrNull { it.isDefault } ?: state.engines.firstOrNull()
     val options = ConfigOption.ordered(viewModel.engineConfig(engine?.id))
     // Each agent starts with the owner's last picks for it (model, effort, permission mode, auto-approve).
@@ -84,16 +114,34 @@ fun NewTaskSheet(state: UiState, viewModel: KrewdViewModel, initialEngine: Strin
     }
     var settingsOpen by remember { mutableStateOf(false) }
     val online = state.connection is Connection.Online
-    val text = state.newTaskText
-    // The field keeps its own cursor; the text itself lives in the view model (saved prompts set it too).
-    var field by remember { mutableStateOf(TextFieldValue(text, TextRange(text.length))) }
+    // The new task's text lives in the view model (saved prompts set it too); a side session's or proposal's here,
+    // kept on the phone under its own draft key.
+    var ownText by remember(draftKey) {
+        mutableStateOf(viewModel.messageDraft(draftKey).ifBlank { proposal?.text.orEmpty() })
+    }
+    val text = if (plainTask) state.newTaskText else ownText
+    val setText: (String) -> Unit = {
+        if (plainTask) viewModel.setNewTaskText(it) else {
+            ownText = it
+            viewModel.setMessageDraft(draftKey, it)
+        }
+    }
+    // The field keeps its own cursor.
+    var field by remember(draftKey) { mutableStateOf(TextFieldValue(text, TextRange(text.length))) }
     if (field.text != text) field = TextFieldValue(text, TextRange(text.length))
-    val query = if (field.selection.collapsed) commandQuery(field.text, field.selection.start) else null
+    val mention = if (field.selection.collapsed) mentionQuery(field.text, field.selection.start) else null
+    val query = if (field.selection.collapsed && mention == null) commandQuery(field.text, field.selection.start) else null
     val matches = remember(engine?.commands, query) { matchCommands(engine?.commands.orEmpty(), query) }
-    val files = state.draft(NEW_DRAFT)
-    val pickFiles = rememberFilePicker { viewModel.attach(NEW_DRAFT, it) }
+    val chats = state.chatsOf(draftKey)
+    if (mention != null && mention.typed.isNotEmpty()) LaunchedEffect(Unit) { viewModel.loadArchived() }
+    val candidates = mention?.let { m ->
+        mentionCandidates(state, aboutId, m.typed, chats.mapTo(HashSet()) { it.id } + listOfNotNull(aboutId, proposal?.targetId))
+    }
+    val files = state.draft(draftKey)
+    val pickFiles = rememberFilePicker { viewModel.attach(draftKey, it) }
     val focus = remember { FocusRequester() }
-    val canSend = online && (text.isNotBlank() || files.any { it.uploadId != null }) && files.none { it.uploading }
+    val canSend = online && !sending && (text.isNotBlank() || files.any { it.uploadId != null }) && files.none { it.uploading } &&
+        (proposal == null || proposal.pending)
     val selected: (ConfigOption) -> String? = { picks[it.id] ?: it.current }
 
     LaunchedEffect(Unit) { focus.requestFocus() }
@@ -119,11 +167,57 @@ fun NewTaskSheet(state: UiState, viewModel: KrewdViewModel, initialEngine: Strin
                 Connection.NotSetUp -> TextButton(onClick = { close(); onOpenSettings() }) { Text("Set up the connection first") }
                 else -> {}
             }
-            Text("Ask Krewd", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(start = 4.dp, top = 2.dp))
-            if (query != null) {
+            Text(
+                when {
+                    proposal != null -> "${proposal.sessionTitle ?: aboutTitle} proposes ${proposal.what}"
+                    parent != null -> "Side session of $aboutTitle"
+                    else -> "Ask Krewd"
+                },
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 2,
+                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                modifier = Modifier.padding(start = 4.dp, top = 2.dp),
+            )
+            if (!plainTask) {
+                Text(
+                    when {
+                        promptOnly -> "It goes to that chat as a message from $aboutTitle, after its current turn."
+                        else -> "A fresh chat. “$aboutTitle” is attached to its first message, so it can look things up there."
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(start = 4.dp, top = 2.dp),
+                )
+            }
+            if (proposal != null && !proposal.pending) {
+                Text(
+                    "This proposal was ${if (proposal.status == "void") "for a chat that is gone" else proposal.status}.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.padding(start = 4.dp, top = 4.dp),
+                )
+            }
+            if (proposal != null && !promptOnly) {
+                OutlinedTextField(
+                    value = title,
+                    onValueChange = { title = it.take(200) },
+                    label = { Text("Title") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
+                    modifier = Modifier.fillMaxWidth().padding(top = 10.dp),
+                )
+            }
+            if (candidates != null) {
+                ChatSuggestions(candidates, state.engines, onPick = {
+                    field = removeMention(field, mention!!)
+                    setText(field.text)
+                    viewModel.addDraftChat(draftKey, it.ref())
+                }, Modifier.padding(top = 6.dp))
+            } else if (query != null) {
                 CommandSuggestions(matches, onPick = {
                     field = applyCommand(field, query, it)
-                    viewModel.setNewTaskText(field.text)
+                    setText(field.text)
                 }, Modifier.padding(top = 6.dp))
             }
             val colors = MaterialTheme.colorScheme
@@ -136,7 +230,7 @@ fun NewTaskSheet(state: UiState, viewModel: KrewdViewModel, initialEngine: Strin
                 value = field,
                 onValueChange = {
                     field = it
-                    viewModel.setNewTaskText(it.text)
+                    setText(it.text)
                 },
                 visualTransformation = highlight,
                 onTextLayout = { layout = it },
@@ -152,14 +246,47 @@ fun NewTaskSheet(state: UiState, viewModel: KrewdViewModel, initialEngine: Strin
                 decorationBox = { inner ->
                     Box(Modifier.padding(horizontal = 16.dp, vertical = 16.dp)) {
                         if (field.text.isEmpty()) {
-                            Text("What should Krewd do?", fontSize = 22.sp, color = colors.onSurfaceVariant)
+                            Text(
+                                if (promptOnly) "The message" else if (plainTask) "What should Krewd do? @ adds a chat" else "What should it do?",
+                                fontSize = 22.sp,
+                                color = colors.onSurfaceVariant,
+                            )
                         }
                         Box(Modifier.commandPills(layout, ranges, ink.copy(alpha = 0.16f))) { inner() }
                     }
                 },
             )
-            PendingFiles(files, onRemove = { viewModel.removeAttachment(NEW_DRAFT, it) })
-            if (state.engines.isNotEmpty()) {
+            PendingFiles(files, onRemove = { viewModel.removeAttachment(draftKey, it) })
+            DraftChatChips(chats, onRemove = { viewModel.removeDraftChat(draftKey, it) }, Modifier.padding(top = 4.dp))
+            if (!plainTask) {
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 48.dp)
+                        .padding(top = 6.dp)
+                        .combinedClickable(onClick = { returns = !returns }),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Checkbox(checked = returns, onCheckedChange = { returns = it })
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            when {
+                                promptOnly -> "Send its reply back to $aboutTitle"
+                                proposal != null -> "Send the reply back to $aboutTitle"
+                                else -> "Send replies back to $aboutTitle"
+                            },
+                            style = MaterialTheme.typography.bodyLarge,
+                        )
+                        Text(
+                            if (returns) (if (promptOnly) "Its reply to this message comes back there by itself." else "A sub-agent: each reply it finishes comes back there by itself.")
+                            else (if (promptOnly) "Nothing comes back." else "A side session: nothing comes back; it can be read from there when asked."),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+            if (state.engines.isNotEmpty() && !promptOnly) {
                 SheetLabel("Who")
                 CrewPicker(crewMembers(state), engine?.id, onPick = {
                     engineId = it
@@ -170,15 +297,15 @@ fun NewTaskSheet(state: UiState, viewModel: KrewdViewModel, initialEngine: Strin
                     Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(start = 4.dp, top = 6.dp))
                 }
             }
-            if (engine != null) {
+            if (engine != null && !promptOnly) {
                 SettingsLine(
                     settingsSummary(options, selected, autoApprove),
                     onClick = { settingsOpen = true },
                     modifier = Modifier.padding(top = 10.dp),
                 )
             }
-            SheetLabel("Saved prompts", trailing = if (state.savedPrompts.isNotEmpty()) "Long-press to remove" else null)
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (plainTask) SheetLabel("Saved prompts", trailing = if (state.savedPrompts.isNotEmpty()) "Long-press to remove" else null)
+            if (plainTask) FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 state.savedPrompts.forEach { prompt ->
                     Surface(
                         shape = RoundedCornerShape(12.dp),
@@ -218,22 +345,56 @@ fun NewTaskSheet(state: UiState, viewModel: KrewdViewModel, initialEngine: Strin
             }
         }
             Row(Modifier.fillMaxWidth().padding(start = 18.dp, end = 18.dp, top = 14.dp, bottom = 18.dp), verticalAlignment = Alignment.CenterVertically) {
-                FilledTonalIconButton(onClick = pickFiles, enabled = online, modifier = Modifier.size(48.dp)) {
-                    Icon(painterResource(R.drawable.ic_attach_24), contentDescription = "Attach files")
+                // A proposal is sent as text; files go with an ordinary message instead.
+                if (proposal == null) {
+                    FilledTonalIconButton(onClick = pickFiles, enabled = online, modifier = Modifier.size(48.dp)) {
+                        Icon(painterResource(R.drawable.ic_attach_24), contentDescription = "Attach files")
+                    }
+                } else if (proposal.pending) {
+                    TextButton(onClick = { viewModel.dismissProposal(proposal); close() }) { Text("Dismiss") }
                 }
                 Spacer(Modifier.weight(1f))
                 FilledIconButton(
                     onClick = {
-                        viewModel.newTask(text.trim(), autoApprove, engine?.id, picks)
-                        viewModel.setNewTaskText("")
-                        close()
+                        when {
+                            proposal != null -> {
+                                sending = true
+                                viewModel.sendProposal(proposal, text.trim(), title.trim(), engine?.id, picks, returns, draftKey) { _, error ->
+                                    sending = false
+                                    if (error == null) {
+                                        viewModel.setMessageDraft(draftKey, "")
+                                        close()
+                                    } else {
+                                        viewModel.toast(error)
+                                    }
+                                }
+                            }
+                            parent != null -> {
+                                viewModel.newTask(text.trim(), autoApprove, engine?.id, picks, draft = draftKey, parentId = parent.id, returns = returns)
+                                viewModel.setMessageDraft(draftKey, "")
+                                close()
+                            }
+                            else -> {
+                                viewModel.newTask(text.trim(), autoApprove, engine?.id, picks)
+                                viewModel.setNewTaskText("")
+                                close()
+                            }
+                        }
                     },
                     enabled = canSend,
                     shape = RoundedCornerShape(24.dp),
                     colors = IconButtonDefaults.filledIconButtonColors(),
                     modifier = Modifier.size(64.dp),
                 ) {
-                    Icon(painterResource(R.drawable.ic_send_24), contentDescription = "Start task", modifier = Modifier.size(26.dp))
+                    Icon(
+                        painterResource(R.drawable.ic_send_24),
+                        contentDescription = when {
+                            promptOnly -> "Send the message"
+                            proposal != null || parent != null -> if (returns) "Start the sub-agent" else "Start the side session"
+                            else -> "Start task"
+                        },
+                        modifier = Modifier.size(26.dp),
+                    )
                 }
             }
         }

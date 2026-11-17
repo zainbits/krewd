@@ -92,7 +92,7 @@ async def hub(tmp_path, monkeypatch):
     monkeypatch.setattr(api_module.asyncio, "sleep", _no_sleep)
     pool = await db.connect(DATABASE_URL)
     await pool.execute(
-        "drop table if exists session_agents, routine_triggers, routine_runs, routine_versions, routines, messages, events,"
+        "drop table if exists proposals, session_agents, routine_triggers, routine_runs, routine_versions, routines, messages, events,"
         " approvals, sessions, engines, devices, app_prefs, schema_version cascade"
     )
     cert, key = tmp_path / "tls.crt", tmp_path / "tls.key"

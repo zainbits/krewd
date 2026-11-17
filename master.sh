@@ -204,6 +204,8 @@ PY
     || warn "$workdir/AGENTS.md has no Krewd section" "copy deploy/agents-section.md into it"
   grep -qs "krewd routines" "$workdir/AGENTS.md" && ok "Krewd's agent instructions cover routines" \
     || warn "$workdir/AGENTS.md has an older Krewd section (no routines)" "replace it with deploy/agents-section.md"
+  grep -qs "krewd side propose" "$workdir/AGENTS.md" && ok "Krewd's agent instructions cover side sessions and sub-agents" \
+    || warn "$workdir/AGENTS.md has an older Krewd section (no side sessions)" "add the side-session rules from deploy/agents-section.md"
   [[ "$(readlink -f "$HOME/.local/bin/krewd" 2>/dev/null)" == "$(readlink -f "$REPO/deploy/krewd-cli.sh")" ]] && ok "krewd command (~/.local/bin/krewd)" \
     || warn "the krewd command is not installed" "./master.sh setup (links ~/.local/bin/krewd to deploy/krewd-cli.sh)"
   [[ -e "$HOME/.agents/skills/browser-harness" ]] && ok "browser-harness skill is installed" \

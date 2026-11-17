@@ -57,6 +57,85 @@ Rules for agents:
 """
 
 
+SIDE_RULES = """\
+Rules for agents:
+  - Only when the owner explicitly asks in the chat for a side session, a sub-agent or a message to another
+    chat. Otherwise answer inline. Big or slow work is not a request.
+  - You only draft. Nothing starts until the owner sends it from the app, where they can edit it and pick the
+    agent and model. Never poll or sleep for a reply: keep working or end your turn; a reply comes in by itself.
+  - Write the opening prompt self-contained: the new chat does not have your context (it can read yours with
+    `krewd chat history`, since your chat is attached to it).
+"""
+
+
+def _text_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--chat-id", dest="from_chat", help="your chat's id (from your first prompt); needed when "
+                   "several chats are running")
+    g = p.add_mutually_exclusive_group(required=True)
+    g.add_argument("--text", help="the message")
+    g.add_argument("--file", help="read the message from this file (- for stdin)")
+
+
+def _text(args: argparse.Namespace) -> str:
+    if args.text is not None:
+        return args.text
+    if args.file == "-":
+        return sys.stdin.read()
+    with open(os.path.expanduser(args.file)) as f:
+        return f.read()
+
+
+def _chat_id(prefix: str) -> str:
+    ids = [s["id"] for s in call("GET", "/api/sessions") + call("GET", "/api/sessions?archived=true")
+           if s["id"].startswith(prefix.lower())]
+    if len(ids) != 1:
+        raise CliError(f"{prefix!r} matches {len(ids)} chats; give more characters of the chat id")
+    return ids[0]
+
+
+def _proposed(p: dict[str, Any]) -> None:
+    what = {"new": "sub-agent" if p["returns"] else "side session", "prompt": "message"}[p["kind"]]
+    to = f" to chat \"{p['target_title']}\"" if p["kind"] == "prompt" else f" \"{p['title']}\""
+    print(f"Proposed {what}{to} ({p['id'][:8]}). The owner sees it in the app and sends it or not; you hear "
+          "which. Do not wait or poll for it: carry on or end your turn.")
+
+
+def _side(args: argparse.Namespace) -> int:
+    if args.side_action == "propose":
+        body = {"kind": "new", "text": _text(args), "title": args.title, "returns": args.mode == "subagent",
+                "engine": args.engine}
+        if args.from_chat:
+            body["session_id"] = _chat_id(args.from_chat)
+        _proposed(call("POST", "/api/proposals", body))
+        return 0
+    if args.from_chat:
+        chat = _chat_id(args.from_chat)
+    else:
+        running = [s["id"] for s in call("GET", "/api/sessions") if s["status"] in ("running", "waiting")]
+        if len(running) != 1:
+            raise CliError("give --chat-id (your chat's id is in your first prompt)")
+        chat = running[0]
+    links = call("GET", f"/api/sessions/{chat}/links")
+
+    def line(s: dict[str, Any], label: str) -> str:
+        return f"  {label:<11} {s['id']}  {s['status']:<7} {s['title']}"
+
+    if links["parent"]:
+        print(line(links["parent"], "parent"))
+    for c in links["children"]:
+        print(line(c, c["kind"] or "side"))
+    waits = [w for w in links["waiting_on"] if w["id"] not in {c["id"] for c in links["children"]}]
+    for w in waits:
+        print(line(w, "prompted"))
+    owed = links["session"]["waiting_on"]
+    if owed:
+        print(f"Waiting on {len(owed)} chat(s) for a reply; it comes into this chat by itself.")
+    if not (links["parent"] or links["children"] or waits):
+        print("No parent, side sessions or sub-agents.")
+    print("Read one with `krewd chat history <chat id> --last 30`.")
+    return 0
+
+
 class CliError(Exception):
     pass
 
@@ -304,6 +383,24 @@ def main(argv: list[str] | None = None) -> int:
     hist.add_argument("chat")
     hist.add_argument("--last", type=int, default=30, help="how many messages from the end (default 30)")
     hist.add_argument("--after", type=int, default=0, help="only messages after this event seq")
+    prompt = csub.add_parser("prompt", help="draft a message to another chat; it goes only when the owner sends it",
+                             epilog=SIDE_RULES, formatter_class=argparse.RawDescriptionHelpFormatter)
+    prompt.add_argument("chat", help="the chat to message: one the owner attached with @, or a linked one")
+    prompt.add_argument("--reply", action="store_true", help="its reply to this message comes back to your chat")
+    _text_args(prompt)
+
+    side = sub.add_parser("side", help="side sessions and sub-agents of a chat (only when the owner asks)",
+                          epilog=SIDE_RULES, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sidesub = side.add_subparsers(dest="side_action", required=True)
+    prop = sidesub.add_parser("propose", help="draft a new side session or sub-agent; the owner picks the agent "
+                              "and model and sends it", epilog=SIDE_RULES, formatter_class=argparse.RawDescriptionHelpFormatter)
+    prop.add_argument("--mode", choices=["side", "subagent"], required=True,
+                      help="subagent: each reply it finishes comes back to your chat; side: nothing comes back")
+    prop.add_argument("--title", default="", help="a short title for the new chat")
+    prop.add_argument("--engine", help="the agent to suggest (the owner can change it); default: the owner's pick")
+    _text_args(prop)
+    lst = sidesub.add_parser("list", help="this chat's parent, side sessions, sub-agents and the chats it waits on")
+    lst.add_argument("--chat-id", dest="from_chat", help="your chat's id (default: the one chat running a turn)")
 
     secret = sub.add_parser("secret", help="ask the owner to fill a sign-in or code on the phone (never shown to you)")
     ssub = secret.add_subparsers(dest="secret_action", required=True)
@@ -378,12 +475,17 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
     try:
+        if args.cmd == "side":
+            return _side(args)
+        if args.cmd == "chat" and args.chat_action == "prompt":
+            body = {"kind": "prompt", "text": _text(args), "returns": args.reply, "target_id": _chat_id(args.chat)}
+            if args.from_chat:
+                body["session_id"] = _chat_id(args.from_chat)
+            _proposed(call("POST", "/api/proposals", body))
+            return 0
         if args.cmd == "chat":
-            ids = [s["id"] for s in call("GET", "/api/sessions") + call("GET", "/api/sessions?archived=true")
-                   if s["id"].startswith(args.chat.lower())]
-            if len(ids) != 1:
-                raise CliError(f"{args.chat!r} matches {len(ids)} chats; give more characters of the chat id")
-            for m in call("GET", f"/api/sessions/{ids[0]}/transcript?after={args.after}&last={args.last}"):
+            chat_id = _chat_id(args.chat)
+            for m in call("GET", f"/api/sessions/{chat_id}/transcript?after={args.after}&last={args.last}"):
                 print(f"[{m['seq']}] {m['from']}:\n{m['text'].strip()}\n")
             return 0
         if args.cmd == "secret":

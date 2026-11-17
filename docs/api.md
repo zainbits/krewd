@@ -42,12 +42,17 @@ Krewd's certificate is self-signed; clients trust it by its pin, `sha256/` + bas
 | `POST /api/agents/{engine}/logout` | | the new status. |
 | `GET /api/codex-catalog/{secret}/{engine}` | none (the secret) | Codex's model catalog for Codex while it runs on a profile, built from the gateway's model list. Only Krewd's own Codex processes get the URL (`model_catalog_url`), with a secret made at each start; anything else gets 404. 502 when the gateway cannot be reached. |
 | `GET /api/sessions?archived=false` | | sessions, pinned first, newest first |
-| `POST /api/sessions` | `{text, engine?, mode?, auto_approve?, config?: {config_id: value}, attachments?: [upload_id], tabs?: [{id, title, url}], client_id?}` | the new session; its first turn starts at once |
+| `POST /api/sessions` | `{text, engine?, mode?, auto_approve?, config?: {config_id: value}, attachments?: [upload_id], tabs?: [{id, title, url}], chats?: [{id}], parent_id?, returns?, title?, client_id?}` | the new session; its first turn starts at once. With `parent_id` it is a side session of that chat (a sub-agent with `returns`), see Side sessions |
 | `GET /api/sessions/{id}` | | session |
 | `DELETE /api/sessions/{id}` | | `{ok}`; stops the task's turn, closes its agent session where the agent supports it, and deletes its history, approvals and messages, its attachments and tool images, and the agent's transcripts of its sessions (the app waits 3 s for Undo before calling this) |
 | `POST /api/sessions/{id}/trim` | | `{repeats_bytes, tools_bytes, images_bytes, bytes}`; shrinks the chat's history in Krewd (see Storage); 409 while it works |
 | `PATCH /api/sessions/{id}` | `{title?, auto_approve?, pinned?, archived?, mode?, config?: {config_id: value}}` | session |
-| `POST /api/sessions/{id}/messages` | `{text, attachments?, tabs?, delivery?: steer\|queue\|interrupt, client_id?}` | `{ok, message}` (see Messages below) |
+| `POST /api/sessions/{id}/messages` | `{text, attachments?, tabs?, chats?: [{id}], delivery?: steer\|queue\|interrupt, client_id?}` | `{ok, message}` (see Messages below) |
+| `GET /api/sessions/{id}/links` | | `{session, parent, children, waiting_on}`: the chat's parent, its side sessions and sub-agents, and the chats that owe it a reply (session objects) |
+| `GET /api/proposals?status=pending&session_id=` | | proposals (see Side sessions); `status` empty for all |
+| `POST /api/proposals` | `{session_id?, kind: new\|prompt, text, title?, engine?, returns?, target_id?}` | the proposal (201), for the agents (`krewd side propose`, `krewd chat prompt`); 409 outside a running turn of that chat, or for a chat neither attached with @ nor linked |
+| `POST /api/proposals/{id}/send` | `{text?, title?, engine?, mode?, config?, returns?, chats?}` | the proposal, `sent`, with `result_id` (the chat started or messaged). Not with the machine's own token (403): only the owner sends one, from the app. 409 when it is no longer pending |
+| `POST /api/proposals/{id}/dismiss` | | the proposal, `dismissed` |
 | `POST /api/sessions/{id}/cancel` | | `{ok}`; stops the turn, answers its open approvals with "cancelled" and drops the messages queued behind it |
 | `POST /api/sessions/{id}/engine` | `{engine, config?, mode?}` | `{ok, message}`; moves the chat to another agent after the running turn (see Switching agents) |
 | `GET /api/sessions/{id}/transcript?after=0&last=N` | | the chat as messages `[{seq, from, text}]` (owner, agents, Krewd notes), without tool calls or thinking |
@@ -58,13 +63,15 @@ Krewd's certificate is self-signed; clients trust it by its pin, `sha256/` + bas
 | `GET /api/approvals?status=pending` | | approvals |
 | `POST /api/approvals/{id}` | `{option_id}` | the decided approval; 409 if it is no longer waiting |
 
-Session: `{id, engine, title, status (idle|running|waiting|error), mode, modes, auto_approve, usage, last_text, pinned, archived, pending_approvals, browser_tab, routine_id, compact, commands, created_at, updated_at}`. `commands` `[{name, description, hint}]` are the agent's own slash commands and skills from ACP `available_commands_update`, sorted by name (Codex names its skills `$name`, the others plain). The app suggests them in the composer; a pick is sent as ordinary text (`/name args`, or `$name args` for Codex), which the agent itself turns into the command. `routine_id` is set on a routine's own chat. `compact` is `native` when the agent advertises a `compact` slash command (ACP `available_commands_update`), else `handover`. `pinned` sessions come first in the list. `browser_tab` `{id, url, title}` is the tab the agent last used (see The agents' browser). `modes` is what the agent advertises (ACP `availableModes`), so the app shows each agent's own modes.
+Session: `{id, engine, title, status (idle|running|waiting|error), mode, modes, auto_approve, usage, last_text, pinned, archived, pending_approvals, browser_tab, routine_id, compact, commands, created_at, updated_at}`. `commands` `[{name, description, hint}]` are the agent's own slash commands and skills from ACP `available_commands_update`, sorted by name (Codex names its skills `$name`, the others plain). The app suggests them in the composer; a pick is sent as ordinary text (`/name args`, or `$name args` for Codex), which the agent itself turns into the command. `routine_id` is set on a routine's own chat. `compact` is `native` when the agent advertises a `compact` slash command (ACP `available_commands_update`), else `handover`. `pinned` sessions come first in the list. Side sessions: `parent_id`, `parent_title`, `returns`, `kind` (`side`, `subagent` or null) and `waiting_on` (ids of the chats that owe this one a reply). `browser_tab` `{id, url, title}` is the tab the agent last used (see The agents' browser). `modes` is what the agent advertises (ACP `availableModes`), so the app shows each agent's own modes.
 
 Harness, model and effort (agent-agnostic): sessions also carry `agent` (ACP `agentInfo`: `{name, title, version}`), `config_options` (the agent's ACP `configOptions`, flattened: `[{id, name, description, category, type, current, options: [{value, name, description, group?}]}]`; categories include `model`, `thought_level` (effort) and `mode`), `config` (the user's picks, re-sent to the agent after a restart) and `model_used` (the model the agent reported for its last step, from usage metadata). Setting `config` calls ACP `session/set_config_option`; the agent's reply replaces `config_options` (a model change can change the effort choices).
 
 Event: `{seq, session_id, kind, payload, created_at}`. Kinds:
 
-- `user` `{text, message_id, delivery, client_id?, attachments?, tabs?, purpose?, meta?}`: `purpose` is set when Krewd sent the message itself: `routine` (a run; `meta` `{routine_id, run_id, title, trigger, version}`) or `compact` (`meta` `{how}`)
+- `user` `{text, message_id, delivery, client_id?, attachments?, tabs?, chats?, return_to?, purpose?, meta?}`: `chats` `[{id, title, relation, engine}]` are chats attached with @; `return_to` is the chat that gets this turn's reply. `purpose` is set when Krewd sent the message itself: `routine` (a run; `meta` `{routine_id, run_id, title, trigger, version}`), `compact` (`meta` `{how}`), `result` (a reply or a note sent back from another chat; `meta` `{from, from_title, kind: sub-agent|chat, ok, hops}`) or `prompt` (a message another chat sent with the owner's OK; `meta` `{from, from_title, returns}`)
+- `proposal` proposal object, on the proposing chat, whenever it is made, sent or dismissed
+- `link` `{kind: side|subagent|prompt, chat_id, title, returns}`: this chat started a side session or sub-agent, or sent a message to another chat
 - `routine` routine object (without runs) whenever it or its runs change, on the routine's chat; `{id, deleted: true}` when deleted
 - `compact` `{how: native|handover, ok}`: a compaction finished
 - `switch` `{from, to, from_name, to_name, from_session, summary}`: the chat moved to another agent
@@ -96,6 +103,15 @@ One chat can move between agents (Claude Code, Codex, any ACP agent) and stays o
 ## Compact
 
 Where the agent advertises a `compact` slash command (Claude Code and Codex do), Krewd sends `/compact` as the next prompt and the agent keeps its session. Otherwise the agent is asked for a handover summary; Krewd then closes that agent session, opens a fresh one in the same chat, and puts the handover in front of the next message. The chat history in Krewd is never changed. `usage` is cleared after a handover.
+
+## Side sessions
+
+A side session is an ordinary chat with a parent (`parent_id`). With `returns` on it is a sub-agent: each reply it finishes is sent back to the parent as a `result` message, always with `delivery: steer` (into the running turn, else it starts the next one). With it off nothing goes back; the parent reads it when asked (`krewd chat history`). `returns` can be switched later (`PATCH`); it applies to replies finished from then on. A side session's first message has its parent attached, and the parent hears of it before its next prompt and gets a `link` event.
+
+- Replies owed: a message with `return_to` owes that chat the reply of the turn it ran in or was steered into. In a sub-agent every message gets it except Krewd's own (`compact`, `switch`, `routine`); chained replies stop after 4 hops. A turn that is stopped, fails, is cut by a restart, or whose chat is deleted sends a note instead (`ok: false`), so a chat never waits forever. `waiting_on` counts what is still owed.
+- Stop drops the queued messages of the owner, never `result` messages: they run next.
+- Proposals: an agent drafts a new chat (`kind: new`, `returns` for a sub-agent) or a message to another chat (`kind: prompt`, only to a chat attached with @ in that chat or linked to it; it is queued there, so it gets its own turn, and with `returns` its reply comes back). It stays `pending` until the owner sends (possibly edited, with another agent, model or `returns`) or dismisses it; `void` when its target is deleted. The proposing chat hears what happened before its next prompt.
+- A new agent session's first prompt ends with `(This is Krewd chat <id>.)`, so agents can name their chat to `krewd side` and `krewd chat`.
 
 ## Routines
 

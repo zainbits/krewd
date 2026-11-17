@@ -43,6 +43,9 @@ PREVIEW_MAX = 280
 SCHEDULER_TICK = 15  # seconds between looks for due routines
 PROBE_RETRY = 60.0  # seconds before probing an engine again after a failed probe
 RUN_SUMMARY_MAX = 2000
+RESULT_MAX = 20000  # characters of a reply sent back to the chat that asked for it
+MAX_HOPS = 4  # replies sent back in a chain (a sub-agent of a sub-agent...) before the next one stops owing one
+NO_RETURN = ("compact", "switch", "routine")  # Krewd's own turns: their replies never go back to another chat
 NOTES_MAX = 8000
 TRIGGER_NAME = re.compile(r"^[a-z0-9][a-z0-9 _-]{0,39}$")
 HANDOVER_PROMPT = (
@@ -91,6 +94,7 @@ class Runtime:
     assistant_run: str | None = None
     assistant_text: str = ""
     usage: dict[str, Any] | None = None
+    turn_messages: list[uuid.UUID] = field(default_factory=list)  # messages the running turn started with or took in
 
 
 def _mtime(path: Any) -> float:
@@ -196,6 +200,26 @@ def _with_tabs(text: str, tabs: list[dict[str, Any]] | None) -> str:
     return (text + "\n\n" if text else "") + "\n".join(lines)
 
 
+def _with_chats(text: str, chats: list[dict[str, Any]] | None) -> str:
+    """The message plus the Krewd chats the owner attached with @: ids to read, not their transcripts."""
+    if not chats:
+        return text
+    lines = ["The owner attached these Krewd chats to this message. Read one only as far as you need, with "
+             "`krewd chat history <chat id> --last 30`:"]
+    for c in chats:
+        about = f", {c['relation']}" if c.get("relation") else ""
+        lines.append(f"- \"{c.get('title') or 'Untitled'}\" (chat id {c.get('id')}{about})")
+    return (text + "\n\n" if text else "") + "\n".join(lines)
+
+
+def _prompt_text(text: str, tabs: list[dict[str, Any]] | None, chats: list[dict[str, Any]] | None) -> str:
+    return _with_chats(_with_tabs(text, tabs), chats)
+
+
+def _short(session_id: Any) -> str:
+    return str(session_id)[:8]
+
+
 def _first_line(text: str, limit: int) -> str:
     line = text.strip().splitlines()[0] if text.strip() else ""
     return line if len(line) <= limit else line[: limit - 1] + "…"
@@ -290,6 +314,11 @@ class Hub:
         for row in interrupted:
             await self.emit(row["id"], "error", {"message": "Krewd restarted during this turn. Send a message to continue."})
             await self.emit(row["id"], "turn_end", {"stop_reason": "error"})
+        # Replies owed by turns the restart cut off: the chats waiting on them hear why nothing comes.
+        owed = await self.pool.fetch(
+            """select id from messages where state = 'delivered' and return_to is not null and returned_at is null"""
+        )
+        await self._owed_notes([r["id"] for r in owed], "was interrupted by a Krewd restart")
 
     # engines
 
@@ -741,16 +770,46 @@ class Hub:
         attachments: list[str] | None = None,
         tabs: list[dict[str, Any]] | None = None,
         client_id: str | None = None,
+        chats: list[dict[str, Any]] | None = None,
+        parent_id: uuid.UUID | None = None,
+        returns: bool = False,
+        title: str | None = None,
+        told: bool = True,
     ) -> dict[str, Any]:
+        """A new chat; with `parent_id` a side session of that chat (a sub-agent with `returns`).
+
+        A side session gets its parent attached to its first message. Its parent hears of it before its own next
+        prompt (`told`; a sent proposal tells it itself) and shows it in its timeline.
+        """
         if attachments:
             for upload_id in attachments:
                 if not (self.attachments.incoming / f"{upload_id}.json").is_file():
                     raise NotFound(f"unknown upload {upload_id}")
+        if parent_id:
+            await self.get_session(parent_id)
+            if not any(str((c.get("id") if isinstance(c, dict) else c)) == str(parent_id) for c in chats or []):
+                chats = [{"id": str(parent_id)}, *(chats or [])]
         session_id = await self._insert_session(
-            _first_line(text, TITLE_MAX) or self._upload_name(attachments) or "New task", engine, mode, auto_approve, config
+            (title or "").strip()[:200] or _first_line(text, TITLE_MAX) or self._upload_name(attachments) or "New task",
+            engine, mode, auto_approve, config, title_locked=bool((title or "").strip()),
         )
-        await self.send(session_id, text, attachments, tabs=tabs, client_id=client_id)
-        return await self.get_session(session_id)
+        if parent_id:
+            await self.pool.execute(
+                "update sessions set parent_id = $2, returns = $3 where id = $1", session_id, parent_id, returns
+            )
+        await self.send(session_id, text, attachments, tabs=tabs, client_id=client_id, chats=chats)
+        session = await self.get_session(session_id)
+        if parent_id:
+            what = "sub-agent" if returns else "side session"
+            await self.emit(parent_id, "link", {"kind": "subagent" if returns else "side", "chat_id": str(session_id),
+                                               "title": session["title"], "returns": returns})
+            if told:
+                follow = ("each reply it finishes comes back to this chat" if returns else
+                          f"nothing comes back; read it when the owner asks, with `krewd chat history {_short(session_id)}`")
+                await self._add_carry(parent_id, f"Krewd note: the owner started a {what} of this chat, "
+                                                 f"\"{session['title']}\" (Krewd chat {session_id}); {follow}.")
+            await self.emit_session(parent_id)
+        return session
 
     async def _insert_session(
         self, title: str, engine: str | None, mode: str | None, auto_approve: bool, config: dict[str, str] | None,
@@ -793,6 +852,21 @@ class Hub:
         for column in ("auto_approve", "pinned", "archived"):
             if column in changes:
                 await self.pool.execute(f"update sessions set {column} = $2 where id = $1", session_id, changes[column])
+        if "returns" in changes:
+            # Sub-agent or side session: whether replies finished from now on go back to the parent.
+            row = await self.pool.fetchrow(
+                "update sessions set returns = $2 where id = $1 and parent_id is not null returning parent_id",
+                session_id, changes["returns"],
+            )
+            if row is None:
+                raise Conflict("only a side session has a parent to send replies to")
+            if not changes["returns"]:
+                await self.pool.execute(
+                    """update messages set return_to = null where session_id = $1 and return_to = $2
+                       and returned_at is null""",
+                    session_id, row["parent_id"],
+                )
+            await self.emit_session(row["parent_id"])
         if "mode" in changes:
             # A mode picked through the older modes list replaces any mode pick made as a config option.
             await self.pool.execute(
@@ -850,8 +924,26 @@ class Hub:
             if owner == session_id:
                 del self.tab_owner[tab]
         ids = await self._agent_sessions(session_id)
+        owed = await self.pool.fetch(
+            """select id from messages where session_id = $1 and return_to is not null and returned_at is null
+               and state <> 'cancelled'""",
+            session_id,
+        )
+        await self._owed_notes([r["id"] for r in owed], "was deleted before it replied")
+        await self.pool.execute(
+            "update messages set returned_at = now() where return_to = $1 and returned_at is null", session_id
+        )
+        for p in await self.pool.fetch(
+            """update proposals set status = 'void', decided_at = now() where target_id = $1 and status = 'pending'
+               returning session_id""",
+            session_id,
+        ):
+            await self._emit_proposals(p["session_id"])
+        children = [r["id"] for r in await self.pool.fetch("select id from sessions where parent_id = $1", session_id)]
         # Events, approvals and messages go with it (on delete cascade).
         await self.pool.execute("delete from sessions where id = $1", session_id)
+        for child in children:
+            await self.emit_session(child)
         self.last_sent.pop(session_id, None)
         try:
             await self._remove_chat_files(session_id, ids)
@@ -1109,11 +1201,15 @@ class Hub:
         meta: dict[str, Any] | None = None,
         message_id: uuid.UUID | None = None,
         preview: str | None = None,
+        chats: list[dict[str, Any]] | None = None,
+        return_to: uuid.UUID | None = None,
     ) -> dict[str, Any]:
         """Store a message, then deliver it: steer it into the running turn, queue it, or interrupt and send.
 
         Without a delivery choice it steers where the engine supports steering, else it queues.
         A repeated client_id returns the stored message instead of sending it twice.
+        `chats` are Krewd chats attached with @. `return_to` is a chat owed the reply of the turn this message runs
+        in; in a sub-agent (a chat with a parent and `returns` on) every message but Krewd's own owes its parent one.
         """
         rt = await self._runtime(session_id)
         if client_id:
@@ -1127,6 +1223,11 @@ class Hub:
         except UnknownUpload as exc:
             raise NotFound(f"unknown upload {exc}") from None
         tabs = [{k: str(t.get(k) or "") for k in ("id", "title", "url")} for t in tabs or []]
+        chats = await self._chat_refs(session_id, chats)
+        if return_to is None and purpose not in NO_RETURN and int((meta or {}).get("hops") or 0) < MAX_HOPS:
+            link = await self.pool.fetchrow("select parent_id, returns from sessions where id = $1", session_id)
+            if link and link["returns"] and link["parent_id"]:
+                return_to = link["parent_id"]
         wanted = delivery or ("steer" if self.can_steer(rt.engine) else "queue")
         if wanted == "steer" and not rt.running:
             wanted = "queue"  # nothing to steer into: it simply starts the next turn
@@ -1134,10 +1235,10 @@ class Hub:
         try:
             await self.pool.execute(
                 """insert into messages (id, session_id, client_id, text, attachments, tabs, delivery, priority,
-                       purpose, meta)
-                   values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)""",
+                       purpose, meta, chats, return_to)
+                   values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)""",
                 message_id, session_id, client_id, text, files, tabs, wanted, 0 if wanted == "interrupt" else 1,
-                purpose, meta,
+                purpose, meta, chats, return_to,
             )
         except asyncpg.UniqueViolationError:
             row = await self.pool.fetchrow(
@@ -1149,6 +1250,10 @@ class Hub:
             payload["attachments"] = files
         if tabs:
             payload["tabs"] = tabs
+        if chats:
+            payload["chats"] = chats
+        if return_to:
+            payload["return_to"] = str(return_to)
         if client_id:
             payload["client_id"] = client_id
         if purpose:
@@ -1156,7 +1261,8 @@ class Hub:
             payload["meta"] = meta or {}
         seq = await self.emit(session_id, "user", payload)
         await self.pool.execute("update messages set event_seq = $2 where id = $1", message_id, seq)
-        preview = preview or text or ", ".join(f["name"] for f in files) or ", ".join(t["title"] or t["url"] for t in tabs)
+        preview = (preview or text or ", ".join(f["name"] for f in files) or ", ".join(t["title"] or t["url"] for t in tabs)
+                   or ", ".join(c["title"] for c in chats))
         await self.pool.execute(
             "update sessions set last_text = $2, updated_at = now(), archived = false where id = $1",
             session_id,
@@ -1167,7 +1273,38 @@ class Hub:
         elif wanted == "steer" and rt.running and self.can_steer(rt.engine):
             await self._steer(rt, message_id)
         self._kick(rt)
+        if return_to:
+            await self.emit_session(return_to)  # it now waits on this chat
         return db.message_json(await self.pool.fetchrow("select * from messages where id = $1", message_id))
+
+    async def _chat_refs(self, session_id: uuid.UUID, chats: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+        """Chats attached with @, as `{id, title, relation}`: known chats only, not this one, each once."""
+        ids: list[uuid.UUID] = []
+        for c in chats or []:
+            try:
+                cid = uuid.UUID(str(c.get("id") if isinstance(c, dict) else c))
+            except ValueError:
+                continue
+            if cid != session_id and cid not in ids:
+                ids.append(cid)
+        if not ids:
+            return []
+        rows = await self.pool.fetch("select id, title, parent_id, returns, engine from sessions where id = any($1::uuid[])", ids)
+        me = await self.pool.fetchrow("select parent_id from sessions where id = $1", session_id)
+        found = {r["id"]: r for r in rows}
+        out = []
+        for cid in ids:
+            r = found.get(cid)
+            if r is None:
+                continue
+            if me and me["parent_id"] == cid:
+                relation = "this chat's parent"
+            elif r["parent_id"] == session_id:
+                relation = "a sub-agent of this chat" if r["returns"] else "a side session of this chat"
+            else:
+                relation = ""
+            out.append({"id": str(cid), "title": r["title"], "relation": relation, "engine": r["engine"]})
+        return out
 
     async def _steer(self, rt: Runtime, message_id: uuid.UUID) -> None:
         """Inject a stored message into the running turn. If no turn is running it stays queued."""
@@ -1185,7 +1322,7 @@ class Hub:
                 "_session/steering",
                 {
                     "sessionId": rt.agent_session,
-                    "prompt": prompt_blocks(_with_tabs(row["text"], row["tabs"]), row["attachments"] or []),
+                    "prompt": prompt_blocks(_prompt_text(row["text"], row["tabs"], row["chats"]), row["attachments"] or []),
                     "_meta": {"steering": {"idleBehavior": "promptRequired"}},
                 },
                 timeout=30,
@@ -1194,7 +1331,8 @@ class Hub:
         except (AcpError, TimeoutError) as exc:
             log.warning("steering failed for %s, queueing instead: %s", rt.id, exc)
         if outcome == "injected":
-            await self._delivered(message_id, "steered", "steering")
+            if await self._delivered(message_id, "steered", "steering"):
+                rt.turn_messages.append(message_id)
         else:  # promptRequired (the turn just ended) or an error: run it as the next prompt
             await self.pool.execute("update messages set state = 'queued' where id = $1 and state = 'steering'", message_id)
 
@@ -1214,13 +1352,21 @@ class Hub:
             rt.worker = asyncio.create_task(self._worker(rt))
 
     async def cancel(self, session_id: uuid.UUID) -> None:
-        """Stop: end the running turn and drop the messages still waiting behind it."""
+        """Stop: end the running turn and drop the messages still waiting behind it.
+
+        Replies sent back from other chats stay: they are not the owner's messages, and they run next.
+        """
         rt = await self._runtime(session_id)
+        dropped = []
         for row in await self.pool.fetch(
-            "update messages set state = 'cancelled' where session_id = $1 and state = 'queued' returning *", session_id
+            """update messages set state = 'cancelled' where session_id = $1 and state = 'queued'
+                   and coalesce(purpose, '') <> 'result' returning *""",
+            session_id,
         ):
+            dropped.append(row["id"])
             await self.emit(session_id, "message", db.message_json(row))
             await self._run_finished(row["id"], "cancelled", "Stopped before it started.")
+        await self._owed_notes(dropped, "was stopped before it got to the message")
         await self._stop_turn(rt)
 
     async def _stop_turn(self, rt: Runtime) -> None:
@@ -1511,13 +1657,16 @@ class Hub:
                 except Exception:
                     log.exception("switch failed for %s", rt.id)
                 continue
+            rt.turn_messages = [message["id"]]
             try:
                 await self._run_turn(
                     rt, message["text"], message["attachments"], message["tabs"], message["id"],
-                    purpose=message["purpose"], meta=message["meta"],
+                    purpose=message["purpose"], meta=message["meta"], chats=message["chats"],
                 )
             except Exception:
                 log.exception("turn failed for %s", rt.id)
+                owed, rt.turn_messages = rt.turn_messages, []
+                await self._owed_notes(owed, "ended with an error")
 
     async def _set_status(self, rt: Runtime, status: str) -> None:
         await self.pool.execute("update sessions set status = $2, updated_at = now() where id = $1", rt.id, status)
@@ -1532,6 +1681,7 @@ class Hub:
         message_id: uuid.UUID | None = None,
         purpose: str | None = None,
         meta: dict[str, Any] | None = None,
+        chats: list[dict[str, Any]] | None = None,
     ) -> None:
         rt.assistant_run, rt.assistant_text = None, ""
         rt.running, rt.cancel_requested = True, False
@@ -1549,10 +1699,15 @@ class Hub:
                 # What runs learn lives in the routine's notes, which every run's prompt carries.
                 await self._drop_agent_session(rt)
                 await self.emit_session(rt.id)
+            fresh = rt.agent_session is None
             proc = await self._ensure_loaded(rt)
             if rt.cancel_requested:
                 raise _Cancelled()
-            prompt_text = _with_tabs(text, tabs)
+            prompt_text = _prompt_text(text, tabs, chats)
+            if fresh:
+                # A new agent session learns which chat it is, for `krewd chat history` and `krewd side`. At the end,
+                # since agents name a chat after the start of its first prompt.
+                prompt_text = prompt_text + f"\n\n(This is Krewd chat {rt.id}.)"
             if purpose == "compact" and (meta or {}).get("how") == "native":
                 prompt_text = "/compact"
             else:
@@ -1599,6 +1754,7 @@ class Hub:
         if message_id and purpose == "routine":
             status = {"end_turn": "done", "cancelled": "cancelled", "error": "error"}.get(stop_reason, "done")
             await self._run_finished(message_id, status, _clip(rt.assistant_text.strip(), RUN_SUMMARY_MAX) or None)
+        await self._settle_returns(rt, stop_reason, purpose)
         await self.emit_session(rt.id)
 
     # agent -> client
@@ -1827,6 +1983,8 @@ class Hub:
             carry = ("Handover from the earlier part of this chat, which was compacted (written by the agent before "
                      "the reset):\n\n" + summary)
             await self._drop_agent_session(rt, carry)
+        else:
+            await self._add_carry(rt.id, f"(This is Krewd chat {rt.id}.)")
         await self.emit(rt.id, "compact", {"how": how, "ok": True})
 
     async def _drop_agent_session(self, rt: Runtime, carry: str | None = None) -> None:
@@ -1996,6 +2154,8 @@ class Hub:
             p = r["payload"]
             if r["kind"] == "user":
                 who = {"routine": "Krewd (routine run)", "compact": "Krewd", "switch": "Krewd"}.get(p.get("purpose"), "owner")
+                if p.get("purpose") in ("result", "prompt"):
+                    who = f"Krewd chat \"{(p.get('meta') or {}).get('from_title') or 'another chat'}\""
                 if p.get("purpose") in ("compact", "switch"):
                     continue
                 out.append({"seq": r["seq"], "from": who, "text": p.get("text", "")})
@@ -2016,6 +2176,255 @@ class Hub:
         for item in out:
             item.pop("message_id", None)
         return out[-last:] if last else out
+
+    # chats that work for each other: side sessions, sub-agents, prompts to another chat
+
+    async def _add_carry(self, session_id: uuid.UUID, note: str) -> None:
+        """Put a note in front of the chat's next prompt (after anything already waiting there)."""
+        await self.pool.execute(
+            "update sessions set carry = case when carry is null or carry = '' then $2 else carry || E'\\n\\n' || $2 end"
+            " where id = $1",
+            session_id, note,
+        )
+
+    async def _settle_returns(self, rt: Runtime, stop_reason: str, purpose: str | None) -> None:
+        """Send the turn's reply to each chat owed one by a message this turn ran with or took in."""
+        ids, rt.turn_messages = rt.turn_messages, []
+        if not ids:
+            return
+        rows = await self.pool.fetch(
+            """update messages set returned_at = now() where id = any($1::uuid[]) and return_to is not null
+                   and returned_at is null returning return_to, meta""",
+            ids,
+        )
+        if not rows:
+            return
+        reply = rt.assistant_text.strip()
+        if purpose in ("compact", "switch"):
+            ok, note = False, "took the message in while it was compacting or changing agents; its reply is in that chat"
+        elif stop_reason == "cancelled":
+            ok, note = False, "was stopped"
+        elif stop_reason == "error":
+            ok, note = False, "ended with an error"
+        elif not reply:
+            ok, note = False, "finished without a written reply"
+        else:
+            ok, note = True, None
+        targets: dict[uuid.UUID, int] = {}
+        for r in rows:
+            hops = int((r["meta"] or {}).get("hops") or 0)
+            targets[r["return_to"]] = max(targets.get(r["return_to"], 0), hops)
+        for target, hops in targets.items():
+            await self._send_result(target, rt.id, reply if ok else None, note, hops)
+
+    async def _owed_notes(self, message_ids: list[uuid.UUID], why: str) -> None:
+        """Messages that will never get a reply: tell each chat that waited on one, once."""
+        if not message_ids:
+            return
+        rows = await self.pool.fetch(
+            """update messages set returned_at = now() where id = any($1::uuid[]) and return_to is not null
+                   and returned_at is null returning session_id, return_to, meta""",
+            message_ids,
+        )
+        done: set[tuple[uuid.UUID, uuid.UUID]] = set()
+        for r in rows:
+            if (r["session_id"], r["return_to"]) in done:
+                continue
+            done.add((r["session_id"], r["return_to"]))
+            await self._send_result(r["return_to"], r["session_id"], None, why, int((r["meta"] or {}).get("hops") or 0))
+
+    async def _send_result(
+        self, target: uuid.UUID, source: uuid.UUID, reply: str | None, note: str | None, hops: int
+    ) -> None:
+        """A reply (or a note saying why there is none) from chat `source` into chat `target`, steered in."""
+        row = await self.pool.fetchrow("select title, parent_id, returns from sessions where id = $1", source)
+        title = (row["title"] if row else None) or "a chat"
+        what = "Sub-agent" if row and row["parent_id"] == target and row["returns"] else "Chat"
+        ref = f'{what} "{title}" (Krewd chat {source})'
+        if reply is not None:
+            body = _clip(reply, RESULT_MAX)
+            text = f"{ref} replied (Krewd sent its reply back here):\n\n{body}"
+            if len(reply) > RESULT_MAX:
+                text += f"\n\n(Cut at {RESULT_MAX} characters. The whole reply: `krewd chat history {_short(source)} --last 3`.)"
+        else:
+            text = f"{ref} {note}. No reply comes back from it for that message."
+        meta = {"from": str(source), "from_title": title, "kind": what.lower(), "ok": reply is not None, "hops": hops + 1}
+        try:
+            await self.send(target, text, delivery="steer", purpose="result", meta=meta,
+                            preview=f"{'Reply' if reply is not None else 'Note'} from {title}")
+        except NotFound:
+            return  # the chat that waited is gone
+        await self.emit_session(target)
+
+    async def links(self, session_id: uuid.UUID) -> dict[str, Any]:
+        """This chat's parent, its side sessions and sub-agents, and the chats it waits on for a reply."""
+        me = await self.get_session(session_id)
+        parent = None
+        if me["parent_id"]:
+            try:
+                parent = await self.get_session(uuid.UUID(me["parent_id"]))
+            except NotFound:
+                parent = None
+        kids = await self.pool.fetch("select id from sessions where parent_id = $1 order by created_at", session_id)
+        children = [await self.get_session(r["id"]) for r in kids]
+        waiting = []
+        for cid in me["waiting_on"]:
+            try:
+                waiting.append(await self.get_session(uuid.UUID(cid)))
+            except NotFound:
+                continue
+        return {"session": me, "parent": parent, "children": children, "waiting_on": waiting}
+
+    # proposals: what an agent drafts, and only the owner starts
+
+    async def _proposal(self, proposal_id: uuid.UUID) -> asyncpg.Record:
+        row = await self.pool.fetchrow(
+            """select p.*, s.title as session_title, t.title as target_title from proposals p
+               join sessions s on s.id = p.session_id left join sessions t on t.id = p.target_id where p.id = $1""",
+            proposal_id,
+        )
+        if row is None:
+            raise NotFound("proposal not found")
+        return row
+
+    async def list_proposals(self, status: str | None = "pending", session_id: uuid.UUID | None = None) -> list[dict[str, Any]]:
+        rows = await self.pool.fetch(
+            """select p.*, s.title as session_title, t.title as target_title from proposals p
+               join sessions s on s.id = p.session_id left join sessions t on t.id = p.target_id
+               where ($1::text is null or p.status = $1) and ($2::uuid is null or p.session_id = $2)
+               order by p.created_at""",
+            status, session_id,
+        )
+        return [db.proposal_json(r) for r in rows]
+
+    async def _emit_proposals(self, session_id: uuid.UUID, proposal_id: uuid.UUID | None = None) -> None:
+        if proposal_id:
+            await self.emit(session_id, "proposal", db.proposal_json(await self._proposal(proposal_id)))
+        await self.emit_session(session_id)
+
+    async def propose(
+        self,
+        session_id: uuid.UUID | None,
+        kind: str,
+        text: str,
+        title: str = "",
+        engine: str | None = None,
+        returns: bool = False,
+        target_id: uuid.UUID | None = None,
+    ) -> dict[str, Any]:
+        """An agent drafts a side session, a sub-agent or a message to another chat; the owner sends it or not.
+
+        Only from a turn that is running in that chat (without a chat id: the one chat running a turn). A message
+        may go only to a chat linked to this one or attached to it with @.
+        """
+        if session_id is None:
+            running = [rt.id for rt in self.runtimes.values() if rt.running]
+            if len(running) != 1:
+                raise Conflict("give the chat id (--chat-id): it is at the end of your first prompt, \"This is Krewd chat ...\"")
+            session_id = running[0]
+        me = await self.get_session(session_id)
+        rt = self.runtimes.get(session_id)
+        if not (rt and rt.running):
+            raise Conflict("propose from a running turn of that chat (the owner asked for it there)")
+        if engine and engine not in self.settings.engines:
+            raise NotFound(f"unknown engine {engine}")
+        if kind == "prompt":
+            if target_id is None:
+                raise Invalid("a message needs the chat to send it to")
+            if target_id == session_id:
+                raise Invalid("that is this chat")
+            target = await self.get_session(target_id)
+            linked = target_id in (uuid.UUID(me["parent_id"]) if me["parent_id"] else None,) or (
+                target["parent_id"] == str(session_id))
+            attached = await self.pool.fetchval(
+                "select exists(select 1 from messages where session_id = $1 and chats @> $2::jsonb)",
+                session_id, [{"id": str(target_id)}],
+            )
+            if not (linked or attached):
+                raise Conflict("you can message only a chat the owner attached with @ or one linked to this chat")
+        elif kind != "new":
+            raise Invalid("kind is new or prompt")
+        proposal_id = uuid.uuid4()
+        await self.pool.execute(
+            """insert into proposals (id, session_id, kind, target_id, title, text, engine, returns)
+               values ($1, $2, $3, $4, $5, $6, $7, $8)""",
+            proposal_id, session_id, kind, target_id if kind == "prompt" else None,
+            (title or _first_line(text, TITLE_MAX))[:200], text, engine if kind == "new" else None, returns,
+        )
+        await self._emit_proposals(session_id, proposal_id)
+        return db.proposal_json(await self._proposal(proposal_id))
+
+    async def dismiss_proposal(self, proposal_id: uuid.UUID) -> dict[str, Any]:
+        row = await self.pool.fetchrow(
+            "update proposals set status = 'dismissed', decided_at = now() where id = $1 and status = 'pending' returning *",
+            proposal_id,
+        )
+        if row is None:
+            await self._proposal(proposal_id)
+            raise Conflict("that proposal was already sent or dismissed")
+        await self._add_carry(row["session_id"], f"Krewd note: the owner dismissed your proposal \"{row['title']}\".")
+        await self._emit_proposals(row["session_id"], proposal_id)
+        return db.proposal_json(await self._proposal(proposal_id))
+
+    async def send_proposal(
+        self,
+        proposal_id: uuid.UUID,
+        text: str | None = None,
+        title: str | None = None,
+        engine: str | None = None,
+        mode: str | None = None,
+        config: dict[str, str] | None = None,
+        returns: bool | None = None,
+        chats: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """The owner sends a proposal (as drafted or edited): it starts the chat or delivers the message."""
+        row = await self.pool.fetchrow(
+            "update proposals set status = 'sent', decided_at = now() where id = $1 and status = 'pending' returning *",
+            proposal_id,
+        )
+        if row is None:
+            p = await self._proposal(proposal_id)
+            raise Conflict(f"that proposal is {p['status']}")
+        text = (text if text is not None else row["text"]).strip() or row["text"]
+        title = (title or row["title"] or "").strip()
+        wants = row["returns"] if returns is None else returns
+        source = row["session_id"]
+        try:
+            if row["kind"] == "new":
+                session = await self.create_session(
+                    text, engine or row["engine"], mode, False, config, chats=[{"id": str(source)}, *(chats or [])],
+                    parent_id=source, returns=wants, title=title or None, told=False,
+                )
+                result_id = uuid.UUID(session["id"])
+                what = "sub-agent" if wants else "side session"
+                follow = ("each reply it finishes comes back to this chat" if wants else
+                          f"nothing comes back; read it when the owner asks, with `krewd chat history {_short(result_id)}`")
+                await self._add_carry(source, f"Krewd note: the owner started your proposed {what} \"{session['title']}\" "
+                                              f"(Krewd chat {result_id}); {follow}.")
+            else:
+                if row["target_id"] is None:
+                    raise Conflict("the chat it was for is gone")
+                me = await self.get_session(source)
+                header = (f"Message from Krewd chat \"{me['title']}\" (chat id {source}), sent with the owner's OK"
+                          + ("; your reply to it goes back to that chat" if wants else "") + ":\n\n")
+                await self.send(
+                    row["target_id"], header + text, delivery="queue", purpose="prompt", chats=chats,
+                    meta={"from": str(source), "from_title": me["title"], "returns": wants},
+                    return_to=source if wants else None, preview=f"From {me['title']}: {text}",
+                )
+                result_id = row["target_id"]
+                target = await self.get_session(result_id)
+                follow = "its reply comes back to this chat" if wants else "no reply comes back"
+                await self._add_carry(source, f"Krewd note: the owner sent your message to chat \"{target['title']}\" "
+                                              f"(Krewd chat {result_id}); {follow}.")
+                await self.emit(source, "link", {"kind": "prompt", "chat_id": str(result_id),
+                                                 "title": target["title"], "returns": wants})
+        except Exception:
+            await self.pool.execute("update proposals set status = 'pending', decided_at = null where id = $1", proposal_id)
+            raise
+        await self.pool.execute("update proposals set result_id = $2 where id = $1", proposal_id, result_id)
+        await self._emit_proposals(source, proposal_id)
+        return db.proposal_json(await self._proposal(proposal_id))
 
     # routines
 
