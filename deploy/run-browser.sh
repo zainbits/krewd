@@ -52,8 +52,15 @@ GPU_FLAG=(--disable-gpu)
 # no system location source, so location requests (a web attendance check-in) would wait forever. It answers
 # them with the location the owner applies in the app (or KREWD_BROWSER_LOCATION, which the server applies
 # when the app has never set one); with neither, pages get Brave's own location API.
+# Brave loads a copy in the config folder, made fresh from the repo at each start except current.js: the server
+# keeps the applied location there, so pages have it the instant they start.
+EXT="$CONFIG_DIR/location-extension"
+mkdir -p "$EXT" && chmod 700 "$EXT"
+find "$EXT" -mindepth 1 -maxdepth 1 ! -name current.js -exec rm -rf {} +
+for f in "$REPO/deploy/fixed-location"/*; do [[ "$(basename "$f")" == current.js ]] || cp -r "$f" "$EXT/"; done
+[[ -s "$EXT/current.js" ]] || cp "$REPO/deploy/fixed-location/current.js" "$EXT/current.js"
 # Recent Chromium ignores --load-extension unless this feature is turned off.
-EXT_FLAGS=(--load-extension="$REPO/deploy/fixed-location" --disable-features=DisableLoadExtensionCommandLineSwitch)
+EXT_FLAGS=(--load-extension="$EXT" --disable-features=DisableLoadExtensionCommandLineSwitch)
 FLAGS=(--user-data-dir="$PROFILE" --remote-debugging-port="$PORT" --remote-debugging-address=127.0.0.1
   --no-first-run --no-default-browser-check --window-position=0,0 --window-size=1920,1080 "${GPU_FLAG[@]}"
   "${EXT_FLAGS[@]}")

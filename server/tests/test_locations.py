@@ -28,10 +28,14 @@ class FakeBrowser:
         self.held = None
         self.down = False
         self.writes = 0
+        self.reloads = 0
 
     async def location(self, value="read"):
         if self.down:
             raise BrowserUnavailable("not running")
+        if value == "reload":
+            self.reloads += 1
+            return None
         if value != "read":
             self.writes += 1
             self.held = value
@@ -157,3 +161,27 @@ async def test_api_routes(pool, tmp_path):
         r = await client.delete(f"/api/browser/location/{fav}")
         assert r.status_code == 200 and r.json()["favorites"] == []
         assert (await client.get("/api/browser/location", headers={"Authorization": "Bearer nope"})).status_code == 401
+
+
+async def test_pages_get_it_at_once_from_current_js(pool, tmp_path):
+    # The extension copy Brave loads has current.js, which Brave reads when it starts: syncing and applying keep
+    # the current location there, so a page never waits for the extension's storage. Never a reload.
+    (tmp_path / "ext").mkdir()
+    script = tmp_path / "ext" / "current.js"
+    browser = FakeBrowser()
+    loc = Locations(pool, browser, "48.85,2.35,35", script=script)
+    await loc.sync()
+    assert '"lat": 48.85' in script.read_text()
+    await loc.sync()
+    await loc.apply(40.71, -74.0, 15, source="phone")
+    text = script.read_text()
+    assert "globalThis.__krewdLocation = " in text and '"lat": 40.71' in text and browser.reloads == 0
+    assert oct(script.stat().st_mode & 0o777) == "0o600"
+    # Brave down: the file is still written, so Brave has it the moment it starts.
+    browser.down = True
+    await loc.apply(5, 6, 20)
+    assert '"lat": 5.0' in script.read_text()
+    # No extension copy (Brave loads the repo folder): nothing is written.
+    other = Locations(pool, FakeBrowser(), script=tmp_path / "missing" / "current.js")
+    await other.sync()
+    assert not (tmp_path / "missing").exists()

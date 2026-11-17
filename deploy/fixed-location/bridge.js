@@ -7,7 +7,13 @@
     current = value && typeof value === "object" ? { lat: value.lat, lon: value.lon, accuracy: value.accuracy } : null;
     send();
   };
-  chrome.storage.local.get("location").then(({ location }) => take(location), () => take(null));
+  // A failed read is tried again (5 times, 300 ms apart) before the page hears "none": with "none" it would ask
+  // Brave's own location API, which a home server cannot answer.
+  const read = (tries) => chrome.storage.local.get("location").then(
+    ({ location }) => take(location),
+    () => (tries > 0 ? setTimeout(() => read(tries - 1), 300) : take(null)),
+  );
+  read(5);
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area === "local" && "location" in changes) take(changes.location.newValue);
   });

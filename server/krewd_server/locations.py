@@ -11,23 +11,37 @@ places. Nothing changes until the owner applies a location; Krewd never follows 
 - Until anything is applied, KREWD_BROWSER_LOCATION (from krewd.env) is the current location.
 - When Brave starts (or restarts), the server checks that the extension still holds the current location and
   puts it back if the profile lost it.
+- Pages get it at once: Brave loads a copy of the extension from the config folder (run-browser.sh), and the
+  server keeps the current location in that copy's current.js, which Brave reads when it starts, so a page never
+  waits for the extension's storage. A location applied while Brave runs reaches pages through the storage
+  (open ones at once, new ones about 0.3 s after they start) until Brave's next start. Reloading the extension
+  instead would turn it off: Brave does that to extensions loaded from the command line.
 """
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 import uuid
+from pathlib import Path
 from typing import Any
 
 import asyncpg
 
 from .browser import Browser, BrowserUnavailable
+from .config import CONFIG_DIR
 
 log = logging.getLogger("krewd.locations")
 
 MAX_PREVIOUS = 3  # recent locations kept besides the current one
 SAME_DEGREES = 1e-6  # about 0.1 m: the same place
 MAX_FAVORITES = 50
+# The extension copy Brave loads (run-browser.sh makes it from deploy/fixed-location): its current.js.
+LOCATION_SCRIPT = CONFIG_DIR / "location-extension" / "current.js"
+CURRENT_JS_HEAD = (
+    "// Written by the Krewd server (locations.py): the location the owner applied in the app, for location.js.\n"
+)
 
 
 class Invalid(ValueError):
@@ -72,9 +86,10 @@ def _row(r: asyncpg.Record) -> dict[str, Any]:
 
 
 class Locations:
-    def __init__(self, pool: asyncpg.Pool, browser: Browser, config_value: str = ""):
+    def __init__(self, pool: asyncpg.Pool, browser: Browser, config_value: str = "", script: Path | None = None):
         self.pool = pool
         self.browser = browser
+        self.script = script  # current.js in the extension copy Brave loads (None: do not write one)
         self.config = parse_config(config_value)
         # What the extension last reported, and how the last attempt to reach it went.
         self.status = "unknown"  # applied, waiting (Brave is not running), error, unknown (not checked yet)
@@ -136,10 +151,27 @@ class Locations:
         await self.push()
         return await self.state()
 
+    def _write_script(self, value: dict[str, float] | None) -> bool:
+        """Put the location into the extension's current.js, for Brave's next start. True when the file changed."""
+        if self.script is None or not self.script.parent.is_dir():
+            return False
+        text = (CURRENT_JS_HEAD + "globalThis.__krewdLocation = " + json.dumps(value) + ";\n")
+        try:
+            if self.script.read_text() == text:
+                return False
+        except OSError:
+            pass
+        tmp = self.script.with_suffix(".tmp")
+        tmp.write_text(text)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, self.script)
+        return True
+
     async def push(self) -> None:
         """Send the current location to the extension and note how it went."""
         current = await self.current()
         value = {k: current[k] for k in ("lat", "lon", "accuracy")} if current else None
+        self._write_script(value)
         try:
             self.held = await self.browser.location(value)
             self.status, self.detail = ("applied", None) if same(self.held, value) else ("error", "Brave kept another location")
@@ -157,6 +189,7 @@ class Locations:
             value = {k: current[k] for k in ("lat", "lon", "accuracy")} if current else None
             if same(self.held, value) and (not value or abs(self.held["accuracy"] - value["accuracy"]) < 0.5):
                 self.status, self.detail = "applied", None
+                self._write_script(value)
             else:
                 await self.push()
         except BrowserUnavailable:

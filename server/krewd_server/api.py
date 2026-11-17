@@ -23,7 +23,7 @@ from . import files as shared_files
 from .attachments import TooLarge
 from .browser import Browser, BrowserUnavailable, TabGone
 from .hub import Conflict, Hub, NotFound
-from .locations import Invalid as LocationInvalid, Locations
+from .locations import LOCATION_SCRIPT, Invalid as LocationInvalid, Locations
 from .profiles import ProfileError
 from .routines import Invalid
 
@@ -268,7 +268,7 @@ def create_app(hub: Hub, token: str, lifespan_hub: bool = True) -> FastAPI:
 
     app = FastAPI(title="Krewd", version=__version__, lifespan=lifespan)
     browser = Browser(hub.settings.cdp_port)
-    locations = Locations(hub.pool, browser, hub.settings.browser_location)
+    locations = Locations(hub.pool, browser, hub.settings.browser_location, script=LOCATION_SCRIPT)
     cert = hub.settings.tls_cert
     security = Security(hub.settings, hub.pool, token, tls.pin(cert) if hub.settings.tls != "off" and cert.is_file() else None)
     secrets_ = Secrets()

@@ -820,6 +820,25 @@ async def test_switch_without_context_is_immediate_and_routines_switch_their_cha
     await hub.switch_engine(sid, "fake")
     await wait_engine(hub, sid, "fake")
     assert (await hub.get_routine(rid))["engine"] == "fake"
+    # A run after a switch still starts clean: a fresh agent session without the switch handover, which is
+    # about earlier runs. (The fake joins this chat for the first time; the native agent returns to it.)
+    for engine in ("fake", "native"):
+        if engine == "native":
+            await hub.switch_engine(sid, "native")
+            await wait_engine(hub, sid, "native")
+        assert await hub.pool.fetchval("select carry from sessions where id = $1", sid)
+        before = await hub.pool.fetchval("select agent_session from sessions where id = $1", sid)
+        after = (await hub.events(0, sid))[-1]["seq"]
+        await hub.run_routine(rid)
+        for _ in range(200):
+            events = await hub.events(after, sid)
+            if any(e["kind"] == "turn_end" for e in events):
+                break
+            await asyncio.sleep(0.05)
+        texts = "".join(e["payload"].get("text", "") for e in events if e["kind"] == "text")
+        assert "routine-ran" in texts and "briefed" not in texts
+        row = await hub.pool.fetchrow("select agent_session, carry from sessions where id = $1", sid)
+        assert row["carry"] is None and row["agent_session"] and row["agent_session"] != before
 
 
 async def test_switch_api_and_transcript(hub):

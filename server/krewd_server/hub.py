@@ -1693,10 +1693,12 @@ class Hub:
         usage = None
         carry = None
         try:
-            if purpose == "routine" and rt.agent_session:
+            if purpose == "routine":
                 # Every run starts in a fresh agent session: a routine's context does not grow run after run.
                 # The last run's session stays until here, so the owner can follow up on it in the chat.
-                # What runs learn lives in the routine's notes, which every run's prompt carries.
+                # What runs learn lives in the routine's notes, which every run's prompt carries, so a run also
+                # starts without any carried text (a switch handover or a compact summary): that is about
+                # earlier runs, and a run that read it would act on stale facts from another day or agent.
                 await self._drop_agent_session(rt)
                 await self.emit_session(rt.id)
             fresh = rt.agent_session is None

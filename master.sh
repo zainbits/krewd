@@ -186,7 +186,7 @@ PY
     case "$(uvrun python -m krewd_server.locations check "$(cdp_port)" 2>/dev/null)" in
       set) ok "the location extension answers (a location is applied)" ;;
       none) warn "no browser location applied: pages that ask for one wait" "the app: Settings > Browser location (or KREWD_BROWSER_LOCATION in $ENV_FILE)" ;;
-      *) bad "the location extension does not answer in the agents' Brave" "./master.sh restart browser; it loads deploy/fixed-location" ;;
+      *) bad "the location extension does not answer in the agents' Brave" "./master.sh restart browser; it loads a copy of deploy/fixed-location from the config folder (location-extension)" ;;
     esac
   else
     bad "agent Brave is not running" "log in to the desktop, then ./master.sh start browser"

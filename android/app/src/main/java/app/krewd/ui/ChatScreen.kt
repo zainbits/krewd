@@ -747,6 +747,14 @@ private fun RoutineRunRow(item: UserItem) {
                     color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.75f),
                 )
             }
+            if (item.state != "cancelled") {
+                // Every run (retries too) starts a new agent session, so the chat's long history is not its context.
+                Text(
+                    "New agent session · only the routine's notes carry over",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.75f),
+                )
+            }
             if (open) SelectionContainer { Text(item.text, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSecondaryContainer) }
         }
     }
