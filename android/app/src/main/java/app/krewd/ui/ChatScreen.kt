@@ -75,6 +75,7 @@ import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.TextLayoutResult
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -220,6 +221,9 @@ fun ChatScreen(state: UiState, viewModel: KrewdViewModel) {
                 val pick = rememberFilePicker { viewModel.attach(session.id, it) }
                 val live = state.live[session.id]
                 Composer(
+                    sessionId = session.id,
+                    initialText = remember(session.id) { viewModel.messageDraft(session.id) },
+                    onDraft = { viewModel.setMessageDraft(session.id, it) },
                     busy = busy,
                     steps = if (busy) live?.steps else null,
                     onSteps = { scope.launch { listState.animateScrollToItem(0) } },
@@ -309,6 +313,9 @@ private enum class Delivery(val id: String, val label: String, val hint: String)
  */
 @Composable
 private fun Composer(
+    sessionId: String,
+    initialText: String,
+    onDraft: (String) -> Unit,
     busy: Boolean,
     steps: Int?,
     onSteps: () -> Unit,
@@ -323,7 +330,14 @@ private fun Composer(
     onAttach: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    var value by rememberSaveable(stateSaver = TextFieldValue.Saver) { mutableStateOf(TextFieldValue("")) }
+    // Unsent text is kept per chat on the phone, so leaving the chat or restarting the app loses nothing.
+    var value by rememberSaveable(sessionId, stateSaver = TextFieldValue.Saver) {
+        mutableStateOf(TextFieldValue(initialText, TextRange(initialText.length)))
+    }
+    fun edit(next: TextFieldValue) {
+        if (next.text != value.text) onDraft(next.text)
+        value = next
+    }
     val text = value.text
     val query = if (value.selection.collapsed) commandQuery(text, value.selection.start) else null
     val matches = remember(commands, query) { matchCommands(commands, query) }
@@ -348,11 +362,11 @@ private fun Composer(
     ) {
         Column(Modifier.padding(start = 6.dp, end = 6.dp, top = 4.dp, bottom = 6.dp)) {
             if (query != null) {
-                CommandSuggestions(matches, onPick = { value = applyCommand(value, query, it) }, Modifier.padding(top = 2.dp))
+                CommandSuggestions(matches, onPick = { edit(applyCommand(value, query, it)) }, Modifier.padding(top = 2.dp))
             }
             BasicTextField(
                 value = value,
-                onValueChange = { value = it },
+                onValueChange = ::edit,
                 visualTransformation = highlight,
                 onTextLayout = { layout = it },
                 textStyle = MaterialTheme.typography.bodyLarge.copy(color = colors.onSurface),
@@ -442,7 +456,7 @@ private fun Composer(
                             onStop()
                         } else {
                             onSend(text.trim(), if (busy) delivery.id else null)
-                            value = TextFieldValue("")
+                            value = TextFieldValue("") // send() also forgets the saved draft
                         }
                     },
                     enabled = enabled,

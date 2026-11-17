@@ -187,7 +187,7 @@ class KrewdViewModel(private val app: Application) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val prefs = Prefs(app)
     private val notifier = Notifier(app)
-    private val _state = MutableStateFlow(UiState(settings = prefs.load(), highQuality = prefs.highQuality(), savedPrompts = prefs.savedPrompts()))
+    private val _state = MutableStateFlow(UiState(settings = prefs.load(), highQuality = prefs.highQuality(), savedPrompts = prefs.savedPrompts(), newTaskText = prefs.textDraft(NEW_DRAFT)))
     val state: StateFlow<UiState> = _state.asStateFlow()
 
     @Volatile private var api: KrewdApi? = null
@@ -706,7 +706,15 @@ class KrewdViewModel(private val app: Application) {
 
     fun rememberAutoApprove(engineId: String, on: Boolean) = prefs.updateEngine(engineId) { it.copy(autoApprove = on) }
 
-    fun setNewTaskText(text: String) = _state.update { it.copy(newTaskText = text) }
+    fun setNewTaskText(text: String) {
+        prefs.setTextDraft(NEW_DRAFT, text)
+        _state.update { it.copy(newTaskText = text) }
+    }
+
+    /** What was typed in a chat's composer and not sent yet, kept on the phone across leaving the chat and restarts. */
+    fun messageDraft(sessionId: String): String = prefs.textDraft(sessionId)
+
+    fun setMessageDraft(sessionId: String, text: String) = prefs.setTextDraft(sessionId, text)
 
     fun pipSize(wide: Boolean): Float = prefs.pipSize(wide)
 
@@ -753,6 +761,7 @@ class KrewdViewModel(private val app: Application) {
             delivery = delivery,
         )
         clearDraft(id)
+        prefs.setTextDraft(id, "")
         _state.update { it.copy(outbox = it.outbox + message, draftTabs = it.draftTabs - id) }
         deliver(message)
     }
@@ -1066,6 +1075,7 @@ class KrewdViewModel(private val app: Application) {
         live.remove(session.id)
         pushLive()
         notifier.clear(session.id)
+        prefs.setTextDraft(session.id, "")
         act { it.deleteSession(session.id) }
     }
 

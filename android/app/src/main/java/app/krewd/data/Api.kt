@@ -63,6 +63,9 @@ data class ConnectionSettings(
 class Prefs(context: Context) {
     private val prefs = context.getSharedPreferences("krewd", Context.MODE_PRIVATE)
 
+    /** Unsent composer text, per chat and for the new-task sheet. Phone only, never synced to the server. */
+    private val drafts = context.getSharedPreferences("krewd_drafts", Context.MODE_PRIVATE)
+
     /** Called with (server key, value) whenever a synced setting changes here, to keep it on the server too. */
     @Volatile var onChange: ((String, Any?) -> Unit)? = null
 
@@ -172,6 +175,13 @@ class Prefs(context: Context) {
         prefs.edit().putBoolean("browser_cursor", cursor).apply()
         synced("browser_cursor", cursor)
         if (engineId != null) updateEngine(engineId) { it.copy(cursor = cursor) }
+    }
+
+    /** Unsent text for [key] (a session id, or [app.krewd.NEW_DRAFT]); empty when there is none. */
+    fun textDraft(key: String): String = drafts.getString(key, null).orEmpty()
+
+    fun setTextDraft(key: String, text: String) {
+        if (text.isBlank()) drafts.edit().remove(key).apply() else drafts.edit().putString(key, text).apply()
     }
 
     companion object {
