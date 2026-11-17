@@ -43,6 +43,7 @@ fun SettingsScreen(state: UiState, viewModel: KrewdViewModel, padding: PaddingVa
     var showToken by remember { mutableStateOf(false) }
     var confirmRestart by remember { mutableStateOf(false) }
     var locationSheet by remember { mutableStateOf(false) }
+    var storageSheet by remember { mutableStateOf(false) }
     val online = state.connection is Connection.Online
     val clipboard = LocalClipboardManager.current
     LaunchedEffect(online) { if (online) viewModel.loadProfiles() }
@@ -83,6 +84,7 @@ fun SettingsScreen(state: UiState, viewModel: KrewdViewModel, padding: PaddingVa
     }
 
     if (locationSheet) LocationSheet(viewModel) { locationSheet = false }
+    if (storageSheet) StorageSheet(viewModel) { storageSheet = false }
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -162,6 +164,17 @@ fun SettingsScreen(state: UiState, viewModel: KrewdViewModel, padding: PaddingVa
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 OutlinedButton(onClick = { locationSheet = true }, enabled = online, modifier = Modifier.fillMaxWidth()) { Text("Browser location") }
+            }
+        }
+        item {
+            SectionCard {
+                Text("Storage", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    "See which chats take the most space on the server, free what no chat needs, and trim or delete big chats.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                OutlinedButton(onClick = { storageSheet = true }, enabled = online, modifier = Modifier.fillMaxWidth()) { Text("Storage") }
             }
         }
         item {

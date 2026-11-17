@@ -91,6 +91,9 @@ class Settings:
     # the app) and the SHA-256 of the app's signing certificate(s). No rp id: passkeys are off.
     passkey_rp_id: str | None = None
     passkey_certs: tuple[str, ...] = ()
+    # Where the agents keep their session transcripts (storage report and cleanup). None: their defaults.
+    claude_dir: Path | None = None
+    codex_dir: Path | None = None
 
     @property
     def shared(self) -> list[Path]:

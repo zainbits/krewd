@@ -6,8 +6,10 @@ Needs KREWD_TEST_DATABASE_URL (a throwaway database; its tables are dropped firs
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
+import time
 import uuid
 from pathlib import Path
 
@@ -49,6 +51,8 @@ async def hub(tmp_path):
         default_engine="fake",
         data_dir=tmp_path / "data",
         max_upload_mb=1,
+        claude_dir=tmp_path / "claude",
+        codex_dir=tmp_path / "codex",
     )
     hub = Hub(settings, pool)
     await hub.start()
@@ -834,3 +838,83 @@ def test_command_list_reads_acp_entries_and_old_names():
         {"name": "review", "description": "Review code", "hint": "branch"},
     ]
     assert db.command_names(None) == set()
+
+
+def _transcript(hub: Hub, agent_session: str, entrypoint: str, age_hours: float = 48) -> Path:
+    folder = hub.settings.claude_dir / "projects" / "-work"
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"{agent_session}.jsonl"
+    path.write_text('{"type":"queue-operation"}\n' + json.dumps(
+        {"type": "user", "entrypoint": entrypoint, "cwd": str(hub.settings.workdir)}) + "\n" + "x" * 1000 + "\n")
+    old = time.time() - age_hours * 3600
+    os.utime(path, (old, old))
+    return path
+
+
+async def test_storage_report_and_clean_keep_live_chats_resumable(hub):
+    session = await hub.create_session("screenshot please")
+    sid = uuid.UUID(session["id"])
+    await wait_for(hub, sid, "turn_end")
+    agent_session = (await hub.pool.fetchrow("select agent_session from sessions where id = $1", sid))["agent_session"]
+    linked = _transcript(hub, agent_session, "sdk-ts")
+    left = _transcript(hub, str(uuid.uuid4()), "sdk-ts")  # a deleted chat's agent session
+    fresh = _transcript(hub, str(uuid.uuid4()), "sdk-ts", age_hours=1)  # maybe still in use
+    mine = _transcript(hub, str(uuid.uuid4()), "cli")  # the owner's own terminal session
+    memory = hub.settings.claude_dir / "projects" / "-work" / "memory"
+    memory.mkdir()
+    loose = hub.tool_images.root / "deadbeef-00000000000000000000.png"
+    loose.write_bytes(b"x" * 50)
+    os.utime(loose, (time.time() - 7200, time.time() - 7200))
+    new_file = hub.attachments.root / "0badc0de-just-uploaded.txt"  # a chat being created right now
+    new_file.write_text("new")
+    # Older snapshots of the chat are dropped as new ones are written.
+    assert await hub.pool.fetchval("select count(*) from events where session_id = $1 and kind = 'session'", sid) == 1
+    shown_before = [(e["kind"], e["payload"].get("tool_call_id")) for e in await hub.events(0, sid) if e["kind"] != "tool"]
+    tools_before = [e for e in await hub.events(0, sid) if e["kind"] == "tool"]
+    assert len(tools_before) > 1
+
+    app = create_app(hub, TOKEN, lifespan_hub=False)
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        report = (await client.get("/api/storage", headers=headers)).json()
+        chat = next(c for c in report["chats"] if c["id"] == str(sid))
+        assert chat["tool_images"]["count"] == 1 and chat["transcript"]["count"] == 1
+        assert chat["history"]["repeats"] == len(tools_before) - 1
+        assert report["reclaimable"]["loose_files"] == {"bytes": 50, "count": 1}
+        assert report["reclaimable"]["loose_transcripts"]["count"] == 1
+        freed = (await client.post("/api/storage/clean", headers=headers)).json()
+    assert freed["files_bytes"] == 50 and freed["transcripts_bytes"] > 0 and freed["repeats_bytes"] > 0
+    assert not loose.exists() and not left.exists() and new_file.exists()
+    assert linked.exists() and fresh.exists() and mine.exists() and memory.exists()
+    events = await hub.events(0, sid)
+    tools = [e for e in events if e["kind"] == "tool"]
+    assert len(tools) == 1 and tools[0]["seq"] == tools_before[0]["seq"]  # in its place, with its last state
+    assert tools[0]["payload"] == tools_before[-1]["payload"]
+    assert [(e["kind"], e["payload"].get("tool_call_id")) for e in events if e["kind"] != "tool"] == shown_before
+    # The chat goes on in the same agent session.
+    last = events[-1]["seq"]
+    await hub.send(sid, "Say hello again")
+    for _ in range(200):
+        if any(e["kind"] == "turn_end" for e in await hub.events(last, sid)):
+            break
+        await asyncio.sleep(0.05)
+    else:
+        raise AssertionError("the chat did not go on")
+    assert (await hub.pool.fetchval("select agent_session from sessions where id = $1", sid)) == agent_session
+
+
+async def test_trim_and_delete_free_a_chats_space(hub):
+    session = await hub.create_session("screenshot please")
+    sid = uuid.UUID(session["id"])
+    await wait_for(hub, sid, "turn_end")
+    agent_session = await hub.pool.fetchval("select agent_session from sessions where id = $1", sid)
+    transcript = _transcript(hub, agent_session, "sdk-ts")
+    image = next(hub.tool_images.root.glob(f"{str(sid)[:8]}-*"))
+    attachment = hub.attachments.root / f"{str(sid)[:8]}-notes.txt"
+    attachment.write_text("notes")
+    trimmed = await hub.trim_session(sid)
+    assert trimmed["images_bytes"] > 0 and not image.exists()
+    assert all("images" not in e["payload"] for e in await hub.events(0, sid) if e["kind"] == "tool")
+    assert attachment.exists() and transcript.exists()  # the agent may read these again
+    await hub.delete_session(sid)
+    assert not attachment.exists() and not transcript.exists()

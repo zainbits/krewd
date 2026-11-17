@@ -1079,6 +1079,21 @@ class KrewdViewModel(private val app: Application) {
         act { it.deleteSession(session.id) }
     }
 
+    /** Deletes a chat on the server at once (Settings > Storage confirms first, so there is no Undo). */
+    fun deleteSessionNow(id: String, done: (String?) -> Unit) {
+        request({ it.deleteSession(id) }) { _, problem ->
+            if (problem == null) {
+                _state.update { s -> s.copy(sessions = s.sessions.filterNot { it.id == id }) }
+                live.remove(id)
+                pushLive()
+                notifier.clear(id)
+                prefs.setTextDraft(id, "")
+                if (_state.value.openSessionId == id) closeSession()
+            }
+            done(problem)
+        }
+    }
+
     // Tool-result images, decoded at most about phone width; a handful stay in memory.
     private val toolImages = object : android.util.LruCache<String, androidx.compose.ui.graphics.ImageBitmap>(24 * 1024 * 1024) {
         override fun sizeOf(key: String, value: androidx.compose.ui.graphics.ImageBitmap) = value.width * value.height * 4

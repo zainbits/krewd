@@ -594,6 +594,18 @@ def create_app(hub: Hub, token: str, lifespan_hub: bool = True) -> FastAPI:
         await hub.delete_session(session_id)
         return {"ok": True}
 
+    @app.post("/api/sessions/{session_id}/trim", dependencies=auth)
+    async def trim_session(session_id: uuid.UUID) -> dict[str, Any]:
+        return await hub.trim_session(session_id)
+
+    @app.get("/api/storage", dependencies=auth)
+    async def storage() -> dict[str, Any]:
+        return await hub.storage_report()
+
+    @app.post("/api/storage/clean", dependencies=auth)
+    async def storage_clean() -> dict[str, Any]:
+        return await hub.clean_storage()
+
     @app.post("/api/sessions/{session_id}/messages", dependencies=auth, status_code=202)
     async def message(session_id: uuid.UUID, body: Message) -> dict[str, Any]:
         await hub.get_session(session_id)

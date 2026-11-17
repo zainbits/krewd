@@ -44,7 +44,8 @@ Krewd's certificate is self-signed; clients trust it by its pin, `sha256/` + bas
 | `GET /api/sessions?archived=false` | | sessions, pinned first, newest first |
 | `POST /api/sessions` | `{text, engine?, mode?, auto_approve?, config?: {config_id: value}, attachments?: [upload_id], tabs?: [{id, title, url}], client_id?}` | the new session; its first turn starts at once |
 | `GET /api/sessions/{id}` | | session |
-| `DELETE /api/sessions/{id}` | | `{ok}`; stops the task's turn, closes its agent session where the agent supports it, and deletes its history, approvals and messages (the app waits 3 s for Undo before calling this) |
+| `DELETE /api/sessions/{id}` | | `{ok}`; stops the task's turn, closes its agent session where the agent supports it, and deletes its history, approvals and messages, its attachments and tool images, and the agent's transcripts of its sessions (the app waits 3 s for Undo before calling this) |
+| `POST /api/sessions/{id}/trim` | | `{repeats_bytes, tools_bytes, images_bytes, bytes}`; shrinks the chat's history in Krewd (see Storage); 409 while it works |
 | `PATCH /api/sessions/{id}` | `{title?, auto_approve?, pinned?, archived?, mode?, config?: {config_id: value}}` | session |
 | `POST /api/sessions/{id}/messages` | `{text, attachments?, tabs?, delivery?: steer\|queue\|interrupt, client_id?}` | `{ok, message}` (see Messages below) |
 | `POST /api/sessions/{id}/cancel` | | `{ok}`; stops the turn, answers its open approvals with "cancelled" and drops the messages queued behind it |
@@ -160,6 +161,18 @@ Pages in the agents' Brave are told the location the owner applies here (`locati
 
 A place: `{id, name, lat, lon, accuracy, source, applied_at | created_at}`. `current` is the newest applied place (or the config one, `id: null`), `recent` the up to 3 applied before it, newest first, `favorites` the named places by name. `browser`: `applied` (Brave holds the current location), `waiting` (Brave is not running; it gets the location when it starts), `error` (with `detail`) or `unknown`. To change Brave's location the server opens the extension's own page (`set.html`, not reachable from websites) in a background tab over DevTools, reads the answer from its title and closes it; the tab list never shows that page. When Brave starts, the server checks that it still holds the current location and puts it back if not.
 
+
+## Storage
+
+`GET /api/storage` reports what each chat takes on the machine, largest first: `{database_bytes, total_bytes, chats: [{id, title, engine, status, pinned, archived, routine_id, updated_at, bytes, history: {bytes, events, repeats_bytes, repeats}, attachments: {bytes, count}, tool_images: {bytes, count}, transcript: {bytes, count}}], reclaimable: {repeats_bytes, loose_files: {bytes, count}, loose_transcripts: {bytes, count}}}`.
+
+- `history`: the chat's events in PostgreSQL. `repeats` are older copies the app never shows: every change to a chat stores a `session` snapshot, and every tool-call update stores the whole tool call again. Since 0.19.0 only the newest snapshot is kept as it is written.
+- `transcript`: the agent's own record of the chat's ACP sessions (Claude Code `~/.claude/projects/*/<id>.jsonl` and `<id>/`, Codex `~/.codex/sessions/**/rollout-*-<id>.jsonl`; `CLAUDE_CONFIG_DIR` and `CODEX_HOME` are honoured). The agent resumes the chat from it, so only deleting the chat removes it.
+- `loose_files`: attachments and tool images of chats that no longer exist. `loose_transcripts`: transcripts Krewd's agents wrote (Claude Code through the SDK in `KREWD_WORKDIR`, Codex through codex-acp) that no chat uses (deleted chats, sessions replaced by a handover compact, probes) and that nothing changed for 24 hours. The owner's own terminal sessions never count.
+
+`POST /api/storage/clean` frees all of `reclaimable` (repeats only in chats that are not working), then runs `VACUUM FULL events` so the space goes back to the disk. Returns `{repeats_bytes, files_bytes, transcripts_bytes, bytes}`. Live chats keep their messages, attachments and agent sessions, and each tool call stays in its place with its latest state.
+
+`POST /api/sessions/{id}/trim` goes further for one chat, still without touching the agent: it drops the repeats, cuts each tool call's input and output to 600 characters and removes its tool images. Messages, replies, attachments and the agent's session stay, so the agent resumes it as before.
 
 ## Attachments
 

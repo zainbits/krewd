@@ -28,6 +28,7 @@ from . import routines as rtn
 from .acp import AcpError, AcpProcess, MethodNotFound
 from .tool_images import ToolImages, is_empty, split as split_images
 from .attachments import Attachments, UnknownUpload, prompt_blocks
+from . import storage as store
 from .config import Profile, Settings
 from .logins import LoginError, Logins
 from .profiles import PRESETS, Gateways, ProfileError, check_gateway, set_key, slug, valid_url, write_profiles
@@ -90,6 +91,13 @@ class Runtime:
     assistant_run: str | None = None
     assistant_text: str = ""
     usage: dict[str, Any] | None = None
+
+
+def _mtime(path: Any) -> float:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return float("inf")
 
 
 def _clip(value: Any, limit: int = CLIP) -> str:
@@ -210,6 +218,8 @@ class Hub:
         self.engine_info: dict[str, dict[str, Any]] = {}
         self.attachments = Attachments(settings.data_dir / "common" / "attachments", settings.max_upload_mb * 1024 * 1024)
         self.tool_images = ToolImages(settings.data_dir / "common" / "tool-images")
+        self.transcripts = store.Transcripts(settings.workdir, settings.claude_dir, settings.codex_dir)
+        self.storage_lock = asyncio.Lock()  # one storage scan or cleanup at a time
         self.probing: set[str] = set()
         self.tab_owner: dict[str, uuid.UUID] = {}  # browser tab id -> session that last used it
         self.last_sent: dict[uuid.UUID, dict[str, Any]] = {}  # last session state emitted, to skip repeats
@@ -668,7 +678,11 @@ class Hub:
         if self.last_sent.get(session_id) == same:
             return
         self.last_sent[session_id] = same
-        await self.emit(session_id, "session", session)
+        seq = await self.emit(session_id, "session", session)
+        # The app only uses a chat's newest snapshot: older ones are dead weight (most of the database).
+        await self.pool.execute(
+            "delete from events where session_id = $1 and kind = 'session' and seq < $2", session_id, seq
+        )
 
     async def events(self, after: int, session_id: uuid.UUID | None = None, limit: int = 1000) -> list[dict[str, Any]]:
         if session_id is None:
@@ -835,9 +849,253 @@ class Hub:
         for tab, owner in list(self.tab_owner.items()):
             if owner == session_id:
                 del self.tab_owner[tab]
+        ids = await self._agent_sessions(session_id)
         # Events, approvals and messages go with it (on delete cascade).
         await self.pool.execute("delete from sessions where id = $1", session_id)
         self.last_sent.pop(session_id, None)
+        try:
+            await self._remove_chat_files(session_id, ids)
+        except Exception as exc:  # the chat is gone either way; Storage > Free up space finds what is left
+            log.warning("could not remove the files of chat %s: %s", session_id, exc)
+
+    # storage
+
+    async def _agent_sessions(self, session_id: uuid.UUID) -> set[str]:
+        rows = await self.pool.fetch(
+            """select agent_session from sessions where id = $1 and agent_session is not null
+               union select agent_session from session_agents where session_id = $1 and agent_session is not null""",
+            session_id,
+        )
+        return {r["agent_session"] for r in rows}
+
+    async def _remove_chat_files(self, session_id: uuid.UUID, agent_sessions: set[str]) -> int:
+        """A deleted chat's attachments, tool images and agent transcripts (none of them is used again)."""
+        async with self.storage_lock:
+            return await asyncio.to_thread(self._remove_chat_files_sync, str(session_id)[:8], agent_sessions,
+                                           await self._known_prefixes(), await self._used_agent_sessions())
+
+    def _remove_chat_files_sync(self, prefix: str, agent_sessions: set[str], prefixes: set[str], used: set[str]) -> int:
+        freed = 0
+        if prefix not in prefixes:  # another chat whose id starts the same way keeps the files
+            for folder in (self.attachments.root, self.tool_images.root):
+                for path, size in store.files_by_prefix(folder).get(prefix, []):
+                    path.unlink(missing_ok=True)
+                    freed += size
+        if agent_sessions - used:
+            found = self.transcripts.scan()
+            for agent_session in agent_sessions - used:
+                if agent_session in found:
+                    freed += self.transcripts.remove(found[agent_session])
+        return freed
+
+    async def _known_prefixes(self) -> set[str]:
+        return {str(r["id"])[:8] for r in await self.pool.fetch("select id from sessions")}
+
+    async def _used_agent_sessions(self) -> set[str]:
+        rows = await self.pool.fetch(
+            """select agent_session from sessions where agent_session is not null
+               union select agent_session from session_agents where agent_session is not null"""
+        )
+        return {r["agent_session"] for r in rows}
+
+    _REPEATS = """
+        select e.session_id, count(*) as n, coalesce(sum(pg_column_size(e.payload)), 0) as bytes from events e
+        where (e.kind = 'session' and e.seq < (select max(seq) from events x where x.session_id = e.session_id and x.kind = 'session'))
+           or (e.kind = 'tool' and e.payload ? 'tool_call_id' and e.seq < (
+                select max(seq) from events x where x.session_id = e.session_id and x.kind = 'tool'
+                and x.payload->>'tool_call_id' = e.payload->>'tool_call_id'))
+        group by e.session_id"""
+
+    async def storage_report(self) -> dict[str, Any]:
+        """What each chat takes, and what can go without touching any chat an agent can still resume."""
+        async with self.storage_lock:
+            sessions = await self.pool.fetch(
+                """select s.id, s.title, s.engine, s.status, s.pinned, s.archived, s.updated_at,
+                          (select r.id from routines r where r.session_id = s.id limit 1) as routine_id,
+                          coalesce(e.n, 0) as events, coalesce(e.bytes, 0) as event_bytes
+                   from sessions s left join (select session_id, count(*) as n, sum(pg_column_size(payload)) as bytes
+                                              from events group by session_id) e on e.session_id = s.id"""
+            )
+            repeats = {r["session_id"]: r for r in await self.pool.fetch(self._REPEATS)}
+            links = await self.pool.fetch(
+                """select id as session_id, agent_session from sessions where agent_session is not null
+                   union select session_id, agent_session from session_agents where agent_session is not null"""
+            )
+            database = await self.pool.fetchval("select pg_database_size(current_database())")
+            scan = await asyncio.to_thread(self._scan_files)
+        attachments, images, transcripts = scan
+        by_chat: dict[uuid.UUID, set[str]] = {}
+        for link in links:
+            by_chat.setdefault(link["session_id"], set()).add(link["agent_session"])
+        prefixes = {str(r["id"])[:8] for r in sessions}
+        chats = []
+        for r in sessions:
+            prefix = str(r["id"])[:8]
+            att = attachments.get(prefix, [])
+            img = images.get(prefix, [])
+            mine = [transcripts[a] for a in by_chat.get(r["id"], set()) if a in transcripts]
+            rep = repeats.get(r["id"])
+            chat = {
+                "id": str(r["id"]), "title": r["title"], "engine": r["engine"], "status": r["status"],
+                "pinned": r["pinned"], "archived": r["archived"], "routine_id": str(r["routine_id"]) if r["routine_id"] else None,
+                "updated_at": r["updated_at"].isoformat(),
+                "history": {"bytes": int(r["event_bytes"]), "events": r["events"],
+                            "repeats_bytes": int(rep["bytes"]) if rep else 0, "repeats": rep["n"] if rep else 0},
+                "attachments": {"bytes": sum(s for _, s in att), "count": len(att)},
+                "tool_images": {"bytes": sum(s for _, s in img), "count": len(img)},
+                "transcript": {"bytes": sum(t.bytes for t in mine), "count": len(mine)},
+            }
+            chat["bytes"] = sum(chat[k]["bytes"] for k in ("history", "attachments", "tool_images", "transcript"))
+            chats.append(chat)
+        chats.sort(key=lambda c: c["bytes"], reverse=True)
+        used = {a for links_ in by_chat.values() for a in links_}
+        cutoff = time.time() - store.FILE_QUIET_SECONDS
+        loose_files = [(p, s) for group in (attachments, images) for pre, items in group.items() if pre not in prefixes
+                       for p, s in items if _mtime(p) < cutoff]
+        now = time.time()
+        loose_transcripts = [t for a, t in transcripts.items() if t.krewd and a not in used and store.quiet(t, now)]
+        return {
+            "database_bytes": database,
+            "chats": chats,
+            "total_bytes": sum(c["bytes"] for c in chats),
+            "reclaimable": {
+                "repeats_bytes": sum(c["history"]["repeats_bytes"] for c in chats),
+                "loose_files": {"bytes": sum(s for _, s in loose_files), "count": len(loose_files)},
+                "loose_transcripts": {"bytes": sum(t.bytes for t in loose_transcripts), "count": len(loose_transcripts)},
+            },
+        }
+
+    def _scan_files(self):
+        return (store.files_by_prefix(self.attachments.root), store.files_by_prefix(self.tool_images.root),
+                self.transcripts.scan())
+
+    async def _drop_repeats(self, session_ids: list[uuid.UUID]) -> int:
+        """Old copies of each chat's state and of each tool call; every tool call keeps its place with its last copy."""
+        if not session_ids:
+            return 0
+        async with self.emit_lock:
+            async with self.pool.acquire() as conn, conn.transaction():
+                freed = await conn.fetchval(
+                    """select coalesce(sum(pg_column_size(payload)), 0) from events e where session_id = any($1::uuid[]) and (
+                         (kind = 'session' and seq < (select max(seq) from events x where x.session_id = e.session_id and x.kind = 'session'))
+                         or (kind = 'tool' and payload ? 'tool_call_id' and seq > (select min(seq) from events x
+                             where x.session_id = e.session_id and x.kind = 'tool' and x.payload->>'tool_call_id' = e.payload->>'tool_call_id')))""",
+                    session_ids,
+                )
+                await conn.execute(
+                    """delete from events e where e.session_id = any($1::uuid[]) and e.kind = 'session'
+                       and e.seq < (select max(seq) from events x where x.session_id = e.session_id and x.kind = 'session')""",
+                    session_ids,
+                )
+                await conn.execute(
+                    """with g as (select session_id, payload->>'tool_call_id' as tid, min(seq) as first, max(seq) as last
+                                  from events where session_id = any($1::uuid[]) and kind = 'tool' and payload ? 'tool_call_id'
+                                  group by 1, 2 having count(*) > 1)
+                       update events e set payload = l.payload from g join events l on l.seq = g.last
+                       where e.seq = g.first""",
+                    session_ids,
+                )
+                await conn.execute(
+                    """delete from events e using (select session_id, payload->>'tool_call_id' as tid, min(seq) as first
+                                                    from events where session_id = any($1::uuid[]) and kind = 'tool'
+                                                    and payload ? 'tool_call_id' group by 1, 2) g
+                       where e.session_id = g.session_id and e.kind = 'tool' and e.payload->>'tool_call_id' = g.tid
+                       and e.seq > g.first""",
+                    session_ids,
+                )
+        return int(freed)
+
+    async def _vacuum(self) -> None:
+        """Give the freed table space back to the disk (a short lock; Krewd's role owns its tables)."""
+        try:
+            async with self.emit_lock:
+                await self.pool.execute("vacuum full events")
+        except asyncpg.PostgresError as exc:
+            log.warning("could not vacuum events: %s", exc)
+
+    async def _idle_chats(self) -> list[uuid.UUID]:
+        rows = await self.pool.fetch(
+            """select id from sessions s where status not in ('running', 'waiting')
+               and not exists (select 1 from messages m where m.session_id = s.id and m.state = 'queued')"""
+        )
+        return [r["id"] for r in rows if not self._busy(r["id"])]
+
+    def _busy(self, session_id: uuid.UUID) -> bool:
+        rt = self.runtimes.get(session_id)
+        return bool(rt and rt.running)
+
+    async def clean_storage(self) -> dict[str, Any]:
+        """Frees what no chat needs: repeated history rows (idle chats), files of deleted chats, and transcripts
+        Krewd's agents left behind for sessions no chat uses. Live chats stay resumable."""
+        repeats = 0
+        for chat in await self._idle_chats():  # one chat at a time, so live updates only ever wait a moment
+            if not self._busy(chat):
+                repeats += await self._drop_repeats([chat])
+        freed = {"repeats_bytes": repeats}
+        async with self.storage_lock:
+            prefixes, used = await self._known_prefixes(), await self._used_agent_sessions()
+            freed.update(await asyncio.to_thread(self._clean_files_sync, prefixes, used))
+        await self._vacuum()
+        freed["bytes"] = sum(freed.values())
+        return freed
+
+    def _clean_files_sync(self, prefixes: set[str], used: set[str]) -> dict[str, int]:
+        files = 0
+        for folder in (self.attachments.root, self.tool_images.root):
+            for prefix, items in store.files_by_prefix(folder, settled=True).items():
+                if prefix in prefixes:
+                    continue
+                for path, size in items:
+                    path.unlink(missing_ok=True)
+                    files += size
+        transcripts = 0
+        now = time.time()
+        for agent_session, t in self.transcripts.scan().items():
+            if t.krewd and agent_session not in used and store.quiet(t, now):
+                transcripts += self.transcripts.remove(t)
+        return {"files_bytes": files, "transcripts_bytes": transcripts}
+
+    async def trim_session(self, session_id: uuid.UUID) -> dict[str, Any]:
+        """Shrink a chat's history in Krewd only: repeated rows go, tool calls keep a short input and output,
+        tool images are removed. Messages, attachments and the agent's own session stay, so it resumes as before."""
+        session = await self.get_session(session_id)
+        if session["status"] in ("running", "waiting") or self._busy(session_id):
+            raise Conflict("this chat is working; trim it when it is done")
+        if (rt := self.runtimes.get(session_id)) is not None:
+            rt.tools.clear()
+        freed = await self._drop_repeats([session_id])
+        before = await self.pool.fetchval(
+            "select coalesce(sum(pg_column_size(payload)), 0) from events where session_id = $1 and kind = 'tool'", session_id
+        )
+        async with self.emit_lock:
+            rows = await self.pool.fetch("select seq, payload from events where session_id = $1 and kind = 'tool'", session_id)
+            for r in rows:
+                p = dict(r["payload"])
+                changed = False
+                for key in ("input", "output"):
+                    if isinstance(p.get(key), str) and len(p[key]) > store.TRIM_CLIP:
+                        p[key] = _clip(p[key], store.TRIM_CLIP).replace("more characters)", "more characters, trimmed)")
+                        changed = True
+                if p.pop("images", None):
+                    changed = True
+                if changed:
+                    await self.pool.execute("update events set payload = $2 where seq = $1", r["seq"], p)
+        after = await self.pool.fetchval(
+            "select coalesce(sum(pg_column_size(payload)), 0) from events where session_id = $1 and kind = 'tool'", session_id
+        )
+        prefix = str(session_id)[:8]
+        images = 0
+        shared = await self.pool.fetchval(
+            "select count(*) from sessions where id <> $1 and left(id::text, 8) = $2", session_id, prefix
+        )
+        if not shared:  # another chat whose id starts the same way keeps its images
+            for path, size in store.files_by_prefix(self.tool_images.root).get(prefix, []):
+                path.unlink(missing_ok=True)
+                images += size
+        await self._vacuum()
+        result = {"repeats_bytes": freed, "tools_bytes": max(0, int(before) - int(after)), "images_bytes": images}
+        result["bytes"] = sum(result.values())
+        return result
 
     async def send(
         self,
