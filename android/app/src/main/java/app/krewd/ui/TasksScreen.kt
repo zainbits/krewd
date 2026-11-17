@@ -13,6 +13,8 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -49,11 +51,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
@@ -228,14 +228,17 @@ fun TasksScreen(state: UiState, viewModel: KrewdViewModel, padding: PaddingValue
             }
         }
 
-        // The dock: a fade so rows slide under it, then the Ask Krewd bar above the nav bar.
+        // The Ask Krewd bar floats above the nav bar; rows scroll full bleed behind both.
         val navRoom = MeniscusNavBarDefaults.BottomGap + MeniscusNavBarDefaults.Height
+        // Transparent shield over the dock: taps on the gaps around the bar and nav bar must not reach rows behind;
+        // drags still pass through, so the list scrolls from there.
         Box(
             Modifier
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
-                .height(160.dp + with(LocalDensity.current) { WindowInsets.navigationBars.getBottom(this).toDp() })
-                .background(Brush.verticalGradient(listOf(Color.Transparent, MaterialTheme.colorScheme.surface.copy(alpha = 0.96f), MaterialTheme.colorScheme.surface))),
+                .windowInsetsPadding(WindowInsets.navigationBars)
+                .height(navRoom + ASK_BAR_GAP + ASK_BAR_HEIGHT)
+                .pointerInput(Unit) { detectTapGestures { } },
         )
         AskBar(
             text = state.newTaskText,
