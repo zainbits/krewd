@@ -1023,6 +1023,15 @@ class KrewdViewModel(private val app: Application) {
         }
     }
 
+    /** One server call for a screen that keeps its own state: [done] gets the result or what went wrong, on the main thread. */
+    fun <T : Any> request(block: (KrewdApi) -> T, done: (T?, String?) -> Unit) {
+        val client = api ?: return done(null, "Not connected to Krewd")
+        scope.launch(Dispatchers.IO) {
+            val result = runCatching { block(client) }
+            withContext(Dispatchers.Main) { done(result.getOrNull(), result.exceptionOrNull()?.let { it.message ?: "Request failed" }) }
+        }
+    }
+
     fun archive(id: String) = act { client ->
         client.updateSession(id, JSONObject().put("archived", true))
         _state.update { s -> s.copy(sessions = s.sessions.filterNot { it.id == id }) }

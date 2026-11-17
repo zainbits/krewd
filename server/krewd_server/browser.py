@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import itertools
 import json
 import logging
@@ -41,6 +42,11 @@ MAX_FPS = {"standard": 30, "high": 60}
 KEEPALIVE_SECONDS = 10  # resend the last frame so idle streams stay open and dead ones are noticed
 IDLE_CLOSE_SECONDS = 30
 OWNER_GRACE_SECONDS = 4  # a tab the owner just used is not taken for an agent's
+# The Krewd location extension (deploy/fixed-location). Its manifest carries a fixed public key, so its id is the
+# same on every machine. Its set.html page reads or changes the location it answers pages with.
+LOCATION_EXTENSION = "jkjeibbbekignlhegjpgjaiocpdpdgkb"
+LOCATION_PAGE = f"chrome-extension://{LOCATION_EXTENSION}/set.html"
+LOCATION_PAGE_SECONDS = 6
 BUTTONS = {"left": 1, "right": 2, "middle": 4}
 FOCUS_JS = """(() => {
   let e = document.activeElement;
@@ -215,6 +221,8 @@ class Browser:
         # The owner's vertical view per tab ({width, height, scale}). Kept across reconnects, so it comes
         # back when the phone watches again; an agent using the tab drops it (agents work in horizontal).
         self.views: dict[str, dict[str, float]] = {}
+        self.location_lock = asyncio.Lock()
+        self.tasks: set[asyncio.Task] = set()
 
     def _http(self, path: str, method: str = "GET") -> Any:
         try:
@@ -231,7 +239,7 @@ class Browser:
             {"id": t["id"], "title": t.get("title") or t.get("url", ""), "url": t.get("url", ""),
              "view": "vertical" if t["id"] in self.views else "horizontal"}
             for t in targets
-            if t.get("type") == "page" and not t.get("url", "").startswith("devtools://")
+            if t.get("type") == "page" and not hidden_url(t.get("url", ""))
         ]
 
     async def new_tab(self, url: str | None = None) -> dict[str, Any]:
@@ -270,11 +278,12 @@ class Browser:
             await link.call("Emulation.clearDeviceMetricsOverride")
             link.emulated = False
 
-    async def watch(self, on_activity) -> None:
+    async def watch(self, on_activity, on_connect=None) -> None:
         """Follow the browser's tabs; report a tab that opens or navigates while the owner is not using it.
 
         `on_activity({id, url, title})` returns the session it was linked to, or None. A linked tab that is
-        in the vertical view goes back to horizontal, since an agent is now driving it.
+        in the vertical view goes back to horizontal, since an agent is now driving it. `on_connect()` runs
+        each time the browser is reached (at start and after Brave restarts), without holding up the watch.
         """
         while True:
             try:
@@ -282,6 +291,10 @@ class Browser:
                 version = await asyncio.to_thread(self._http, "/json/version")
                 async with websockets.connect(version["webSocketDebuggerUrl"], max_size=None, open_timeout=5) as ws:
                     await ws.send(json.dumps({"id": 1, "method": "Target.setDiscoverTargets", "params": {"discover": True}}))
+                    if on_connect:
+                        task = asyncio.create_task(on_connect())
+                        self.tasks.add(task)
+                        task.add_done_callback(self.tasks.discard)
                     async for raw in ws:
                         message = json.loads(raw)
                         method = message.get("method")
@@ -294,7 +307,7 @@ class Browser:
                             continue
                         info = params.get("targetInfo") or {}
                         url = info.get("url", "")
-                        if info.get("type") != "page" or url.startswith("devtools://"):
+                        if info.get("type") != "page" or hidden_url(url):
                             continue
                         tab_id = info["targetId"]
                         if known.get(tab_id) == url:
@@ -316,6 +329,46 @@ class Browser:
             except Exception as exc:
                 log.debug("browser watch: %s", exc)
             await asyncio.sleep(5)
+
+    async def location(self, value: dict[str, float] | None | str = "read") -> dict[str, float] | None:
+        """Read ("read") or set ({lat, lon, accuracy}, or None to clear) the location extension's location.
+
+        Opens the extension's page in a background tab (never brought to the front), reads its answer from the
+        page title and closes the tab. Returns the location the extension now holds.
+        """
+        fragment = "read" if value == "read" else json.dumps(value)
+        url = f"{LOCATION_PAGE}#{urllib.parse.quote(fragment, safe='')}"
+        async with self.location_lock:
+            version = await asyncio.to_thread(self._http, "/json/version")
+            async with websockets.connect(version["webSocketDebuggerUrl"], max_size=None, open_timeout=5) as ws:
+                ids = itertools.count(1)
+
+                async def call(method: str, params: dict[str, Any]) -> dict[str, Any]:
+                    msg_id = next(ids)
+                    await ws.send(json.dumps({"id": msg_id, "method": method, "params": params}))
+                    while True:
+                        message = json.loads(await asyncio.wait_for(ws.recv(), 5))
+                        if message.get("id") == msg_id:
+                            if "error" in message:
+                                raise RuntimeError(message["error"].get("message", "DevTools error"))
+                            return message.get("result", {})
+
+                target = (await call("Target.createTarget", {"url": url, "background": True}))["targetId"]
+                self.touched[target] = time.monotonic()  # not an agent's tab
+                try:
+                    deadline = time.monotonic() + LOCATION_PAGE_SECONDS
+                    while time.monotonic() < deadline:
+                        title = (await call("Target.getTargetInfo", {"targetId": target}))["targetInfo"].get("title", "")
+                        if title.startswith("krewd-location:"):
+                            answer = json.loads(title.removeprefix("krewd-location:"))
+                            if not answer.get("ok"):
+                                raise RuntimeError("the location extension refused the location")
+                            return answer.get("location")
+                        await asyncio.sleep(0.1)
+                    raise RuntimeError("the location extension did not answer (is it loaded? see run-browser.sh)")
+                finally:
+                    with contextlib.suppress(Exception):
+                        await call("Target.closeTarget", {"targetId": target})
 
     async def activate(self, target_id: str) -> None:
         """Bring the tab to the front, so it paints (background tabs send no screencast frames)."""
@@ -552,6 +605,11 @@ class Browser:
         for link in list(self.links.values()):
             if not link.closed:
                 await link.ws.close()
+
+
+def hidden_url(url: str) -> bool:
+    """Pages the owner never sees as tabs: DevTools, and the location extension's own page."""
+    return url.startswith(("devtools://", LOCATION_PAGE))
 
 
 def partial_mouse(link: TabLink):

@@ -8,9 +8,38 @@ BRAVE="$(find_brave)" || { echo "Brave not found; set KREWD_BROWSER in $ENV_FILE
 PROFILE="$(conf KREWD_BROWSER_PROFILE "$HOME/.local/share/krewd/agent-brave")"
 PORT="$(conf KREWD_CDP_PORT 9222)"
 mkdir -p "$PROFILE"
-export DISPLAY="${DISPLAY:-$(conf KREWD_DISPLAY :0)}"
-if [[ -z "${XAUTHORITY:-}" || ! -s "${XAUTHORITY:-}" ]]; then
-  for f in "/run/user/$(id -u)/gdm/Xauthority" "$HOME/.Xauthority"; do [[ -s "$f" ]] && { export XAUTHORITY="$f"; break; }; done
+# KREWD_BROWSER_DISPLAY=virtual (default): Brave gets its own invisible screen (Xvfb), so it never shows up on,
+# or takes focus from, the desktop of whoever uses this machine. The phone's live view is its screen.
+# KREWD_BROWSER_DISPLAY=desktop: the old way, a window on the desktop (KREWD_DISPLAY, default :0).
+# The rest of the desktop session's environment (D-Bus, XDG_CURRENT_DESKTOP) stays, so Brave still unlocks its
+# cookies with the desktop keyring either way.
+MODE="$(conf KREWD_BROWSER_DISPLAY virtual)"
+XVFB_PID=""
+if [[ "$MODE" == virtual ]] && ! command -v Xvfb >/dev/null; then
+  echo "KREWD_BROWSER_DISPLAY=virtual needs Xvfb (sudo apt install xvfb); using the desktop for now" >&2
+  MODE=desktop
+fi
+if [[ "$MODE" == virtual ]]; then
+  # The first free display from :99 up. Two Krewds (the demo) each get their own.
+  N=99
+  while [[ -e "/tmp/.X11-unix/X$N" || -e "/tmp/.X$N-lock" ]]; do N=$((N + 1)); done
+  AUTH="$CONFIG_DIR/xvfb-$PORT.auth"  # only this user's programs may draw on it
+  (umask 077; : > "$AUTH")
+  xauth -q -f "$AUTH" add ":$N" . "$(mcookie)"
+  Xvfb ":$N" -screen 0 1920x1080x24 -nolisten tcp -auth "$AUTH" &
+  XVFB_PID=$!
+  trap 'kill "$XVFB_PID" 2>/dev/null' EXIT
+  trap 'exit 143' TERM HUP INT
+  for _ in $(seq 50); do [[ -S "/tmp/.X11-unix/X$N" ]] && break; sleep 0.2; done
+  [[ -S "/tmp/.X11-unix/X$N" ]] || { echo "Xvfb did not start on :$N" >&2; exit 1; }
+  export DISPLAY=":$N" XAUTHORITY="$AUTH"
+  unset WAYLAND_DISPLAY  # on a Wayland desktop, Brave would otherwise open its window there
+  echo "Brave runs on its own screen :$N (Xvfb); nothing appears on the desktop"
+else
+  export DISPLAY="${DISPLAY:-$(conf KREWD_DISPLAY :0)}"
+  if [[ -z "${XAUTHORITY:-}" || ! -s "${XAUTHORITY:-}" ]]; then
+    for f in "/run/user/$(id -u)/gdm/Xauthority" "$HOME/.Xauthority"; do [[ -s "$f" ]] && { export XAUTHORITY="$f"; break; }; done
+  fi
 fi
 # Full 1920x1080, so pages get the normal desktop (1080p) layout; the app's vertical view resizes per tab.
 # --disable-gpu: software rendering. With the GPU, Brave stops painting (about 1 frame a second, and every
@@ -19,27 +48,22 @@ fi
 # KREWD_BROWSER_GPU=1 keeps the GPU for a machine whose display is always on.
 GPU_FLAG=(--disable-gpu)
 [[ "$(conf KREWD_BROWSER_GPU 0)" == 1 ]] && GPU_FLAG=()
-# KREWD_BROWSER_LOCATION=LAT,LON[,ACCURACY_M]: the machine's real, fixed location. A home server has no GPS
-# or Wi-Fi and Brave on Linux has no system location source, so location requests (for example a web
-# attendance check-in) wait forever. If set, a small extension (deploy/fixed-location) answers them with it.
-EXT_FLAGS=()
-LOCATION="$(conf KREWD_BROWSER_LOCATION '')"
-if [[ -n "$LOCATION" ]]; then
-  IFS=, read -r LAT LON ACC <<<"$LOCATION"
-  ACC="${ACC:-50}"
-  NUM='^-?[0-9]+(\.[0-9]+)?$'
-  if [[ "$LAT" =~ $NUM && "$LON" =~ $NUM && "$ACC" =~ $NUM ]]; then
-    EXT="$CONFIG_DIR/fixed-location"
-    mkdir -p "$EXT"
-    cp "$REPO/deploy/fixed-location/manifest.json" "$EXT/"
-    sed -e "s/__LAT__/$LAT/" -e "s/__LON__/$LON/" -e "s/__ACC__/$ACC/" \
-      "$REPO/deploy/fixed-location/location.template.js" > "$EXT/location.js"
-    # Recent Chromium ignores --load-extension unless this feature is turned off.
-    EXT_FLAGS=(--load-extension="$EXT" --disable-features=DisableLoadExtensionCommandLineSwitch)
-  else
-    echo "KREWD_BROWSER_LOCATION must be LAT,LON[,ACCURACY_M] in decimal degrees and metres; ignoring it" >&2
-  fi
+# The Krewd location extension (deploy/fixed-location): a home server has no GPS or Wi-Fi and Brave on Linux has
+# no system location source, so location requests (a web attendance check-in) would wait forever. It answers
+# them with the location the owner applies in the app (or KREWD_BROWSER_LOCATION, which the server applies
+# when the app has never set one); with neither, pages get Brave's own location API.
+# Recent Chromium ignores --load-extension unless this feature is turned off.
+EXT_FLAGS=(--load-extension="$REPO/deploy/fixed-location" --disable-features=DisableLoadExtensionCommandLineSwitch)
+FLAGS=(--user-data-dir="$PROFILE" --remote-debugging-port="$PORT" --remote-debugging-address=127.0.0.1
+  --no-first-run --no-default-browser-check --window-position=0,0 --window-size=1920,1080 "${GPU_FLAG[@]}"
+  "${EXT_FLAGS[@]}")
+[[ "$MODE" == virtual ]] && FLAGS+=(--ozone-platform=x11)
+if [[ -z "$XVFB_PID" ]]; then
+  exec "$BRAVE" "${FLAGS[@]}"
 fi
-exec "$BRAVE" --user-data-dir="$PROFILE" --remote-debugging-port="$PORT" --remote-debugging-address=127.0.0.1 \
-  --no-first-run --no-default-browser-check --window-position=0,0 --window-size=1920,1080 "${GPU_FLAG[@]}" \
-  "${EXT_FLAGS[@]}"
+# With its own screen: run Brave beside Xvfb, and end both when either ends (systemd starts them again).
+"$BRAVE" "${FLAGS[@]}" &
+BRAVE_PID=$!
+wait -n "$XVFB_PID" "$BRAVE_PID" || true
+kill "$BRAVE_PID" 2>/dev/null && wait "$BRAVE_PID" 2>/dev/null
+exit 1

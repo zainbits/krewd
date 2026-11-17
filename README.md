@@ -107,7 +107,8 @@ flowchart LR
 ## Get started
 
 You need a Linux machine with systemd and a desktop session, PostgreSQL 14+, [uv](https://docs.astral.sh/uv/),
-Brave, and at least one ACP agent (for Claude Code, the standalone `claude-agent-acp`).
+Brave, Xvfb (the agents' Brave gets its own invisible screen, so it never takes over your desktop), and at
+least one ACP agent (for Claude Code, the standalone `claude-agent-acp`).
 
 ```bash
 git clone https://github.com/zainbits/krewd.git && cd krewd

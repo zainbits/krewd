@@ -135,7 +135,7 @@ Browser use only (no desktop control). Krewd talks DevTools to the agents' Brave
 | `POST /api/browser/tabs` | `{url?}` | the new tab `{id, title, url}` |
 | `DELETE /api/browser/tabs/{id}` | | `{ok}` |
 | `POST /api/browser/tabs/{id}/view` | `{mode: vertical, width, height, scale}` or `{mode: horizontal}` | `{ok}`. Vertical lays the page out for the phone (CSS pixels, device scale) with `Emulation.setDeviceMetricsOverride`, without a reload. The override belongs to Krewd's DevTools connection: it ends when nobody watches the tab, and Krewd clears it as soon as an agent starts using the tab. |
-| `GET /api/browser/tabs/{id}/stream` | `?quality=standard` (default: at most 30 fps per viewer, JPEG quality 50) or `high` (60 fps, quality 85); both full 1080p. Viewers of one tab share its screencast, and the newest viewer's quality applies | `multipart/x-mixed-replace; boundary=frame`: one JPEG per part, with `Content-Length`, `X-Viewport: <width>x<height>` (CSS pixels), `X-View: vertical|horizontal` and `X-Scroll: <scroll y>/<page height>` (CSS pixels, for the phone's scroll bar). The tab is brought to the front first (background tabs do not paint). The last frame is repeated every 10 s while nothing changes. |
+| `GET /api/browser/tabs/{id}/stream` | `?quality=standard` (default: at most 30 fps per viewer, JPEG quality 50) or `high` (60 fps, quality 85); both full 1080p. Viewers of one tab share its screencast, and the newest viewer's quality applies | `multipart/x-mixed-replace; boundary=frame`: one JPEG per part, with `Content-Length`, `X-Viewport: <width>x<height>` (CSS pixels), `X-View: vertical|horizontal` and `X-Scroll: <scroll y>/<page height>` (CSS pixels, for the phone's scroll bar). The tab is brought to the front first (background tabs do not paint); Brave draws on its own invisible screen (`KREWD_BROWSER_DISPLAY=virtual`), so this never shows on or takes focus from the machine's desktop. The last frame is repeated every 10 s while nothing changes. |
 | `GET /api/browser/tabs/{id}/snapshot` | `?width=360` (80 to 1280 pixels) | `image/jpeg`: one still of the tab's visible viewport, scaled to that width, for the app's working-task cards. The tab is not brought to the front. 404 when the tab is gone, 503 when the browser gives no picture. |
 | `POST /api/browser/tabs/{id}/input` | `{type: mouse, action: move\|down\|up\|click, x, y, button?: left\|right\|middle, clicks?: 1\|2, held?}` (`held` on moves while a button is down; `clicks: 2` on down and up for the second press of a double-click), `{type: tap, x, y}`, `{type: scroll, x, y, dx, dy}` (all 0..1 of the frame), `{type: text, text}`, `{type: key, key, modifiers?}` (`Enter`, `Backspace`, `Delete`, `Tab`, `Escape`, `Space`, arrows, `Home`, `End`, `PageUp`, `PageDown`, or one letter or digit for shortcuts; `modifiers`: any of `ctrl`, `alt`, `shift`, `meta`, so `{key: ArrowLeft, modifiers: [ctrl]}` jumps a word), `{type: navigate, action: back or forward or reload}` or `{type: navigate, url}` | `{ok: true}`; after a left click or release also `{editable, password}`: whether a text field now has focus, so the phone can open its keyboard |
 
@@ -144,6 +144,21 @@ View only: while the session that last drove a tab is running a turn, the tab is
 Which tab an agent uses is seen from the browser side, so it works for any engine: Krewd follows the browser's tabs over DevTools (`Target.setDiscoverTargets`), and a tab that opens or navigates while the owner is not touching it is linked to the one session with a running turn (or, if several run, the one in the middle of a tool call). That session gets a `browser` event and `browser_tab`.
 
 Typed text is passed to `Input.insertText` and nowhere else: not logged, not stored, not added to the task's events.
+
+### Location
+
+Pages in the agents' Brave are told the location the owner applies here (`locations.py`; the extension `deploy/fixed-location` answers the page's Geolocation API). It changes only when the owner applies one: nothing follows the phone. Until one is applied, `KREWD_BROWSER_LOCATION` is the current location (`source: config`).
+
+| Route | Body | Returns |
+| --- | --- | --- |
+| `GET /api/browser/location` | | the state: `{current, browser, detail, recent, favorites, config}` |
+| `POST /api/browser/location` | `{lat, lon, accuracy? (metres, 1..100000, default 50), name?, source?: phone\|manual\|favorite\|recent}` | the state. Makes it current and sends it to Brave. Applying a place already among the recent ones moves it to the top instead of adding it again. |
+| `POST /api/browser/location/reapply` | | the state; sends the current location to Brave again |
+| `POST /api/browser/location/favorites` | `{name, lat, lon, accuracy?}` | the state (201); at most 50 favorites |
+| `PATCH /api/browser/location/favorites/{id}` | `{name}` | the state |
+| `DELETE /api/browser/location/{id}` | | the state; forgets a favorite or a recent place (not the current one: 422) |
+
+A place: `{id, name, lat, lon, accuracy, source, applied_at | created_at}`. `current` is the newest applied place (or the config one, `id: null`), `recent` the up to 3 applied before it, newest first, `favorites` the named places by name. `browser`: `applied` (Brave holds the current location), `waiting` (Brave is not running; it gets the location when it starts), `error` (with `detail`) or `unknown`. To change Brave's location the server opens the extension's own page (`set.html`, not reachable from websites) in a background tab over DevTools, reads the answer from its title and closes it; the tab list never shows that page. When Brave starts, the server checks that it still holds the current location and puts it back if not.
 
 
 ## Attachments

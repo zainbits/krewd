@@ -42,6 +42,7 @@ fun SettingsScreen(state: UiState, viewModel: KrewdViewModel, padding: PaddingVa
     var token by remember(saved) { mutableStateOf(saved.token) }
     var showToken by remember { mutableStateOf(false) }
     var confirmRestart by remember { mutableStateOf(false) }
+    var locationSheet by remember { mutableStateOf(false) }
     val online = state.connection is Connection.Online
     val clipboard = LocalClipboardManager.current
     LaunchedEffect(online) { if (online) viewModel.loadProfiles() }
@@ -80,6 +81,8 @@ fun SettingsScreen(state: UiState, viewModel: KrewdViewModel, padding: PaddingVa
             dismissButton = { TextButton(onClick = { confirmRestart = false }) { Text("Cancel") } },
         )
     }
+
+    if (locationSheet) LocationSheet(viewModel) { locationSheet = false }
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -150,6 +153,17 @@ fun SettingsScreen(state: UiState, viewModel: KrewdViewModel, padding: PaddingVa
         item { SecurityCard(state, viewModel) }
         item { SignInsCard(state, viewModel) }
         item { ProfilesCard(state, viewModel) }
+        item {
+            SectionCard {
+                Text("Browser location", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    "The location websites in the agents' Brave see. Set it from this phone's GPS, a favorite or by hand; it changes only when you apply one.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                OutlinedButton(onClick = { locationSheet = true }, enabled = online, modifier = Modifier.fillMaxWidth()) { Text("Browser location") }
+            }
+        }
         item {
             SectionCard {
                 Text("Emergency", style = MaterialTheme.typography.titleMedium)

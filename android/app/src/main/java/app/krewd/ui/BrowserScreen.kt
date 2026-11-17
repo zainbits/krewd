@@ -146,6 +146,8 @@ fun BrowserScreen(state: UiState, viewModel: KrewdViewModel, landscape: Boolean)
     val engineId = state.sessions.firstOrNull { it.id == state.lastSessionId }?.engine
     var cursor by remember(engineId) { mutableStateOf(viewModel.inputCursor(engineId)) }
     var keyboard by remember { mutableStateOf(false) }
+    var locationSheet by remember { mutableStateOf(false) }
+    if (locationSheet) LocationSheet(viewModel) { locationSheet = false }
     var allTabs by remember { mutableStateOf(false) }
     var editingUrl by remember { mutableStateOf(false) }
     var picker by remember { mutableStateOf<Pair<BrowserTab, Boolean>?>(null) } // tab, true = picture-in-picture
@@ -204,6 +206,7 @@ fun BrowserScreen(state: UiState, viewModel: KrewdViewModel, landscape: Boolean)
                 viewModel.setInputCursor(engineId, it)
             },
             onKeyboard = { keyboard = true },
+            onLocation = { locationSheet = true },
             onAll = { allTabs = true },
         )
         Box(Modifier.weight(1f).fillMaxWidth().padding(horizontal = 6.dp)) {
@@ -527,6 +530,7 @@ private fun ControlsRow(
     onHighQuality: (Boolean) -> Unit,
     onCursor: (Boolean) -> Unit,
     onKeyboard: () -> Unit,
+    onLocation: () -> Unit,
     onAll: () -> Unit,
 ) {
     var menu by remember { mutableStateOf(false) }
@@ -559,6 +563,8 @@ private fun ControlsRow(
                 CheckRow("Touch", !cursor) { menu = false; onCursor(false) }
                 HorizontalDivider()
                 DropdownMenuItem(text = { Text("Keyboard") }, enabled = !viewOnly, onClick = { menu = false; onKeyboard() })
+                HorizontalDivider()
+                DropdownMenuItem(text = { Text("Location…") }, onClick = { menu = false; onLocation() })
             }
         }
     }

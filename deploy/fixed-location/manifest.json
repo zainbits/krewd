@@ -1,8 +1,10 @@
 {
   "manifest_version": 3,
-  "name": "Krewd fixed location",
-  "version": "1.0",
-  "description": "Answers pages' location requests with this machine's fixed location from Krewd's config (KREWD_BROWSER_LOCATION).",
+  "name": "Krewd location",
+  "version": "2.0",
+  "description": "Answers pages' location requests with the location the owner applied in the Krewd app.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAnsr6/AVIgGQhErmS95KqDYttxDLRlXhdf3CF7bmTc8YTJmn3K/9WXt+fstSLQ9Zhbdw0LRhJWUFCTwclIzBPNmQ5d6CDloY88VkbSW80SwTABUsjyDV01K1dEyg+88x1JkpoiruZ59cyvv4aJVbx7KaSjKRqqvYfyOoVeSxKoO8MuI19qfPX7FtSy6GhtDmzMfDCe1MmdvargkmxFkweoF0YDGyMwgm1l4nrmv01X34mWM1aoiVeS2mGMek9VgAlmA8JTSa113GDSBFE1HU1bQ77Cc/58rDUv1lLyuqNAn7jQ4DYTyWtPwZfgQvf24A0dx3h7SXUsRn259d39FuvaQIDAQAB",
+  "permissions": ["storage"],
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
@@ -12,6 +14,14 @@
       "match_about_blank": true,
       "match_origin_as_fallback": true,
       "world": "MAIN"
+    },
+    {
+      "matches": ["<all_urls>"],
+      "js": ["bridge.js"],
+      "run_at": "document_start",
+      "all_frames": true,
+      "match_about_blank": true,
+      "match_origin_as_fallback": true
     }
   ]
 }

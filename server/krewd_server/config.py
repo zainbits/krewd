@@ -75,6 +75,8 @@ class Settings:
     # Agent -> the profile it runs on; an agent not listed runs on its own sign-in account.
     agent_profiles: dict[str, str] = field(default_factory=dict)
     cdp_port: int = 9222
+    # KREWD_BROWSER_LOCATION ("LAT,LON[,ACCURACY_M]"): the agents' Brave location until one is applied in the app.
+    browser_location: str = ""
     data_dir: Path = Path.home() / ".krewd"
     max_upload_mb: int = 1024
     share_dirs: tuple[Path, ...] = ()  # folders the agents hand files back from; empty means workdir/outputs
@@ -193,6 +195,7 @@ def load_settings() -> Settings:
         profiles_file=profiles_file,
         agent_profiles=load_agent_profiles(profiles_file),
         cdp_port=int(os.environ.get("KREWD_CDP_PORT", "9222")),
+        browser_location=os.environ.get("KREWD_BROWSER_LOCATION", "").strip(),
         data_dir=Path(os.path.expanduser(os.environ.get("KREWD_DATA_DIR", "~/.krewd"))),
         max_upload_mb=int(os.environ.get("KREWD_MAX_UPLOAD_MB", "1024")),
         share_dirs=tuple(

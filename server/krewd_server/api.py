@@ -22,6 +22,7 @@ from . import files as shared_files
 from .attachments import TooLarge
 from .browser import Browser, BrowserUnavailable, TabGone
 from .hub import Conflict, Hub, NotFound
+from .locations import Invalid as LocationInvalid, Locations
 from .profiles import ProfileError
 from .routines import Invalid
 
@@ -192,6 +193,25 @@ class TabView(BaseModel):
 PREF_KEY = r"^[a-z0-9][a-z0-9_.-]{0,79}$"
 
 
+class LocationApply(BaseModel):
+    lat: float = Field(ge=-90, le=90)
+    lon: float = Field(ge=-180, le=180)
+    accuracy: float = Field(default=50, ge=1, le=100_000)  # metres
+    name: str | None = Field(default=None, max_length=80)  # the favorite it comes from, shown in recents
+    source: Literal["phone", "manual", "favorite", "recent"] = "manual"
+
+
+class LocationFavorite(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    lat: float = Field(ge=-90, le=90)
+    lon: float = Field(ge=-180, le=180)
+    accuracy: float = Field(default=50, ge=1, le=100_000)
+
+
+class LocationName(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+
+
 class SecretAsk(BaseModel):
     tab_id: str | None = Field(default=None, max_length=200)
     fields: list[dict[str, Any]] | None = Field(default=None, max_length=6)
@@ -204,7 +224,7 @@ def create_app(hub: Hub, token: str, lifespan_hub: bool = True) -> FastAPI:
     async def lifespan(_: FastAPI):
         if lifespan_hub:
             await hub.start()
-        watcher = asyncio.create_task(browser.watch(hub.browser_activity))
+        watcher = asyncio.create_task(browser.watch(hub.browser_activity, locations.sync))
         try:
             yield
         finally:
@@ -217,6 +237,7 @@ def create_app(hub: Hub, token: str, lifespan_hub: bool = True) -> FastAPI:
 
     app = FastAPI(title="Krewd", version=__version__, lifespan=lifespan)
     browser = Browser(hub.settings.cdp_port)
+    locations = Locations(hub.pool, browser, hub.settings.browser_location)
     cert = hub.settings.tls_cert
     security = Security(hub.settings, hub.pool, token, tls.pin(cert) if hub.settings.tls != "off" and cert.is_file() else None)
     secrets_ = Secrets()
@@ -789,5 +810,49 @@ def create_app(hub: Hub, token: str, lifespan_hub: bool = True) -> FastAPI:
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from None
         return {"ok": True, **result}
+
+    # where the agents' Brave says it is: changed only when the owner applies a location (see locations.py)
+
+    def location_errors(exc: Exception) -> HTTPException:
+        if isinstance(exc, LookupError):
+            return HTTPException(404, str(exc))
+        return HTTPException(422, str(exc))
+
+    @app.get("/api/browser/location", dependencies=auth)
+    async def browser_location() -> dict[str, Any]:
+        return await locations.state()
+
+    @app.post("/api/browser/location", dependencies=auth)
+    async def browser_location_apply(body: LocationApply) -> dict[str, Any]:
+        try:
+            return await locations.apply(body.lat, body.lon, body.accuracy, body.name, body.source)
+        except LocationInvalid as exc:
+            raise location_errors(exc) from None
+
+    @app.post("/api/browser/location/reapply", dependencies=auth)
+    async def browser_location_reapply() -> dict[str, Any]:
+        await locations.push()
+        return await locations.state()
+
+    @app.post("/api/browser/location/favorites", dependencies=auth, status_code=201)
+    async def browser_location_favorite(body: LocationFavorite) -> dict[str, Any]:
+        try:
+            return await locations.add_favorite(body.name, body.lat, body.lon, body.accuracy)
+        except LocationInvalid as exc:
+            raise location_errors(exc) from None
+
+    @app.patch("/api/browser/location/favorites/{location_id}", dependencies=auth)
+    async def browser_location_rename(location_id: uuid.UUID, body: LocationName) -> dict[str, Any]:
+        try:
+            return await locations.rename_favorite(location_id, body.name)
+        except (LocationInvalid, LookupError) as exc:
+            raise location_errors(exc) from None
+
+    @app.delete("/api/browser/location/{location_id}", dependencies=auth)
+    async def browser_location_delete(location_id: uuid.UUID) -> dict[str, Any]:
+        try:
+            return await locations.delete(location_id)
+        except (LocationInvalid, LookupError) as exc:
+            raise location_errors(exc) from None
 
     return app

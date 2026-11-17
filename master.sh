@@ -21,6 +21,29 @@ has()  { command -v "$1" >/dev/null 2>&1; }
 uvrun() { "$(find_uv)" run --project "$REPO/server" --frozen --quiet "$@"; }
 port() { conf KREWD_PORT 8800; }
 cdp_port() { conf KREWD_CDP_PORT 9222; }
+# "virtual" when the agents' Brave draws on its own Xvfb screen, else the display it uses (or "unknown").
+brave_display() {
+  local pid d
+  pid="$(pgrep -f -- "--remote-debugging-port=$(cdp_port)( |$)" | head -n 1)"
+  [[ -n "$pid" ]] || { echo unknown; return; }
+  d="$(tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null | sed -n 's/^DISPLAY=//p')"
+  pgrep -f "^Xvfb $d( |$)" >/dev/null 2>&1 && echo virtual || echo "${d:-unknown}"
+}
+# Files earlier versions made that nothing uses now.
+tidy_old() {
+  [[ -d "$CONFIG_DIR/fixed-location" ]] && rm -rf "$CONFIG_DIR/fixed-location" && say "Removed $CONFIG_DIR/fixed-location (the location extension now loads from the repo)."
+  return 0
+}
+# Xvfb for the agents' Brave (KREWD_BROWSER_DISPLAY=virtual, the default). Needs sudo, so only when the owner says yes.
+offer_xvfb() {
+  [[ "$(conf KREWD_BROWSER_DISPLAY virtual)" == virtual ]] || return 0
+  has Xvfb && has xauth && has mcookie && return 0
+  if has apt-get && [[ -t 0 ]] && ask "Install Xvfb, so the agents' Brave gets its own invisible screen (sudo apt-get install xvfb xauth)?"; then
+    sudo apt-get install -y xvfb xauth
+  else
+    say "${Y}Without Xvfb the agents' Brave opens on the desktop and can take focus there:${N} sudo apt install xvfb xauth"
+  fi
+}
 linux_systemd() { [[ "$(uname)" == Linux ]] && has systemctl && systemctl --user show-environment >/dev/null 2>&1; }
 
 # ---------------------------------------------------------------- doctor
@@ -35,6 +58,10 @@ doctor() {
   [[ -f "$(signing_file)" ]] && ok "APK signing key ($(signing_file))" \
     || warn "no APK signing key: ./master.sh app makes debug-signed APKs" "put a signing properties file at $(signing_file) (AGENTS.md, new machine step 10)"
   has browser-harness && ok "browser-harness" || bad "browser-harness is missing" "uv tool install browser-harness (AGENTS.md, new machine step 5)"
+  if [[ "$(conf KREWD_BROWSER_DISPLAY virtual)" == virtual ]]; then
+    if has Xvfb && has xauth && has mcookie; then ok "Xvfb (the agents' Brave gets its own invisible screen)"
+    else warn "Xvfb or xauth is missing: the agents' Brave falls back to a window on the desktop" "sudo apt install xvfb xauth (AGENTS.md, new machine step 5)"; fi
+  fi
 
   say "${B}Config${N} ($CONFIG_DIR)"
   if [[ -d "$CONFIG_DIR" ]]; then
@@ -149,8 +176,21 @@ PY
   else
     warn "no HTTPS certificate yet (made on first start)" "./master.sh restart"
   fi
-  curl -fsS -m 3 "http://127.0.0.1:$(cdp_port)/json/version" >/dev/null 2>&1 && ok "agent Brave answers on DevTools port $(cdp_port)" \
-    || bad "agent Brave is not running" "log in to the desktop, then ./master.sh start browser"
+  if curl -fsS -m 3 "http://127.0.0.1:$(cdp_port)/json/version" >/dev/null 2>&1; then
+    ok "agent Brave answers on DevTools port $(cdp_port)"
+    local shown; shown="$(brave_display)"
+    if [[ "$(conf KREWD_BROWSER_DISPLAY virtual)" == virtual ]]; then
+      [[ "$shown" == virtual ]] && ok "agent Brave is on its own screen (not on the desktop)" \
+        || warn "agent Brave is on the desktop display ($shown), so it can take focus there" "sudo apt install xvfb xauth, then ./master.sh restart browser"
+    fi
+    case "$(uvrun python -m krewd_server.locations check "$(cdp_port)" 2>/dev/null)" in
+      set) ok "the location extension answers (a location is applied)" ;;
+      none) warn "no browser location applied: pages that ask for one wait" "the app: Settings > Browser location (or KREWD_BROWSER_LOCATION in $ENV_FILE)" ;;
+      *) bad "the location extension does not answer in the agents' Brave" "./master.sh restart browser; it loads deploy/fixed-location" ;;
+    esac
+  else
+    bad "agent Brave is not running" "log in to the desktop, then ./master.sh start browser"
+  fi
   if has tailscale; then
     tailscale serve status 2>/dev/null | grep -q ":$(port)" && ok "Tailscale Serve publishes port $(port)" \
       || warn "Tailscale Serve does not publish Krewd" "tailscale serve --bg --https=$(port) http://127.0.0.1:$(port)"
@@ -213,6 +253,8 @@ PY
   [[ -f "$CONFIG_DIR/engines.toml" ]] || { cp "$REPO/deploy/engines.example.toml" "$CONFIG_DIR/engines.toml"; say "Created engines.toml (Claude Code)."; }
   if [[ -n "$(find_uv)" ]]; then (cd "$REPO/server" && "$(find_uv)" sync --frozen --quiet) && say "Server environment ready."; else say "Install uv first, then run setup again."; fi
   mkdir -p "$(conf KREWD_BROWSER_PROFILE "$HOME/.local/share/krewd/agent-brave")"
+  offer_xvfb
+  tidy_old
   mkdir -p "$HOME/.local/bin" && ln -sfn "$REPO/deploy/krewd-cli.sh" "$HOME/.local/bin/krewd" && say "Linked the krewd command: ~/.local/bin/krewd."
   if linux_systemd; then
     install_units
@@ -279,7 +321,12 @@ run_tests() {
 update() {
   git -C "$REPO" pull --ff-only || return 1
   (cd "$REPO/server" && "$(find_uv)" sync --frozen --quiet)
-  linux_systemd && install_units && restart all
+  offer_xvfb
+  tidy_old
+  linux_systemd && install_units && restart all || return 1
+  say "Checking (Brave and the server take a few seconds to come back)..."
+  sleep 8
+  doctor
 }
 
 signing_file() { printf '%s' "${ANDROID_SIGNING_PROPERTIES:-$HOME/.android/keystores/release.properties}"; }
