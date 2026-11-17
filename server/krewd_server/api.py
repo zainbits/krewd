@@ -4,6 +4,7 @@ local token, from this machine); see security.py."""
 from __future__ import annotations
 
 import asyncio
+import mimetypes
 import time
 import hmac
 import uuid
@@ -782,6 +783,15 @@ def create_app(hub: Hub, token: str, lifespan_hub: bool = True) -> FastAPI:
             raise HTTPException(404, "no such shared file")
         info = shared_files.describe(real)
         return FileResponse(real, media_type=info["mime"], filename=info["name"])
+
+    @app.get("/api/attachments/{name}", dependencies=auth)
+    async def attachment(name: str) -> FileResponse:
+        """A file the owner sent with a message (the file name of its `path`), so the app can show it again."""
+        path = hub.attachments.path(name)
+        if path is None:
+            raise HTTPException(404, "no such attachment")
+        mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        return FileResponse(path, media_type=mime, headers={"Cache-Control": "private, max-age=31536000, immutable"})
 
     @app.get("/api/tool-images/{name}", dependencies=auth)
     async def tool_image(name: str) -> FileResponse:

@@ -100,6 +100,7 @@ import app.krewd.data.Proposal
 import app.krewd.data.ProposalItem
 import app.krewd.data.NoticeItem
 import app.krewd.data.PendingFile
+import app.krewd.data.ImageRef
 import app.krewd.data.PlanItem
 import app.krewd.data.SwitchItem
 import app.krewd.data.TextItem
@@ -238,7 +239,6 @@ fun ChatScreen(state: UiState, viewModel: KrewdViewModel) {
         ) {
             if (session != null) {
                 val files = state.draft(session.id)
-                PendingFiles(files, onRemove = { viewModel.removeAttachment(session.id, it) }, modifier = Modifier.padding(start = 4.dp, bottom = 4.dp))
                 val tabs = state.draftTabs[session.id].orEmpty()
                 val chats = state.chatsOf(session.id)
                 DraftChatChips(chats, onRemove = { viewModel.removeDraftChat(session.id, it) }, Modifier.padding(start = 4.dp, bottom = 4.dp))
@@ -280,6 +280,7 @@ fun ChatScreen(state: UiState, viewModel: KrewdViewModel) {
                     onSend = viewModel::send,
                     onStop = viewModel::stop,
                     onAttach = pick,
+                    onRemoveFile = { viewModel.removeAttachment(session.id, it) },
                 )
             }
         }
@@ -375,6 +376,7 @@ private fun Composer(
     onSend: (String, String?) -> Unit,
     onStop: () -> Unit,
     onAttach: () -> Unit,
+    onRemoveFile: (Long) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     // Unsent text is kept per chat on the phone, so leaving the chat or restarting the app loses nothing.
@@ -408,7 +410,9 @@ private fun Composer(
         border = androidx.compose.foundation.BorderStroke(ShellDimensions.PILL_BORDER_WIDTH, colors.outlineVariant),
         shadowElevation = 2.dp,
     ) {
-        Column(Modifier.padding(start = 6.dp, end = 6.dp, top = 4.dp, bottom = 6.dp)) {
+        Column(Modifier.animateContentSize().padding(start = 6.dp, end = 6.dp, top = 4.dp, bottom = 6.dp)) {
+            // Attached files fill the composer's top, so it grows instead of stacking chips above it.
+            AttachmentTray(files, onRemove = onRemoveFile, modifier = Modifier.padding(top = 6.dp, bottom = 2.dp))
             if (mention != null) {
                 ChatSuggestions(mentions(mention.typed), engines, onPick = {
                     edit(removeMention(value, mention))
@@ -854,12 +858,16 @@ private fun ThoughtRow(key: String, text: String) {
 
 @Composable
 private fun ToolRow(item: ToolItem, loadImage: suspend (String) -> ImageBitmap?) {
-    ToolCard(item) { item.images.forEach { ToolImage(it, loadImage) } }
+    val viewer = LocalImageViewer.current
+    val refs = item.images.map { ImageRef.Tool(it) }
+    ToolCard(item) {
+        item.images.forEachIndexed { i, name -> ToolImage(name, loadImage, onOpen = { viewer?.open?.invoke(refs, i) }) }
+    }
 }
 
-/** A picture from a tool result, full card width. */
+/** A picture from a tool result, full card width; tap it to see it full screen. */
 @Composable
-private fun ToolImage(name: String, load: suspend (String) -> ImageBitmap?) {
+private fun ToolImage(name: String, load: suspend (String) -> ImageBitmap?, onOpen: () -> Unit) {
     var failed by remember(name) { mutableStateOf<String?>(null) }
     val bitmap by produceState<ImageBitmap?>(null, name) {
         value = try {
@@ -878,7 +886,7 @@ private fun ToolImage(name: String, load: suspend (String) -> ImageBitmap?) {
             image,
             contentDescription = "Image from the tool result",
             contentScale = ContentScale.FillWidth,
-            modifier = Modifier.fillMaxWidth().aspectRatio(image.width.toFloat() / image.height.coerceAtLeast(1)).clip(shape),
+            modifier = Modifier.fillMaxWidth().aspectRatio(image.width.toFloat() / image.height.coerceAtLeast(1)).clip(shape).clickable(onClick = onOpen),
         )
     } else {
         Box(

@@ -28,7 +28,7 @@ class MainActivity : ComponentActivity() {
         if (savedInstanceState == null) openFrom(intent)
         setContent {
             KrewdTheme {
-                KrewdApp(viewModel)
+                app.krewd.ui.ImageViewerHost(viewModel) { KrewdApp(viewModel) }
             }
         }
     }

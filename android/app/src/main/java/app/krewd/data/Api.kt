@@ -583,6 +583,21 @@ class KrewdApi(
         }
     }
 
+    /** A file sent with a message (GET /api/attachments/{name}). */
+    fun attachment(name: String): ByteArray {
+        val conn = open("$baseUrl/api/attachments/" + java.net.URLEncoder.encode(name, "UTF-8").replace("+", "%20"))
+        try {
+            conn.connectTimeout = Timing.CONNECT_TIMEOUT_MS
+            conn.readTimeout = 60_000
+            conn.setRequestProperty("Authorization", "Bearer ${bearer()}")
+            val code = conn.responseCode
+            if (code !in 200..299) throw ApiException(code, if (code == 404) "The file is no longer there" else "Image failed (HTTP $code)")
+            return conn.inputStream.use { it.readBytes() }
+        } finally {
+            conn.disconnect()
+        }
+    }
+
     /** An image from a tool result (GET /api/tool-images/{name}). */
     fun toolImage(name: String): ByteArray {
         val conn = open("$baseUrl/api/tool-images/" + java.net.URLEncoder.encode(name, "UTF-8"))

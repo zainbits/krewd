@@ -7,6 +7,8 @@ data class ModeInfo(val id: String, val name: String, val description: String)
 
 /** A file attached to a message, as stored on the server. */
 data class Attachment(val name: String, val path: String, val size: Long, val mime: String) {
+    val isImage: Boolean get() = isImageFile(mime, name)
+
     companion object {
         fun list(a: JSONArray?): List<Attachment> = a.objects().map {
             Attachment(it.optString("name"), it.optString("path"), it.optLong("size"), it.optString("mime"))
@@ -15,8 +17,44 @@ data class Attachment(val name: String, val path: String, val size: Long, val mi
 }
 
 /** A file picked on the phone for the next message: uploading, ready (has an upload id) or failed. */
-data class PendingFile(val localId: Long, val name: String, val size: Long?, val uploadId: String? = null, val error: String? = null) {
+data class PendingFile(
+    val localId: Long,
+    val name: String,
+    val size: Long?,
+    val uploadId: String? = null,
+    val error: String? = null,
+    val uri: String? = null,
+    val mime: String? = null,
+) {
     val uploading: Boolean get() = uploadId == null && error == null
+    val isImage: Boolean get() = uri != null && isImageFile(mime, name)
+}
+
+private val IMAGE_EXTENSIONS = setOf("png", "jpg", "jpeg", "gif", "webp", "bmp", "heic", "heif", "avif")
+
+/** Pictures the phone can decode: by MIME type, or by extension when the type is generic. */
+fun isImageFile(mime: String?, name: String): Boolean =
+    mime?.startsWith("image/") == true && mime != "image/svg+xml" ||
+        (mime.isNullOrBlank() || mime == "application/octet-stream") && name.substringAfterLast('.', "").lowercase() in IMAGE_EXTENSIONS
+
+/** A picture the app can show full screen: picked on this phone, sent with a message, or from a tool result. */
+sealed class ImageRef {
+    abstract val key: String
+    abstract val name: String
+
+    data class Local(val uri: String, override val name: String, val mime: String?) : ImageRef() {
+        override val key get() = "local:$uri"
+    }
+
+    data class Sent(val file: Attachment) : ImageRef() {
+        override val key get() = "sent:${file.path}"
+        override val name get() = file.name
+    }
+
+    data class Tool(val file: String) : ImageRef() {
+        override val key get() = "tool:$file"
+        override val name get() = file
+    }
 }
 
 fun humanSize(bytes: Long?): String = when {

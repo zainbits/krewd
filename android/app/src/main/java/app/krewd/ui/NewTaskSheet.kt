@@ -256,7 +256,7 @@ fun NewTaskSheet(
                     }
                 },
             )
-            PendingFiles(files, onRemove = { viewModel.removeAttachment(draftKey, it) })
+            AttachmentTray(files, onRemove = { viewModel.removeAttachment(draftKey, it) }, modifier = Modifier.padding(vertical = 4.dp))
             DraftChatChips(chats, onRemove = { viewModel.removeDraftChat(draftKey, it) }, Modifier.padding(top = 4.dp))
             if (!plainTask) {
                 Row(

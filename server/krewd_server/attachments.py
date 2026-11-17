@@ -100,6 +100,13 @@ class Attachments:
             claimed.append({"name": meta["name"], "path": str(target), "size": meta["size"], "mime": meta["mime"]})
         return claimed
 
+    def path(self, name: str) -> Path | None:
+        """A sent attachment by its file name (what `claim` saved), for the phone to show it again."""
+        if not name or name != clean_name(name) or name.startswith(INCOMING) or len(name) > NAME_MAX + 20:
+            return None
+        path = self.root / name
+        return path if path.is_file() and not path.is_symlink() else None
+
     def _free_path(self, name: str) -> Path:
         path = self.root / name
         if not path.exists():

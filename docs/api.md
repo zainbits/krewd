@@ -197,6 +197,8 @@ A place: `{id, name, lat, lon, accuracy, source, applied_at | created_at}`. `cur
 
 Files are saved as `~/.krewd/common/attachments/<first 8 characters of the session id>-<file name>` (`KREWD_DATA_DIR` changes `~/.krewd`), with `-2`, `-3` added on name clashes. The `user` event lists them as `attachments: [{name, path, size, mime}]`, and the agent's prompt gets the paths as text plus one ACP `resource_link` per file.
 
+`GET /api/attachments/{name}` returns a sent file again by the file name of its `path` (the app shows sent pictures with it); any other name is 404.
+
 ## Files from the agent
 
 An agent hands a file back by saving it in a shared folder (`KREWD_SHARE_DIRS`, colon-separated; default `$KREWD_WORKDIR/outputs`) and writing its path in the reply. At the end of the turn, every absolute or `~` path in the reply that names a regular file inside a shared folder is listed on `turn_end` as `files: [{path, name, size, mime}]` (at most 10).

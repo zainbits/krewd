@@ -38,6 +38,7 @@ import app.krewd.data.EngineInfo
 import app.krewd.data.Event
 import app.krewd.data.FrameStream
 import app.krewd.data.PendingFile
+import app.krewd.data.ImageRef
 import app.krewd.data.ProfilesState
 import app.krewd.data.Prefs
 import app.krewd.data.Routine
@@ -968,7 +969,7 @@ class KrewdViewModel(private val app: Application) {
                     c.getColumnIndex(android.provider.OpenableColumns.SIZE).takeIf { it >= 0 && !c.isNull(it) }?.let { size = c.getLong(it) }
                 }
             }
-            updateDraft(draft) { it + PendingFile(localId, name, size) }
+            updateDraft(draft) { it + PendingFile(localId, name, size, uri = uri.toString(), mime = resolver.getType(uri)) }
             scope.launch(Dispatchers.IO) {
                 val result = runCatching {
                     val input = resolver.openInputStream(uri) ?: error("Cannot read $name")
@@ -1219,26 +1220,136 @@ class KrewdViewModel(private val app: Application) {
         }
     }
 
-    // Tool-result images, decoded at most about phone width; a handful stay in memory.
-    private val toolImages = object : android.util.LruCache<String, androidx.compose.ui.graphics.ImageBitmap>(24 * 1024 * 1024) {
+    // Pictures decoded for the screen: thumbnails and full-screen views stay in memory up to about 48 MB.
+    private val images = object : android.util.LruCache<String, androidx.compose.ui.graphics.ImageBitmap>(48 * 1024 * 1024) {
         override fun sizeOf(key: String, value: androidx.compose.ui.graphics.ImageBitmap) = value.width * value.height * 4
     }
 
     /** An image from a tool result, or null when not connected. Throws if the server cannot give it. */
-    suspend fun toolImage(name: String): androidx.compose.ui.graphics.ImageBitmap? {
-        toolImages.get(name)?.let { return it }
-        val client = api ?: return null
+    suspend fun toolImage(name: String): androidx.compose.ui.graphics.ImageBitmap? = image(ImageRef.Tool(name), 1600)
+
+    /**
+     * A picture decoded so its longer side is at most about [maxSide] pixels (camera rotation applied), or null
+     * when it needs the server and the app is not connected. Throws if it cannot be read or is not a picture.
+     */
+    suspend fun image(ref: ImageRef, maxSide: Int): androidx.compose.ui.graphics.ImageBitmap? {
+        val key = "${ref.key}@$maxSide"
+        images.get(key)?.let { return it }
+        if (ref !is ImageRef.Local && api == null) return null
         val bitmap = withContext(Dispatchers.IO) {
-            val bytes = client.toolImage(name)
-            val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
-            android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
-            var sample = 1
-            while (bounds.outWidth / (sample * 2) >= 1600) sample *= 2
-            val opts = android.graphics.BitmapFactory.Options().apply { inSampleSize = sample }
-            android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)?.asImageBitmap() ?: error("Not an image")
+            val source = when (ref) {
+                is ImageRef.Local -> android.graphics.ImageDecoder.createSource(app.contentResolver, Uri.parse(ref.uri))
+                else -> android.graphics.ImageDecoder.createSource(java.nio.ByteBuffer.wrap(imageBytes(ref)))
+            }
+            try {
+                android.graphics.ImageDecoder.decodeBitmap(source) { decoder, info, _ ->
+                    val side = maxOf(info.size.width, info.size.height)
+                    var sample = 1
+                    while (side / (sample * 2) >= maxSide) sample *= 2
+                    decoder.setTargetSampleSize(sample)
+                    decoder.allocator = android.graphics.ImageDecoder.ALLOCATOR_SOFTWARE
+                }.asImageBitmap()
+            } catch (e: java.io.IOException) {
+                throw IllegalStateException(if (ref is ImageRef.Local) "Could not read the picture" else "Not a picture", e)
+            }
         }
-        toolImages.put(name, bitmap)
+        images.put(key, bitmap)
         return bitmap
+    }
+
+    // Downloaded originals, so a thumbnail, the full-screen copy and Save or Share fetch a picture once.
+    private val imageFiles = object : android.util.LruCache<String, ByteArray>(32 * 1024 * 1024) {
+        override fun sizeOf(key: String, value: ByteArray) = value.size
+    }
+
+    private fun imageBytes(ref: ImageRef): ByteArray {
+        if (ref is ImageRef.Local) {
+            return app.contentResolver.openInputStream(Uri.parse(ref.uri))?.use { it.readBytes() } ?: error("Could not read the picture")
+        }
+        imageFiles.get(ref.key)?.let { return it }
+        val client = api ?: error("Not connected to Krewd")
+        val bytes = when (ref) {
+            is ImageRef.Tool -> client.toolImage(ref.file)
+            is ImageRef.Sent -> client.attachment(ref.file.path.substringAfterLast('/'))
+            is ImageRef.Local -> error("unreachable")
+        }
+        imageFiles.put(ref.key, bytes)
+        return bytes
+    }
+
+    /** Saves the original picture (not the decoded copy) to Pictures/Krewd, where the gallery finds it. */
+    fun saveImage(ref: ImageRef) {
+        scope.launch {
+            try {
+                val name = withContext(Dispatchers.IO) {
+                    val bytes = imageBytes(ref)
+                    val mime = imageMime(ref, bytes)
+                    val resolver = app.contentResolver
+                    val name = ref.name.substringAfterLast('/').ifBlank { "image" }.let { n ->
+                        val ext = android.webkit.MimeTypeMap.getSingleton().getExtensionFromMimeType(mime)
+                        if (n.contains('.') || ext == null) n else "$n.$ext"
+                    }
+                    val values = ContentValues().apply {
+                        put(MediaStore.MediaColumns.DISPLAY_NAME, name)
+                        put(MediaStore.MediaColumns.MIME_TYPE, mime)
+                        put(MediaStore.MediaColumns.RELATIVE_PATH, "Pictures/Krewd")
+                        put(MediaStore.MediaColumns.IS_PENDING, 1)
+                    }
+                    val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values) ?: error("Could not save to Pictures")
+                    try {
+                        resolver.openOutputStream(uri)!!.use { it.write(bytes) }
+                        resolver.update(uri, ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }, null, null)
+                    } catch (e: Exception) {
+                        resolver.delete(uri, null, null)
+                        throw e
+                    }
+                    name
+                }
+                toast("Saved $name to Pictures/Krewd")
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                toast(e.message ?: "Could not save the picture")
+            }
+        }
+    }
+
+    /** Shares the original picture with another app (the system share sheet). */
+    fun shareImage(ref: ImageRef) {
+        scope.launch {
+            try {
+                val uri = withContext(Dispatchers.IO) {
+                    if (ref is ImageRef.Local) return@withContext Uri.parse(ref.uri) to (ref.mime ?: "image/*")
+                    val bytes = imageBytes(ref)
+                    val dir = java.io.File(app.cacheDir, "shared-images").apply { mkdirs() }
+                    dir.listFiles()?.forEach { if (System.currentTimeMillis() - it.lastModified() > 3_600_000) it.delete() }
+                    val file = java.io.File(dir, ref.name.substringAfterLast('/').ifBlank { "image" })
+                    file.writeBytes(bytes)
+                    androidx.core.content.FileProvider.getUriForFile(app, "${app.packageName}.images", file) to imageMime(ref, bytes)
+                }
+                val send = Intent(Intent.ACTION_SEND).setType(uri.second).putExtra(Intent.EXTRA_STREAM, uri.first)
+                    .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                app.startActivity(Intent.createChooser(send, null).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION))
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                toast(e.message ?: "Could not share the picture")
+            }
+        }
+    }
+
+    private fun imageMime(ref: ImageRef, bytes: ByteArray): String {
+        val known = when (ref) {
+            is ImageRef.Local -> ref.mime
+            is ImageRef.Sent -> ref.file.mime
+            is ImageRef.Tool -> null
+        }?.takeIf { it.startsWith("image/") }
+        if (known != null) return known
+        val ext = ref.name.substringAfterLast('.', "").lowercase()
+        android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext)?.let { return it }
+        val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+        return bounds.outMimeType ?: "image/png"
     }
 
     private val _downloading = MutableStateFlow<Set<String>>(emptySet())

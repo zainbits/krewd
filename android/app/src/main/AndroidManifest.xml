@@ -48,6 +48,16 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Shows the live progress of the owner's own agent tasks running on their home server, and keeps their approval alerts arriving while the phone is locked." />
         </service>
+        <!-- Pictures shared from the image viewer: copies in the cache, readable only through a granted link. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.images"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/shared_images" />
+        </provider>
     </application>
 
 </manifest>

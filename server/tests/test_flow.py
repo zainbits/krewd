@@ -232,6 +232,13 @@ async def test_attachments_are_stored_and_reach_the_agent(hub):
         assert [p.name for p in paths] == [f"{prefix}-Résumé 2026.pdf", f"{prefix}-Résumé 2026-2.pdf"]
         assert paths[0].parent == hub.settings.data_dir / "common" / "attachments"
         assert paths[0].read_bytes() == b"%PDF-1.7 hello"
+        # The app can read a sent file back by its name, and nothing else in or outside the folder.
+        back = await client.get(f"/api/attachments/{paths[0].name}", headers=headers)
+        assert back.status_code == 200 and back.content == b"%PDF-1.7 hello"
+        assert back.headers["content-type"] == "application/pdf"
+        assert (await client.get(f"/api/attachments/{paths[0].name}")).status_code == 401
+        for bad in ("..%2Ftoken", ".incoming", f"{meta['id']}", "nope.pdf"):
+            assert (await client.get(f"/api/attachments/{bad}", headers=headers)).status_code == 404
         text = await wait_for(hub, sid, "text", lambda p: "links=" in p["text"])
         assert "links=Résumé 2026.pdf,Résumé 2026.pdf" in text["text"]
         # An id can be used once, unknown ids are rejected, and empty messages are refused.
