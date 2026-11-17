@@ -320,10 +320,18 @@ run_tests() {
 
 update() {
   git -C "$REPO" pull --ff-only || return 1
-  (cd "$REPO/server" && "$(find_uv)" sync --frozen --quiet)
+  # The pull may have changed this script; bash keeps running the copy it already read, so run the new one.
+  exec "$REPO/master.sh" update-finish
+}
+
+update_finish() {
+  (cd "$REPO/server" && "$(find_uv)" sync --frozen --quiet) || return 1
   offer_xvfb
   tidy_old
-  linux_systemd && install_units && restart all || return 1
+  if linux_systemd; then
+    install_units
+    restart all
+  fi
   say "Checking (Brave and the server take a few seconds to come back)..."
   sleep 8
   doctor
@@ -436,6 +444,7 @@ dispatch() {
     security) security "$@" ;;
     test) run_tests ;;
     update) update ;;
+    update-finish) update_finish ;;  # the second half of update, run by the freshly pulled script
     app) app ;;
     demo) "$REPO/demo/demo.sh" "$@" ;;
     agent-prompt|agent|help-agent) agent_prompt ;;
