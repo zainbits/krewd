@@ -894,6 +894,31 @@ async def test_switch_api_and_transcript(hub):
         assert r.status_code == 200 and len(r.json()) == 2 and r.json()[-1]["from"] == "Krewd"
 
 
+async def test_margin_notes_reach_the_agent_and_the_transcript(hub):
+    app = create_app(hub, TOKEN, lifespan_hub=False)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        h = {"Authorization": f"Bearer {TOKEN}"}
+        session = await hub.create_session("hi")
+        sid = session["id"]
+        await wait_for(hub, uuid.UUID(sid), "turn_end")
+        notes = [{"quote": "Scroll reset: back rebuilds the list", "note": "fix only this", "ref": "text-m1#b2"},
+                 {"quote": "Long code blocks\noverflow", "note": ""}]
+        # Notes alone are a message; an empty quote is not a note.
+        r = await client.post(f"/api/sessions/{sid}/messages", headers=h, json={"text": "", "notes": notes})
+        assert r.status_code == 202, r.text
+        assert (await client.post(f"/api/sessions/{sid}/messages", headers=h,
+                                  json={"text": "", "notes": [{"quote": ""}]})).status_code == 422
+        user = await wait_for(hub, uuid.UUID(sid), "user", lambda p: bool(p.get("notes")))
+        assert user["notes"][0] == {"quote": notes[0]["quote"], "note": "fix only this", "ref": "text-m1#b2"}
+        assert user["notes"][1]["ref"] is None
+        reply = await wait_for(hub, uuid.UUID(sid), "text", lambda p: "noted=" in p["text"])
+        assert "noted=Scroll reset: back rebuilds the list|Long code blocks|overflow" in reply["text"]
+        transcript = (await client.get(f"/api/sessions/{sid}/transcript", headers=h)).json()
+        owner = [m for m in transcript if m["from"] == "owner"][-1]["text"]
+        assert "[1] On this part:\n> Scroll reset" in owner and "Note: fix only this" in owner
+        assert "[2] On this part:\n> Long code blocks\n> overflow\n(No note of its own" in owner
+
+
 def test_command_list_reads_acp_entries_and_old_names():
     raw = [{"name": "review", "description": "Review code", "input": {"hint": "branch"}}, "compact",
            {"name": "__internal"}, {"name": ""}, {"description": "no name"}, {"name": "Agents", "description": None}]

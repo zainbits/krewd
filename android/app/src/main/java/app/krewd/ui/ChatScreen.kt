@@ -98,6 +98,10 @@ import app.krewd.data.FilesItem
 import app.krewd.data.LinkItem
 import app.krewd.data.Proposal
 import app.krewd.data.ProposalItem
+import app.krewd.data.ReplyNote
+import android.widget.Toast
+import androidx.compose.ui.platform.LocalContext
+import kotlinx.coroutines.delay
 import app.krewd.data.NoticeItem
 import app.krewd.data.PendingFile
 import app.krewd.data.ImageRef
@@ -153,10 +157,45 @@ fun ChatScreen(state: UiState, viewModel: KrewdViewModel) {
     var sideOpen by rememberSaveable(state.openSessionId) { mutableStateOf(false) }
     val known: (String) -> Boolean = { id -> state.session(id) != null || state.archived.orEmpty().any { it.id == id } }
     val hasStrip = session != null && (session.parentId != null || session.waitingOn.isNotEmpty() || state.sessions.any { it.parentId == session.id })
+
+    // Margin notes (MarginNotes.kt): replies to parts of the agent's messages, waiting for the next message.
+    val notes = session?.let { state.notesOf(it.id) }.orEmpty()
+    var flashPart by remember(state.openSessionId) { mutableStateOf<String?>(null) }
+    var focusNote by remember(state.openSessionId) { mutableStateOf<Int?>(null) }
+    val context = LocalContext.current
+    val addNote: (String, String) -> Unit = { ref, quote ->
+        session?.let { s -> viewModel.addNote(s.id, quote, ref)?.let { focusNote = it - 1 } }
+    }
+    val jump: (ReplyNote) -> Unit = jump@{ note ->
+        val key = note.itemKey ?: return@jump
+        val row = rows.indexOfFirst { it.key == key }
+        if (row < 0) {
+            Toast.makeText(context, "That part is no longer in this chat", Toast.LENGTH_SHORT).show()
+            return@jump
+        }
+        scope.launch {
+            listState.animateScrollToItem(signIns.size + row)
+            flashPart = note.ref
+            delay(1_600)
+            if (flashPart == note.ref) flashPart = null
+        }
+    }
+    val noteHooks = NoteHooks(
+        swipe = state.swipeToNote,
+        marks = notes.withIndex().filter { it.value.ref != null }.groupBy({ it.value.ref!! }, { it.index + 1 }),
+        flash = flashPart,
+        onNote = addNote,
+        onSelectionNote = { itemKey, text, quote ->
+            // The part the words are in, so the note shows there; words across parts note the whole reply.
+            val words = quote.replace(Regex("\\s+"), " ").trim()
+            val block = markdownBlocks(text).firstOrNull { (_, plain) -> plain.replace(Regex("\\s+"), " ").contains(words) }?.first
+            addNote(if (block != null) "$itemKey#$block" else itemKey, quote)
+        },
+    )
     Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surface)) {
         // Rows that open and close keep their top edge in place (KeepInPlace.kt).
         val holdRow = remember(listState) { { key: Any -> listState.holdRow(key) } }
-        CompositionLocalProvider(LocalHoldRow provides holdRow) {
+        CompositionLocalProvider(LocalHoldRow provides holdRow, LocalNoteHooks provides noteHooks) {
         LazyColumn(
             state = listState,
             modifier = Modifier.fillMaxSize(),
@@ -180,7 +219,7 @@ fun ChatScreen(state: UiState, viewModel: KrewdViewModel) {
                 )
             }
             items(rows, key = { it.key }) { item ->
-                ChatRow(item, state, viewModel, session?.isBusy == true, commands, known, onReview = { reviewing = it })
+                ChatRow(item, state, viewModel, session?.isBusy == true, commands, known, onReview = { reviewing = it }, onJump = jump)
             }
             if (state.timelineLoading && rows.isEmpty()) {
                 item(key = "loading") { CircularProgressIndicator(Modifier.padding(24.dp)) }
@@ -256,6 +295,16 @@ fun ChatScreen(state: UiState, viewModel: KrewdViewModel) {
                         }
                     }
                 }
+                NoteTray(
+                    notes = notes,
+                    focus = focusNote,
+                    onFocused = { focusNote = null },
+                    onJump = jump,
+                    onText = { i, text -> viewModel.setNoteText(session.id, i, text) },
+                    onRemove = { viewModel.removeNote(session.id, it) },
+                    onClear = { viewModel.setDraftNotes(session.id, emptyList()) },
+                    modifier = Modifier.padding(bottom = 6.dp),
+                )
                 val pick = rememberFilePicker { viewModel.attach(session.id, it) }
                 val live = state.live[session.id]
                 Composer(
@@ -270,7 +319,7 @@ fun ChatScreen(state: UiState, viewModel: KrewdViewModel) {
                     steering = state.engine(session.engine)?.steering == true,
                     commands = commands,
                     files = files,
-                    hasTabs = tabs.isNotEmpty() || chats.isNotEmpty(),
+                    hasTabs = tabs.isNotEmpty() || chats.isNotEmpty() || notes.isNotEmpty(),
                     mentions = { typed ->
                         if (typed.isNotEmpty()) viewModel.loadArchived()
                         mentionCandidates(state, session.id, typed, chats.mapTo(HashSet()) { it.id })
@@ -616,6 +665,7 @@ private fun ChatRow(
     commands: List<AgentCommand>,
     known: (String) -> Boolean,
     onReview: (String) -> Unit,
+    onJump: (ReplyNote) -> Unit,
 ) {
     when (item) {
         is UserItem -> when (item.purpose) {
@@ -623,7 +673,7 @@ private fun ChatRow(
             "compact" -> CompactRow(item)
             "switch" -> SwitchPendingRow(item, state.engine(item.switchTo)?.name ?: item.switchTo ?: "another agent")
             "result", "prompt" -> FromChatRow(item, exists = item.fromId?.let(known) == true, onOpen = { item.fromId?.let(viewModel::openSession) })
-            else -> UserRow(item, busy, commands, known, onOpenChat = viewModel::openSession, onResend = { item.clientId?.let(viewModel::resend) })
+            else -> UserRow(item, busy, commands, known, onOpenChat = viewModel::openSession, onResend = { item.clientId?.let(viewModel::resend) }, onJump = onJump)
         }
         is LinkItem -> LinkRow(item, exists = known(item.chatId), onOpen = { viewModel.openSession(item.chatId) })
         is ProposalItem -> {
@@ -638,7 +688,7 @@ private fun ChatRow(
                 onOpenResult = { id -> if (known(id)) viewModel.openSession(id) },
             )
         }
-        is TextItem -> if (item.isThought) ThoughtRow(item.key, item.text) else SelectionContainer { Markdown(item.text) }
+        is TextItem -> if (item.isThought) ThoughtRow(item.key, item.text) else ReplyText(item)
         is ToolItem -> ToolRow(item, viewModel::toolImage)
         is PlanItem -> SectionCard {
             Text("Plan", style = MaterialTheme.typography.labelLarge)
@@ -674,6 +724,7 @@ private fun UserRow(
     known: (String) -> Boolean,
     onOpenChat: (String) -> Unit,
     onResend: () -> Unit,
+    onJump: (ReplyNote) -> Unit,
 ) {
     val failed = item.state == "failed"
     val onBubble = if (failed) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onPrimaryContainer
@@ -694,6 +745,7 @@ private fun UserRow(
                         Text(tab.title.ifBlank { tab.host }, style = MaterialTheme.typography.labelMedium, color = onBubble, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                 }
+                if (item.notes.isNotEmpty()) SentNotes(item.notes, onBubble, onJump)
                 if (item.text.isNotBlank()) {
                     val ranges = remember(item.text, commands) { commandRanges(item.text, commands) }
                     var laid by remember { mutableStateOf<TextLayoutResult?>(null) }
@@ -710,6 +762,21 @@ private fun UserRow(
                 if (item.attachments.isNotEmpty()) SentFiles(item.attachments, onBubble)
                 DeliveryLine(item, busy, onBubble)
             }
+        }
+    }
+}
+
+/** An agent's reply: its parts take margin notes (tap, swipe, or Note in the selection menu). */
+@Composable
+private fun ReplyText(item: TextItem) {
+    val hooks = LocalNoteHooks.current
+    if (hooks == null || item.role != "assistant") {
+        SelectionContainer { Markdown(item.text) }
+        return
+    }
+    CompositionLocalProvider(LocalNoteItem provides item.key) {
+        Box(Modifier.noteSelectionMenu { quote -> hooks.onSelectionNote(item.key, item.text, quote) }) {
+            SelectionContainer { Markdown(item.text) }
         }
     }
 }

@@ -24,6 +24,8 @@ import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -35,6 +37,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -70,6 +73,12 @@ fun KrewdApp(viewModel: KrewdViewModel) {
     val tabIndex = state.navTab
     val context = LocalContext.current
     val landscape = LocalConfiguration.current.let { it.screenWidthDp > it.screenHeightDp }
+    // Each list's place lives here, above the screens: opening a chat disposes the screen under it, and going back
+    // must land where you were, not at the top.
+    val tasksList = rememberLazyListState()
+    val routinesList = rememberLazyListState()
+    val settingsList = rememberLazyListState()
+    val routineList = rememberSaveable(state.openRoutineId, saver = LazyListState.Saver) { LazyListState() }
 
     LaunchedEffect(state.message) {
         state.message?.let {
@@ -100,6 +109,7 @@ fun KrewdApp(viewModel: KrewdViewModel) {
         state.openRoutineId != null -> 1
         else -> 0
     }
+    CompositionLocalProvider(LocalCodeWrap provides CodeWrap(state.codeWrap, viewModel::setCodeWrap)) {
     Box(Modifier.fillMaxSize()) {
     AnimatedContent(
         targetState = depth,
@@ -115,17 +125,17 @@ fun KrewdApp(viewModel: KrewdViewModel) {
         if (level == 2) {
             ChatScreen(state, viewModel)
         } else if (level == 1) {
-            RoutineScreen(state, viewModel)
+            RoutineScreen(state, viewModel, routineList)
         } else {
             val tab = Tab.entries[tabIndex]
             Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surface)) {
                 // The Krewd tab has its own header (no title pill) and the Ask Krewd bar above the nav bar.
                 val padding = if (tab == Tab.Tasks) shellContentPadding(titlePill = false, extraBottom = ASK_BAR_HEIGHT + ASK_BAR_GAP) else shellContentPadding()
                 when (tab) {
-                    Tab.Tasks -> TasksScreen(state, viewModel, padding, onOpenSettings = { viewModel.navigate(NavTab.SETTINGS) })
-                    Tab.Routines -> RoutinesScreen(state, viewModel, padding)
+                    Tab.Tasks -> TasksScreen(state, viewModel, padding, tasksList, onOpenSettings = { viewModel.navigate(NavTab.SETTINGS) })
+                    Tab.Routines -> RoutinesScreen(state, viewModel, padding, routinesList)
                     Tab.Browser -> BrowserScreen(state, viewModel, landscape)
-                    Tab.Settings -> SettingsScreen(state, viewModel, padding)
+                    Tab.Settings -> SettingsScreen(state, viewModel, padding, settingsList)
                 }
                 if (tab != Tab.Browser && tab != Tab.Tasks) TitlePill(
                     title = tab.title,
@@ -179,6 +189,7 @@ fun KrewdApp(viewModel: KrewdViewModel) {
                 .windowInsetsPadding(WindowInsets.statusBars)
                 .padding(top = ShellDimensions.TITLE_PILL_TOP_GAP + ShellDimensions.TITLE_PILL_HEIGHT + 8.dp),
         )
+    }
     }
     }
 }

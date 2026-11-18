@@ -43,6 +43,8 @@ data class UserItem(
     val ok: Boolean = true,
     /** For a reply sent back: "sub-agent" or "chat". */
     val fromKind: String? = null,
+    /** Margin notes on parts of earlier replies, shown above the text. */
+    val notes: List<ReplyNote> = emptyList(),
 ) : ChatItem
 
 /** This chat started a side session or sub-agent, or sent a message to another chat ([kind] side, subagent, prompt). */
@@ -127,6 +129,7 @@ class Timeline {
                     fromTitle = p.optJSONObject("meta")?.optStringOrNull("from_title"),
                     ok = p.optJSONObject("meta")?.optBoolean("ok", true) ?: true,
                     fromKind = p.optJSONObject("meta")?.optStringOrNull("kind"),
+                    notes = ReplyNote.list(p.optJSONArray("notes")),
                 )
                 add(item)
                 if (messageId != null) messages[messageId] = item.key

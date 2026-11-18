@@ -21,6 +21,8 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Surface
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.foundation.layout.Column
@@ -189,16 +191,46 @@ fun SentFiles(files: List<Attachment>, color: Color) {
 /** Files the agent handed back: tap one to save it to Downloads/Krewd and open it. */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-fun HandedFiles(files: List<Attachment>, downloading: Set<String>, onOpen: (Attachment) -> Unit) {
+fun HandedFiles(files: List<Attachment>, downloading: Map<String, Float>, onOpen: (Attachment) -> Unit) {
     FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        files.forEach { f ->
-            SuggestionChip(
-                onClick = { onOpen(f) },
-                label = { Text("${f.name} · ${humanSize(f.size)}", maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                icon = {
-                    if (f.path in downloading) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
-                    else Icon(painterResource(R.drawable.ic_download_24), contentDescription = "Download", Modifier.size(SuggestionChipDefaults.IconSize))
-                },
+        files.forEach { f -> HandedFile(f, downloading[f.path], onOpen = { onOpen(f) }) }
+    }
+}
+
+/** One handed-back file. While it downloads, a shade fills the chip from the left as the bytes arrive. */
+@Composable
+private fun HandedFile(file: Attachment, progress: Float?, onOpen: () -> Unit) {
+    val colors = MaterialTheme.colorScheme
+    val shown by androidx.compose.animation.core.animateFloatAsState(progress ?: 0f, label = "download")
+    val shade = colors.primary.copy(alpha = 0.28f)
+    val shape = RoundedCornerShape(8.dp)
+    Surface(
+        onClick = onOpen,
+        enabled = progress == null,
+        shape = shape,
+        color = Color.Transparent,
+        border = androidx.compose.foundation.BorderStroke(1.dp, if (progress != null) colors.primary.copy(alpha = 0.6f) else colors.outline),
+    ) {
+        Row(
+            Modifier
+                .drawBehind { if (progress != null) drawRect(shade, size = size.copy(width = size.width * shown)) }
+                .heightIn(min = 32.dp)
+                .padding(start = 8.dp, end = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Icon(
+                painterResource(R.drawable.ic_download_24),
+                contentDescription = if (progress != null) "Downloading" else "Download",
+                tint = colors.primary,
+                modifier = Modifier.size(SuggestionChipDefaults.IconSize),
+            )
+            Text(
+                "${file.name} · ${humanSize(file.size)}",
+                style = MaterialTheme.typography.labelLarge,
+                color = colors.onSurface,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
         }
     }

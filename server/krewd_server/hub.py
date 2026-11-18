@@ -212,8 +212,34 @@ def _with_chats(text: str, chats: list[dict[str, Any]] | None) -> str:
     return (text + "\n\n" if text else "") + "\n".join(lines)
 
 
-def _prompt_text(text: str, tabs: list[dict[str, Any]] | None, chats: list[dict[str, Any]] | None) -> str:
-    return _with_chats(_with_tabs(text, tabs), chats)
+def _with_notes(text: str, notes: list[dict[str, Any]] | None) -> str:
+    """Margin notes first: each quoted part of an earlier reply with the owner's note on it, then the message."""
+    if not notes:
+        return text
+    lines = ["The owner left notes on parts of your earlier replies:"]
+    for i, n in enumerate(notes, 1):
+        quote = "\n".join("> " + line for line in str(n.get("quote") or "").strip().splitlines())
+        note = str(n.get("note") or "").strip()
+        lines += ["", f"[{i}] On this part:", quote, f"Note: {note}" if note else "(No note of its own: see the message below.)"]
+    out = "\n".join(lines)
+    return out + ("\n\nMessage:\n" + text if text.strip() else "")
+
+
+def _prompt_text(
+    text: str, tabs: list[dict[str, Any]] | None, chats: list[dict[str, Any]] | None,
+    notes: list[dict[str, Any]] | None = None,
+) -> str:
+    return _with_chats(_with_tabs(_with_notes(text, notes), tabs), chats)
+
+
+def _clean_notes(notes: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """Margin notes as stored: quote, note and the app's ref, strings only, quotes required."""
+    out = []
+    for n in notes or []:
+        quote = str(n.get("quote") or "").strip()
+        if quote:
+            out.append({"quote": quote, "note": str(n.get("note") or "").strip(), "ref": n.get("ref") or None})
+    return out
 
 
 def _short(session_id: Any) -> str:
@@ -1204,6 +1230,7 @@ class Hub:
         preview: str | None = None,
         chats: list[dict[str, Any]] | None = None,
         return_to: uuid.UUID | None = None,
+        notes: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """Store a message, then deliver it: steer it into the running turn, queue it, or interrupt and send.
 
@@ -1225,6 +1252,9 @@ class Hub:
             raise NotFound(f"unknown upload {exc}") from None
         tabs = [{k: str(t.get(k) or "") for k in ("id", "title", "url")} for t in tabs or []]
         chats = await self._chat_refs(session_id, chats)
+        notes = _clean_notes(notes)
+        if notes:  # kept with the message; the prompt puts them in front of its text
+            meta = {**(meta or {}), "notes": notes}
         if return_to is None and purpose not in NO_RETURN and int((meta or {}).get("hops") or 0) < MAX_HOPS:
             link = await self.pool.fetchrow("select parent_id, returns from sessions where id = $1", session_id)
             if link and link["returns"] and link["parent_id"]:
@@ -1253,6 +1283,8 @@ class Hub:
             payload["tabs"] = tabs
         if chats:
             payload["chats"] = chats
+        if notes:
+            payload["notes"] = notes
         if return_to:
             payload["return_to"] = str(return_to)
         if client_id:
@@ -1262,7 +1294,8 @@ class Hub:
             payload["meta"] = meta or {}
         seq = await self.emit(session_id, "user", payload)
         await self.pool.execute("update messages set event_seq = $2 where id = $1", message_id, seq)
-        preview = (preview or text or ", ".join(f["name"] for f in files) or ", ".join(t["title"] or t["url"] for t in tabs)
+        noted = (notes[0]["note"] or notes[0]["quote"]) if notes else ""
+        preview = (preview or text or noted or ", ".join(f["name"] for f in files) or ", ".join(t["title"] or t["url"] for t in tabs)
                    or ", ".join(c["title"] for c in chats))
         await self.pool.execute(
             "update sessions set last_text = $2, updated_at = now(), archived = false where id = $1",
@@ -1323,7 +1356,10 @@ class Hub:
                 "_session/steering",
                 {
                     "sessionId": rt.agent_session,
-                    "prompt": prompt_blocks(_prompt_text(row["text"], row["tabs"], row["chats"]), row["attachments"] or []),
+                    "prompt": prompt_blocks(
+                        _prompt_text(row["text"], row["tabs"], row["chats"], (row["meta"] or {}).get("notes")),
+                        row["attachments"] or [],
+                    ),
                     "_meta": {"steering": {"idleBehavior": "promptRequired"}},
                 },
                 timeout=30,
@@ -1705,7 +1741,7 @@ class Hub:
             proc = await self._ensure_loaded(rt)
             if rt.cancel_requested:
                 raise _Cancelled()
-            prompt_text = _prompt_text(text, tabs, chats)
+            prompt_text = _prompt_text(text, tabs, chats, (meta or {}).get("notes"))
             if fresh:
                 # A new agent session learns which chat it is, for `krewd chat history` and `krewd side`. At the end,
                 # since agents name a chat after the start of its first prompt.
@@ -2158,7 +2194,7 @@ class Hub:
                     who = f"Krewd chat \"{(p.get('meta') or {}).get('from_title') or 'another chat'}\""
                 if p.get("purpose") in ("compact", "switch"):
                     continue
-                out.append({"seq": r["seq"], "from": who, "text": p.get("text", "")})
+                out.append({"seq": r["seq"], "from": who, "text": _with_notes(p.get("text", ""), p.get("notes"))})
             elif r["kind"] == "text":
                 if p.get("role") != "assistant":
                     continue

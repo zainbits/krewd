@@ -128,8 +128,45 @@ fun Markdown(text: String, modifier: Modifier = Modifier) {
             uriHandler = uriHandler,
         )
     }
-    Box(modifier) { Blocks(document, style, depth = 0) }
+    Box(modifier) { Blocks(document, style, depth = 0, targets = true) }
 }
+
+/**
+ * The parts of a reply that take margin notes, as (block id, plain text), in the ids [NoteTarget] uses: `b<i>` for
+ * the i-th top-level block, `b<i>.<j>` for the j-th item of a top-level list.
+ */
+fun markdownBlocks(text: String): List<Pair<String, String>> = buildList {
+    parser.parse(text).children().forEachIndexed { i, node ->
+        when (node) {
+            is LinkReferenceDefinition -> Unit
+            is ListBlock -> node.children().forEachIndexed { j, item -> add("b$i.$j" to blockPlain(item)) }
+            else -> add("b$i" to blockPlain(node))
+        }
+    }
+}
+
+/** A block's text as the owner sees it: marks stripped, lines and list items kept apart, code as it is. */
+private fun blockPlain(node: Node): String = buildString {
+    fun walk(n: Node) {
+        when (n) {
+            is MdText -> append(n.literal)
+            is Code -> append(n.literal)
+            is FencedCodeBlock -> append(n.literal.orEmpty().removeSuffix("\n"))
+            is IndentedCodeBlock -> append(n.literal.orEmpty().removeSuffix("\n"))
+            is HtmlBlock -> append(n.literal.orEmpty().trimEnd())
+            is HtmlInline -> append(n.literal.orEmpty())
+            is SoftLineBreak -> append(' ')
+            is HardLineBreak -> append('\n')
+            is TableCell -> { n.children().forEach { walk(it) }; if (n.next != null) append(" | ") }
+            is TableRow -> { n.children().forEach { walk(it) }; append('\n') }
+            else -> {
+                n.children().forEach { walk(it) }
+                if (n is org.commonmark.node.Block && n.next != null && n !is ListBlock) append('\n')
+            }
+        }
+    }
+    walk(node)
+}.trim()
 
 /** Markdown reduced to one plain line (marks stripped, whitespace collapsed), for notifications. */
 fun markdownPreview(text: String): String {
@@ -160,9 +197,16 @@ private fun Node.children(): List<Node> = buildList {
 // ---- Blocks ----
 
 @Composable
-private fun Blocks(parent: Node, style: MdStyle, depth: Int, gap: Dp = 8.dp) {
+private fun Blocks(parent: Node, style: MdStyle, depth: Int, gap: Dp = 8.dp, targets: Boolean = false) {
     Column(verticalArrangement = Arrangement.spacedBy(gap)) {
-        for (node in parent.children()) Block(node, style, depth)
+        parent.children().forEachIndexed { i, node ->
+            when {
+                // A reply's top-level parts take margin notes; a list, item by item.
+                !targets || node is LinkReferenceDefinition -> Block(node, style, depth)
+                node is ListBlock -> ListView(node, style, depth, noteId = "b$i")
+                else -> NoteTarget("b$i", plain = { blockPlain(node) }) { Block(node, style, depth) }
+            }
+        }
     }
 }
 
@@ -201,24 +245,27 @@ private fun headingStyle(level: Int): TextStyle {
 }
 
 @Composable
-private fun ListView(list: ListBlock, style: MdStyle, depth: Int) {
+private fun ListView(list: ListBlock, style: MdStyle, depth: Int, noteId: String? = null) {
     val start = (list as? OrderedList)?.markerStartNumber ?: 1
     val bullet = when (depth % 3) { 0 -> "•"; 1 -> "◦"; else -> "▪" }
     val itemGap = if (list.isTight) 2.dp else 8.dp
     Column(verticalArrangement = Arrangement.spacedBy(itemGap)) {
         list.children().forEachIndexed { index, item ->
-            Row {
-                Text(
-                    text = if (list is OrderedList) "${start + index}." else bullet,
-                    style = MaterialTheme.typography.bodyLarge,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    textAlign = TextAlign.End,
-                    modifier = Modifier.widthIn(min = 18.dp).padding(end = 8.dp),
-                )
-                Box(Modifier.weight(1f)) {
-                    Blocks(item, style, depth + 1, gap = if (list.isTight) 4.dp else 8.dp)
+            val row = @Composable {
+                Row {
+                    Text(
+                        text = if (list is OrderedList) "${start + index}." else bullet,
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.End,
+                        modifier = Modifier.widthIn(min = 18.dp).padding(end = 8.dp),
+                    )
+                    Box(Modifier.weight(1f)) {
+                        Blocks(item, style, depth + 1, gap = if (list.isTight) 4.dp else 8.dp)
+                    }
                 }
             }
+            if (noteId != null) NoteTarget("$noteId.$index", plain = { blockPlain(item) }) { row() } else row()
         }
     }
 }
@@ -238,12 +285,14 @@ private fun Quote(quote: BlockQuote, style: MdStyle, depth: Int) {
 
 @Composable
 private fun CodeBlock(code: String, language: String?) {
-    var wrap by remember { mutableStateOf(false) }
+    val wrapPick = LocalCodeWrap.current
+    var wrap by remember { mutableStateOf(wrapPick.default) }
     var copies by remember { mutableIntStateOf(0) }
     var copied by remember { mutableStateOf(false) }
     val clipboard = LocalClipboard.current
     val scope = rememberCoroutineScope()
     val scroll = rememberScrollState()
+    RegisterNoteScroll(scroll)
     LaunchedEffect(copies) {
         if (copies > 0) { copied = true; delay(COPIED_MS); copied = false }
     }
@@ -264,7 +313,10 @@ private fun CodeBlock(code: String, language: String?) {
                         maxLines = 1,
                         modifier = Modifier.weight(1f),
                     )
-                    BarButton("Wrap", active = wrap) { wrap = !wrap }
+                    BarButton("Wrap", active = wrap) {
+                        wrap = !wrap
+                        wrapPick.set(wrap) // the next code block opens the same way
+                    }
                     BarButton(if (copied) "Copied" else "Copy", active = copied) {
                         scope.launch {
                             clipboard.setClipEntry(ClipEntry(ClipData.newPlainText("code", code)))
@@ -331,7 +383,9 @@ private fun Table(table: TableBlock, style: MdStyle) {
         px.map { with(density) { it.toDp() } + 16.dp }
     }
     val shape = RoundedCornerShape(8.dp)
-    Box(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())) {
+    val scroll = rememberScrollState()
+    RegisterNoteScroll(scroll)
+    Box(Modifier.fillMaxWidth().horizontalScroll(scroll)) {
         Column(Modifier.clip(shape).border(1.dp, colors.outlineVariant, shape)) {
             for ((header, cells) in rows) {
                 Row(Modifier.height(IntrinsicSize.Min)) {

@@ -216,6 +216,24 @@ data class ChatRef(val id: String, val title: String, val relation: String? = nu
 }
 
 /**
+ * A margin note: the owner's reply to one part of an agent's message. [quote] is that part as text, [ref] where
+ * it is in the chat ([ReplyNote.ref]: the timeline key of the reply, then `#` and the block, as in `text-m1#b3`).
+ */
+data class ReplyNote(val quote: String, val note: String = "", val ref: String? = null) {
+    fun toJson(): JSONObject = JSONObject().put("quote", quote).put("note", note).apply { ref?.let { put("ref", it) } }
+
+    /** The reply's timeline key, without the block. */
+    val itemKey: String? get() = ref?.substringBefore('#')
+
+    companion object {
+        fun list(a: JSONArray?): List<ReplyNote> = a.objects().mapNotNull {
+            val quote = it.optString("quote")
+            if (quote.isBlank()) null else ReplyNote(quote, it.optString("note"), it.optStringOrNull("ref"))
+        }
+    }
+}
+
+/**
  * What an agent drafted and only the owner starts: a new side session or sub-agent ([kind] "new"), or a message to
  * another chat ("prompt"). [status]: pending, sent, dismissed, void (its target chat was deleted).
  */

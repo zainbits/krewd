@@ -33,6 +33,7 @@ import app.krewd.data.optStringOrNull
 import app.krewd.data.ChatRef
 import app.krewd.data.Discovery
 import app.krewd.data.Proposal
+import app.krewd.data.ReplyNote
 import app.krewd.data.EngineDefaults
 import app.krewd.data.EngineInfo
 import app.krewd.data.Event
@@ -90,6 +91,7 @@ data class OutgoingMessage(
     val delivery: String?,
     val failed: Boolean = false,
     val chats: List<ChatRef> = emptyList(),
+    val notes: List<ReplyNote> = emptyList(),
 )
 
 object NavTab {
@@ -134,6 +136,12 @@ data class UiState(
     val draftTabs: Map<String, List<BrowserTab>> = emptyMap(),
     /** Chats attached with @ to the unsent message, per chat (or new-task sheet): kept with its text on the phone. */
     val draftChats: Map<String, List<ChatRef>> = emptyMap(),
+    /** Margin notes on parts of agent replies, waiting in a chat's composer (kept on the phone with its text). */
+    val draftNotes: Map<String, List<ReplyNote>> = emptyMap(),
+    /** Swipe a part of a reply right to note it (Settings > Chat). */
+    val swipeToNote: Boolean = true,
+    /** Code blocks open wrapped: the last pick of their Wrap button. */
+    val codeWrap: Boolean = false,
     /** Side sessions, sub-agents and messages to other chats that agents drafted, waiting for the owner. */
     val proposals: List<Proposal> = emptyList(),
     /** Archived chats, loaded when @ needs them (null: not loaded). */
@@ -169,6 +177,7 @@ data class UiState(
     fun routine(id: String?): Routine? = routines.firstOrNull { it.id == id }
     fun draft(key: String): List<PendingFile> = drafts[key].orEmpty()
     fun chatsOf(key: String): List<ChatRef> = draftChats[key].orEmpty()
+    fun notesOf(key: String): List<ReplyNote> = draftNotes[key].orEmpty()
     fun session(id: String?): SessionInfo? = sessions.firstOrNull { it.id == id }
     val browserTab: BrowserTab? get() = browser?.tabs?.firstOrNull { it.id == browserTabId }
     val openSession: SessionInfo? get() = sessions.firstOrNull { it.id == openSessionId }
@@ -186,6 +195,10 @@ const val NEW_DRAFT = "new"
 
 /** At most this many chats attached with @ to one message. */
 const val MAX_DRAFT_CHATS = 5
+
+/** At most this many margin notes in one message (the server takes 20), each quoting at most this much. */
+const val MAX_DRAFT_NOTES = 20
+const val MAX_NOTE_QUOTE = 4000
 
 /** The draft key of the new-task sheet when it starts a side session of [parentId]. */
 fun sideDraft(parentId: String) = "side-$parentId"
@@ -213,6 +226,8 @@ class KrewdViewModel(private val app: Application) {
             settings = prefs.load(), highQuality = prefs.highQuality(), savedPrompts = prefs.savedPrompts(),
             newTaskText = prefs.textDraft(NEW_DRAFT),
             draftChats = prefs.chatDraftKeys().associateWith { prefs.chatDraft(it) }.filterValues { it.isNotEmpty() },
+            draftNotes = prefs.noteDraftKeys().associateWith { prefs.noteDraft(it) }.filterValues { it.isNotEmpty() },
+            swipeToNote = prefs.swipeToNote(), codeWrap = prefs.codeWrap(),
         ),
     )
     val state: StateFlow<UiState> = _state.asStateFlow()
@@ -764,6 +779,44 @@ class KrewdViewModel(private val app: Application) {
         _state.update { s -> s.copy(draftChats = if (chats.isEmpty()) s.draftChats - key else s.draftChats + (key to chats)) }
     }
 
+    // margin notes: replies to parts of an agent's message, sent together with the next message
+
+    /** Adds a note on [quote] (where it is: [ref]); the same part twice is one note. Returns its number, from 1. */
+    fun addNote(sessionId: String, quote: String, ref: String?): Int? {
+        val now = _state.value.notesOf(sessionId)
+        val text = quote.trim().take(MAX_NOTE_QUOTE)
+        if (text.isEmpty()) return null
+        now.indexOfFirst { it.quote == text && it.ref == ref }.takeIf { it >= 0 }?.let { return it + 1 }
+        if (now.size >= MAX_DRAFT_NOTES) {
+            toast("Up to $MAX_DRAFT_NOTES notes per message")
+            return null
+        }
+        setDraftNotes(sessionId, now + ReplyNote(text, "", ref))
+        return now.size + 1
+    }
+
+    fun setNoteText(sessionId: String, index: Int, note: String) =
+        setDraftNotes(sessionId, _state.value.notesOf(sessionId).mapIndexed { i, n -> if (i == index) n.copy(note = note) else n })
+
+    fun removeNote(sessionId: String, index: Int) =
+        setDraftNotes(sessionId, _state.value.notesOf(sessionId).filterIndexed { i, _ -> i != index })
+
+    fun setDraftNotes(key: String, notes: List<ReplyNote>) {
+        prefs.setNoteDraft(key, notes)
+        _state.update { s -> s.copy(draftNotes = if (notes.isEmpty()) s.draftNotes - key else s.draftNotes + (key to notes)) }
+    }
+
+    fun setSwipeToNote(on: Boolean) {
+        prefs.setSwipeToNote(on)
+        _state.update { it.copy(swipeToNote = on) }
+    }
+
+    fun setCodeWrap(on: Boolean) {
+        if (_state.value.codeWrap == on) return
+        prefs.setCodeWrap(on)
+        _state.update { it.copy(codeWrap = on) }
+    }
+
     /** Archived chats for @, once per connection; older servers or errors leave it empty. */
     fun loadArchived() {
         if (_state.value.archived != null) return
@@ -884,10 +937,12 @@ class KrewdViewModel(private val app: Application) {
             tabs = _state.value.draftTabs[id].orEmpty(),
             delivery = delivery,
             chats = _state.value.chatsOf(id),
+            notes = _state.value.notesOf(id),
         )
         clearDraft(id)
         prefs.setTextDraft(id, "")
         setDraftChats(id, emptyList())
+        setDraftNotes(id, emptyList())
         _state.update { it.copy(outbox = it.outbox + message, draftTabs = it.draftTabs - id) }
         deliver(message)
     }
@@ -906,7 +961,7 @@ class KrewdViewModel(private val app: Application) {
         }
         scope.launch(Dispatchers.IO) {
             try {
-                client.send(message.sessionId, message.text, message.uploads, message.tabs, message.delivery, message.clientId, message.chats)
+                client.send(message.sessionId, message.text, message.uploads, message.tabs, message.delivery, message.clientId, message.chats, message.notes)
                 dropStored(message.clientId)
             } catch (e: ApiException) {
                 // The server answered but refused: show why; resending would fail the same way.
@@ -950,6 +1005,7 @@ class KrewdViewModel(private val app: Application) {
             delivery = it.delivery,
             state = if (it.failed) "failed" else "sending",
             chats = it.chats,
+            notes = it.notes,
         )
     }
 
@@ -1203,6 +1259,7 @@ class KrewdViewModel(private val app: Application) {
         pushLive()
         notifier.clear(session.id)
         prefs.setTextDraft(session.id, "")
+        setDraftNotes(session.id, emptyList())
         act { it.deleteSession(session.id) }
     }
 
@@ -1215,6 +1272,7 @@ class KrewdViewModel(private val app: Application) {
         pushLive()
         notifier.clear(id)
         prefs.setTextDraft(id, "")
+        setDraftNotes(id, emptyList())
         if (_state.value.openSessionId == id) {
             closeSession()
             toast("That run's chat was deleted: a newer run started")
@@ -1229,6 +1287,7 @@ class KrewdViewModel(private val app: Application) {
                 pushLive()
                 notifier.clear(id)
                 prefs.setTextDraft(id, "")
+                setDraftNotes(id, emptyList())
                 if (_state.value.openSessionId == id) closeSession()
             }
             done(problem)
@@ -1367,9 +1426,9 @@ class KrewdViewModel(private val app: Application) {
         return bounds.outMimeType ?: "image/png"
     }
 
-    private val _downloading = MutableStateFlow<Set<String>>(emptySet())
-    /** Paths of handed-back files being downloaded right now. */
-    val downloading: StateFlow<Set<String>> = _downloading.asStateFlow()
+    private val _downloading = MutableStateFlow<Map<String, Float>>(emptyMap())
+    /** Handed-back files being downloaded right now: path to how much has arrived, 0 to 1. */
+    val downloading: StateFlow<Map<String, Float>> = _downloading.asStateFlow()
     private val saved = HashMap<String, Uri>() // "path|size" -> its copy in Downloads
 
     /** Saves a file the agent handed back to Downloads/Krewd (once), then opens it. */
@@ -1378,7 +1437,7 @@ class KrewdViewModel(private val app: Application) {
         if (file.path in _downloading.value) return
         val key = "${file.path}|${file.size}"
         saved[key]?.takeIf { exists(it) }?.let { if (view(it, file.mime)) return }
-        _downloading.update { it + file.path }
+        _downloading.update { it + (file.path to 0f) }
         scope.launch {
             try {
                 val uri = withContext(Dispatchers.IO) { saveToDownloads(client, file) }
@@ -1404,7 +1463,17 @@ class KrewdViewModel(private val app: Application) {
         }
         val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: error("Could not save to Downloads")
         try {
-            resolver.openOutputStream(uri)!!.use { client.downloadFile(file.path, it) }
+            var shown = -1
+            resolver.openOutputStream(uri)!!.use { out ->
+                client.downloadFile(file.path, out, file.size) { done, total ->
+                    // Every whole percent, so the chip's shade moves smoothly without flooding the UI.
+                    val percent = if (total > 0) (done * 100 / total).toInt().coerceIn(0, 100) else 0
+                    if (percent != shown) {
+                        shown = percent
+                        _downloading.update { if (file.path in it) it + (file.path to percent / 100f) else it }
+                    }
+                }
+            }
             resolver.update(uri, ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }, null, null)
             return uri
         } catch (e: Exception) {
@@ -1890,7 +1959,12 @@ class KrewdViewModel(private val app: Application) {
             prefs.syncedValues().forEach { (k, v) -> runCatching { client.setPref(k, v) } }  // first time: this phone's picks
         } else {
             prefs.apply(server)
-            _state.update { it.copy(highQuality = prefs.highQuality(), savedPrompts = prefs.savedPrompts()) }
+            _state.update {
+                it.copy(
+                    highQuality = prefs.highQuality(), savedPrompts = prefs.savedPrompts(),
+                    swipeToNote = prefs.swipeToNote(), codeWrap = prefs.codeWrap(),
+                )
+            }
         }
     }
 

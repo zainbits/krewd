@@ -98,10 +98,11 @@ private val ROUTINE_IDEAS = listOf(
     "every 6 hours, watch the Pixel 10 Pro on Amazon and Flipkart and tell me when it's in stock under ₹70,000",
 )
 @Composable
-fun RoutinesScreen(state: UiState, viewModel: KrewdViewModel, padding: PaddingValues) {
+fun RoutinesScreen(state: UiState, viewModel: KrewdViewModel, padding: PaddingValues, listState: androidx.compose.foundation.lazy.LazyListState) {
     var creating by remember { mutableStateOf(false) }
     val online = state.connection is Connection.Online
     LazyColumn(
+        state = listState,
         modifier = Modifier.fillMaxSize(),
         contentPadding = padding,
         verticalArrangement = Arrangement.spacedBy(10.dp),
@@ -211,7 +212,7 @@ private fun RoutineCard(routine: Routine, chatStatus: String?, engineName: Strin
 
 /** One routine's page: schedule, instructions and every run (tap a run to see it in the chat). */
 @Composable
-fun RoutineScreen(state: UiState, viewModel: KrewdViewModel) {
+fun RoutineScreen(state: UiState, viewModel: KrewdViewModel, listState: androidx.compose.foundation.lazy.LazyListState) {
     val routine = state.openRoutine
     var editing by remember { mutableStateOf(false) }
     var editingNotes by remember { mutableStateOf(false) }
@@ -224,6 +225,7 @@ fun RoutineScreen(state: UiState, viewModel: KrewdViewModel) {
             val chat = state.sessions.firstOrNull { it.id == routine.sessionId }
             val busy = chat?.isBusy == true || routine.lastRun?.active == true
             LazyColumn(
+                state = listState,
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(
                     start = ShellDimensions.CONTENT_HORIZONTAL_PADDING,

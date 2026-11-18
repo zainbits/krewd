@@ -1,6 +1,9 @@
 package app.krewd.ui
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.material3.Switch
+import androidx.compose.ui.Alignment
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -36,7 +39,7 @@ import app.krewd.findConnectLink
 import app.krewd.data.ConnectionSettings
 
 @Composable
-fun SettingsScreen(state: UiState, viewModel: KrewdViewModel, padding: PaddingValues) {
+fun SettingsScreen(state: UiState, viewModel: KrewdViewModel, padding: PaddingValues, listState: androidx.compose.foundation.lazy.LazyListState) {
     val saved = state.settings
     var addresses by remember(saved) { mutableStateOf(saved.addresses.joinToString("\n")) }
     var token by remember(saved) { mutableStateOf(saved.token) }
@@ -87,6 +90,7 @@ fun SettingsScreen(state: UiState, viewModel: KrewdViewModel, padding: PaddingVa
     if (storageSheet) StorageSheet(viewModel) { storageSheet = false }
 
     LazyColumn(
+        state = listState,
         modifier = Modifier.fillMaxSize(),
         contentPadding = padding,
         verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -155,6 +159,22 @@ fun SettingsScreen(state: UiState, viewModel: KrewdViewModel, padding: PaddingVa
         item { SecurityCard(state, viewModel) }
         item { SignInsCard(state, viewModel) }
         item { ProfilesCard(state, viewModel) }
+        item {
+            SectionCard {
+                Text("Chat", style = MaterialTheme.typography.titleMedium)
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Swipe to note", style = MaterialTheme.typography.bodyLarge)
+                        Text(
+                            "Swipe part of a reply to the right to leave a margin note on it. Tapping a part, or selecting words and picking Note, works either way.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(checked = state.swipeToNote, onCheckedChange = viewModel::setSwipeToNote)
+                }
+            }
+        }
         item {
             SectionCard {
                 Text("Browser location", style = MaterialTheme.typography.titleMedium)

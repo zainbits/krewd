@@ -42,6 +42,13 @@ class ChatRef(BaseModel):
     id: uuid.UUID
 
 
+class Note(BaseModel):
+    """A margin note: the owner's reply to one part of an earlier agent message."""
+    quote: str = Field(min_length=1, max_length=4000)
+    note: str = Field(default="", max_length=4000)
+    ref: str | None = Field(default=None, max_length=200)  # where the quote is in the chat (the app's own key)
+
+
 class WithAttachments(BaseModel):
     text: str = ""
     attachments: list[str] = Field(default_factory=list, max_length=50)  # upload ids from POST /api/uploads
@@ -51,8 +58,9 @@ class WithAttachments(BaseModel):
 
     @model_validator(mode="after")
     def text_or_files(self):
-        if not self.text.strip() and not self.attachments and not self.tabs and not self.chats:
-            raise ValueError("send some text, an attachment, a tab or a chat")
+        # Margin notes (Message only) are a message on their own too.
+        if not self.text.strip() and not self.attachments and not self.tabs and not self.chats and not getattr(self, "notes", None):
+            raise ValueError("send some text, an attachment, a tab, a chat or a note")
         return self
 
 
@@ -89,6 +97,7 @@ class ProposalSend(BaseModel):
 class Message(WithAttachments):
     # steer: into the running turn (where the engine supports it); queue: after it; interrupt: stop it, then send.
     delivery: Literal["steer", "queue", "interrupt"] | None = None
+    notes: list[Note] = Field(default_factory=list, max_length=20)  # margin notes on parts of earlier replies
 
 
 class SessionChanges(BaseModel):
@@ -650,6 +659,7 @@ def create_app(hub: Hub, token: str, lifespan_hub: bool = True) -> FastAPI:
         message = await hub.send(
             session_id, body.text, body.attachments, tabs=[t.model_dump() for t in body.tabs],
             delivery=body.delivery, client_id=body.client_id, chats=[{"id": str(c.id)} for c in body.chats],
+            notes=[n.model_dump() for n in body.notes],
         )
         return {"ok": True, "message": message}
 

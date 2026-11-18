@@ -93,7 +93,7 @@ class Prefs(context: Context) {
                 key.startsWith("engine.") && v is JSONObject -> edit.putString("engine_" + key.removePrefix("engine."), v.toString())
                 key == "saved_prompts" && v is org.json.JSONArray -> edit.putString(key, v.toString())
                 key == "last_engine" && v is String -> edit.putString(key, v)
-                (key == "browser_high_quality" || key == "browser_cursor") && v is Boolean -> edit.putBoolean(key, v)
+                key in BOOLEANS && v is Boolean -> edit.putBoolean(key, v)
                 (key == "pip_wide_width" || key == "pip_tall_height") && v is Number -> edit.putFloat(key, v.toFloat())
             }
         }
@@ -167,6 +167,22 @@ class Prefs(context: Context) {
         synced("browser_high_quality", on)
     }
 
+    /** Swipe a part of an agent's reply to the right to leave a margin note on it (tap and the selection menu always work). */
+    fun swipeToNote(): Boolean = prefs.getBoolean("swipe_to_note", true)
+
+    fun setSwipeToNote(on: Boolean) {
+        prefs.edit().putBoolean("swipe_to_note", on).apply()
+        synced("swipe_to_note", on)
+    }
+
+    /** Code blocks open wrapped or scrolling sideways: the last pick of their Wrap button. */
+    fun codeWrap(): Boolean = prefs.getBoolean("code_wrap", false)
+
+    fun setCodeWrap(on: Boolean) {
+        prefs.edit().putBoolean("code_wrap", on).apply()
+        synced("code_wrap", on)
+    }
+
     /** Cursor (true) or touch input for the browser, remembered per agent, with the last pick as the fallback. */
     fun cursorMode(engineId: String?): Boolean =
         engineId?.let { engine(it).cursor } ?: prefs.getBoolean("browser_cursor", true)
@@ -194,11 +210,26 @@ class Prefs(context: Context) {
         else drafts.edit().putString("chats:$key", JSONArray(chats.map { it.toJson() }).toString()).apply()
     }
 
+    /** Margin notes waiting in a chat's composer. Phone only, like the text. */
+    fun noteDraft(key: String): List<ReplyNote> = runCatching {
+        ReplyNote.list(JSONArray(drafts.getString("notes:$key", null) ?: "[]"))
+    }.getOrDefault(emptyList())
+
+    fun setNoteDraft(key: String, notes: List<ReplyNote>) {
+        if (notes.isEmpty()) drafts.edit().remove("notes:$key").apply()
+        else drafts.edit().putString("notes:$key", JSONArray(notes.map { it.toJson() }).toString()).apply()
+    }
+
+    fun noteDraftKeys(): List<String> = drafts.all.keys.filter { it.startsWith("notes:") }.map { it.removePrefix("notes:") }
+
     /** Every draft key with chats attached, to load them at start. */
     fun chatDraftKeys(): List<String> = drafts.all.keys.filter { it.startsWith("chats:") }.map { it.removePrefix("chats:") }
 
     companion object {
-        private val SYNCED = setOf("last_engine", "pip_wide_width", "pip_tall_height", "browser_high_quality", "browser_cursor")
+        private val SYNCED = setOf(
+            "last_engine", "pip_wide_width", "pip_tall_height", "browser_high_quality", "browser_cursor", "swipe_to_note", "code_wrap",
+        )
+        private val BOOLEANS = setOf("browser_high_quality", "browser_cursor", "swipe_to_note", "code_wrap")
     }
 }
 
@@ -401,8 +432,12 @@ class KrewdApi(
      * Sends a message. [clientId] makes a resend safe (the server keeps one copy); [delivery] is steer,
      * queue or interrupt, or null for the server's default. Returns the stored message.
      */
-    fun send(id: String, text: String, attachments: List<String>, tabs: List<BrowserTab>, delivery: String?, clientId: String, chats: List<ChatRef> = emptyList()): JSONObject {
+    fun send(
+        id: String, text: String, attachments: List<String>, tabs: List<BrowserTab>, delivery: String?, clientId: String,
+        chats: List<ChatRef> = emptyList(), notes: List<ReplyNote> = emptyList(),
+    ): JSONObject {
         val body = JSONObject().put("text", text).put("client_id", clientId)
+        if (notes.isNotEmpty()) body.put("notes", JSONArray(notes.map { it.toJson() }))
         if (attachments.isNotEmpty()) body.put("attachments", JSONArray(attachments))
         if (tabs.isNotEmpty()) body.put("tabs", tabsJson(tabs))
         if (chats.isNotEmpty()) body.put("chats", chatsJson(chats))
@@ -566,8 +601,11 @@ class KrewdApi(
         }
     }
 
-    /** Streams a file an agent handed back (GET /api/files) into [out]. */
-    fun downloadFile(path: String, out: java.io.OutputStream) {
+    /**
+     * Streams a file an agent handed back (GET /api/files) into [out], telling [progress] the bytes so far and the
+     * total (the response's length, else [size]; 0 when neither is known).
+     */
+    fun downloadFile(path: String, out: java.io.OutputStream, size: Long? = null, progress: (Long, Long) -> Unit = { _, _ -> }) {
         val conn = open("$baseUrl/api/files?path=" + java.net.URLEncoder.encode(path, "UTF-8").replace("+", "%20"))
         try {
             conn.connectTimeout = Timing.CONNECT_TIMEOUT_MS
@@ -577,7 +615,19 @@ class KrewdApi(
             if (code !in 200..299) {
                 throw ApiException(code, if (code == 404) "The file is no longer there" else "Download failed (HTTP $code)")
             }
-            conn.inputStream.use { it.copyTo(out, 64 * 1024) }
+            val total = conn.contentLengthLong.takeIf { it > 0 } ?: size ?: 0L
+            conn.inputStream.use { input ->
+                val buffer = ByteArray(64 * 1024)
+                var done = 0L
+                progress(0, total)
+                while (true) {
+                    val n = input.read(buffer)
+                    if (n < 0) break
+                    out.write(buffer, 0, n)
+                    done += n
+                    progress(done, total)
+                }
+            }
         } finally {
             conn.disconnect()
         }

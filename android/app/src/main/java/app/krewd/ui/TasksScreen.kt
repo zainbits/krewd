@@ -108,7 +108,13 @@ fun crewMembers(state: UiState): List<CrewMember> = state.engines.map { engine -
  * and the rest of the tasks. New tasks start from the "Ask Krewd" bar or by tapping an agent's face.
  */
 @Composable
-fun TasksScreen(state: UiState, viewModel: KrewdViewModel, padding: PaddingValues, onOpenSettings: () -> Unit) {
+fun TasksScreen(
+    state: UiState,
+    viewModel: KrewdViewModel,
+    padding: PaddingValues,
+    listState: androidx.compose.foundation.lazy.LazyListState,
+    onOpenSettings: () -> Unit,
+) {
     var asking by rememberSaveable { mutableStateOf(false) }
     var askEngine by rememberSaveable { mutableStateOf<String?>(null) }
     var showEarlier by rememberSaveable { mutableStateOf(false) }
@@ -137,6 +143,7 @@ fun TasksScreen(state: UiState, viewModel: KrewdViewModel, padding: PaddingValue
     Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surface) {
     Box(Modifier.fillMaxSize()) {
         LazyColumn(
+            state = listState,
             modifier = Modifier.fillMaxSize(),
             contentPadding = padding,
             verticalArrangement = Arrangement.spacedBy(3.dp),
