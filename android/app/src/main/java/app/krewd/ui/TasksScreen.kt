@@ -640,8 +640,8 @@ private fun TaskRowItem(session: SessionInfo, state: UiState, viewModel: KrewdVi
 }
 
 /**
- * Swipe left for Pin and Delete, on idle rows and on working cards alike. A working task pinned now stays in
- * Working while it runs and shows under Pinned once it stops; deleting one stops its agent first.
+ * Swipe left for Pin and Delete on idle rows; on working cards the second drop is Stop instead (no confirm, the
+ * chat stays). A working task pinned now stays in Working while it runs and shows under Pinned once it stops.
  */
 @Composable
 private fun SwipeToPinOrDelete(session: SessionInfo, viewModel: KrewdViewModel, content: @Composable () -> Unit) {
@@ -651,21 +651,19 @@ private fun SwipeToPinOrDelete(session: SessionInfo, viewModel: KrewdViewModel, 
     LiquidSwipeReveal(
         pinned = session.pinned,
         onPin = { closeReveal -> closeReveal(); viewModel.setPinned(session.id, !session.pinned) },
-        onDelete = { closeReveal -> close = closeReveal; confirm = true },
+        onDelete = { closeReveal ->
+            if (working) { closeReveal(); viewModel.stopSession(session.id) } else { close = closeReveal; confirm = true }
+        },
         pinIcon = R.drawable.ic_pin_24,
-        deleteIcon = R.drawable.ic_delete_24,
+        deleteIcon = if (working) R.drawable.ic_stop_24 else R.drawable.ic_delete_24,
+        deleteLabel = if (working) "Stop" else "Delete",
         content = content,
     )
     if (confirm) {
         AlertDialog(
             onDismissRequest = { confirm = false; close() },
             title = { Text("Delete this task?") },
-            text = {
-                Text(
-                    (if (working) "The agent is stopped, and " else "") +
-                        "“${session.title}” and its chat are deleted from the server. You can undo for 3 seconds.",
-                )
-            },
+            text = { Text("“${session.title}” and its chat are deleted from the server. You can undo for 3 seconds.") },
             confirmButton = {
                 TextButton(onClick = {
                     confirm = false

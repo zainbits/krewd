@@ -82,6 +82,7 @@ internal fun LiquidSwipeReveal(
     onDelete: (close: () -> Unit) -> Unit,
     @DrawableRes pinIcon: Int,
     @DrawableRes deleteIcon: Int,
+    deleteLabel: String = "Delete",
     cardColor: Color = MaterialTheme.colorScheme.surfaceContainer,
     content: @Composable () -> Unit,
 ) {
@@ -159,7 +160,7 @@ internal fun LiquidSwipeReveal(
         )
         LiquidDrop(
             slot = 2, model = model, frame = frame, sizePx = dropPx, icon = deleteIcon,
-            label = "Delete", tint = colors.onErrorContainer, enabled = isOpen,
+            label = deleteLabel, tint = colors.onErrorContainer, enabled = isOpen,
             onClick = { onDelete(close) },
         )
         Box(
@@ -168,7 +169,7 @@ internal fun LiquidSwipeReveal(
                 .semantics {
                     customActions = listOf(
                         CustomAccessibilityAction(if (pinned) "Unpin" else "Pin") { onPin(close); true },
-                        CustomAccessibilityAction("Delete") { onDelete(close); true },
+                        CustomAccessibilityAction(deleteLabel) { onDelete(close); true },
                     )
                 }
                 .draggable(

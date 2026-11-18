@@ -1056,6 +1056,9 @@ class KrewdViewModel(private val app: Application) {
         act { it.cancel(id) }
     }
 
+    /** Stop a task's running turn from the task list (the working card's swipe). */
+    fun stopSession(id: String) = act { it.cancel(id) }
+
     fun decide(approval: Approval, optionId: String) = act { it.decide(approval.id, optionId) }
 
     fun setAutoApprove(id: String, on: Boolean) = act { client ->
