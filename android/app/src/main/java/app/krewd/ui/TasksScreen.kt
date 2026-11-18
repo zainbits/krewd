@@ -467,43 +467,48 @@ private fun NeedsCard(
 @Composable
 private fun WorkingCard(session: SessionInfo, live: LiveInfo?, look: KrewdLook, engineName: String, shape: RoundedCornerShape, viewModel: KrewdViewModel) {
     val face = faceOf(session, live)
-    Surface(onClick = { viewModel.openSession(session.id) }, shape = shape, color = MaterialTheme.colorScheme.surfaceContainer, modifier = Modifier.fillMaxWidth()) {
-        Row(Modifier.padding(start = 18.dp, end = 14.dp, top = 14.dp, bottom = 14.dp), verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    CrewFace(look, face, 22.dp)
-                    Text(
-                        live?.activity ?: "Working",
-                        style = MaterialTheme.typography.labelLarge,
-                        color = MaterialTheme.colorScheme.primary,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text(session.title, style = MaterialTheme.typography.titleMedium, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
-                    session.sideLabel?.let { SideTag(it) }
-                    if (session.waitingOn.isNotEmpty()) SideTag("waiting on ${session.waitingOn.size}")
-                }
-                session.parentId?.let { pid ->
-                    val parent = viewModel.state.value.session(pid)
-                    ParentLine(parent?.title ?: session.parentTitle ?: "Parent chat", parent?.let { p -> { viewModel.openSession(p.id) } })
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text(engineName, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.outline)
-                    if (live != null) {
-                        Text("·", color = MaterialTheme.colorScheme.outline)
-                        Elapsed(live.since)
-                        if (live.steps > 0) {
+    SwipeToPinOrDelete(session, viewModel) {
+        Surface(onClick = { viewModel.openSession(session.id) }, shape = shape, color = MaterialTheme.colorScheme.surfaceContainer, modifier = Modifier.fillMaxWidth()) {
+            Row(Modifier.padding(start = 18.dp, end = 14.dp, top = 14.dp, bottom = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        CrewFace(look, face, 22.dp)
+                        Text(
+                            live?.activity ?: "Working",
+                            style = MaterialTheme.typography.labelLarge,
+                            color = MaterialTheme.colorScheme.primary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        if (session.pinned) {
+                            Icon(painterResource(R.drawable.ic_pin_24), contentDescription = "Pinned", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(15.dp))
+                        }
+                        Text(session.title, style = MaterialTheme.typography.titleMedium, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+                        session.sideLabel?.let { SideTag(it) }
+                        if (session.waitingOn.isNotEmpty()) SideTag("waiting on ${session.waitingOn.size}")
+                    }
+                    session.parentId?.let { pid ->
+                        val parent = viewModel.state.value.session(pid)
+                        ParentLine(parent?.title ?: session.parentTitle ?: "Parent chat", parent?.let { p -> { viewModel.openSession(p.id) } })
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text(engineName, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.outline)
+                        if (live != null) {
                             Text("·", color = MaterialTheme.colorScheme.outline)
-                            Text(if (live.steps == 1) "1 step" else "${live.steps} steps", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.outline)
+                            Elapsed(live.since)
+                            if (live.steps > 0) {
+                                Text("·", color = MaterialTheme.colorScheme.outline)
+                                Text(if (live.steps == 1) "1 step" else "${live.steps} steps", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.outline)
+                            }
                         }
                     }
                 }
-            }
-            session.browserTab?.id?.takeIf { it.isNotEmpty() }?.let { tabId ->
-                Spacer(Modifier.width(14.dp))
-                TabStill(tabId, session.browserTab?.host ?: "", viewModel, Modifier.size(width = 96.dp, height = 120.dp))
+                session.browserTab?.id?.takeIf { it.isNotEmpty() }?.let { tabId ->
+                    Spacer(Modifier.width(14.dp))
+                    TabStill(tabId, session.browserTab?.host ?: "", viewModel, Modifier.size(width = 96.dp, height = 120.dp))
+                }
             }
         }
     }
@@ -623,16 +628,8 @@ private fun AskBar(text: String, look: KrewdLook, onClick: () -> Unit, modifier:
 /** A finished or idle task, with swipe left for Pin and Delete. */
 @Composable
 private fun TaskRowItem(session: SessionInfo, state: UiState, viewModel: KrewdViewModel) {
-    var confirm by remember { mutableStateOf(false) }
-    var close by remember { mutableStateOf<() -> Unit>({}) }
     Box(Modifier.padding(vertical = 2.dp)) {
-        LiquidSwipeReveal(
-            pinned = session.pinned,
-            onPin = { closeReveal -> closeReveal(); viewModel.setPinned(session.id, !session.pinned) },
-            onDelete = { closeReveal -> close = closeReveal; confirm = true },
-            pinIcon = R.drawable.ic_pin_24,
-            deleteIcon = R.drawable.ic_delete_24,
-        ) {
+        SwipeToPinOrDelete(session, viewModel) {
             TaskRow(
                 session, lookFor(session.engine, state.engines), onClick = { viewModel.openSession(session.id) },
                 parentTitle = session.parentId?.let { state.session(it)?.title ?: session.parentTitle },
@@ -640,11 +637,35 @@ private fun TaskRowItem(session: SessionInfo, state: UiState, viewModel: KrewdVi
             )
         }
     }
+}
+
+/**
+ * Swipe left for Pin and Delete, on idle rows and on working cards alike. A working task pinned now stays in
+ * Working while it runs and shows under Pinned once it stops; deleting one stops its agent first.
+ */
+@Composable
+private fun SwipeToPinOrDelete(session: SessionInfo, viewModel: KrewdViewModel, content: @Composable () -> Unit) {
+    var confirm by remember { mutableStateOf(false) }
+    var close by remember { mutableStateOf<() -> Unit>({}) }
+    val working = session.status == "running" || session.status == "waiting"
+    LiquidSwipeReveal(
+        pinned = session.pinned,
+        onPin = { closeReveal -> closeReveal(); viewModel.setPinned(session.id, !session.pinned) },
+        onDelete = { closeReveal -> close = closeReveal; confirm = true },
+        pinIcon = R.drawable.ic_pin_24,
+        deleteIcon = R.drawable.ic_delete_24,
+        content = content,
+    )
     if (confirm) {
         AlertDialog(
             onDismissRequest = { confirm = false; close() },
             title = { Text("Delete this task?") },
-            text = { Text("“${session.title}” and its chat are deleted from the server. You can undo for 3 seconds.") },
+            text = {
+                Text(
+                    (if (working) "The agent is stopped, and " else "") +
+                        "“${session.title}” and its chat are deleted from the server. You can undo for 3 seconds.",
+                )
+            },
             confirmButton = {
                 TextButton(onClick = {
                     confirm = false
