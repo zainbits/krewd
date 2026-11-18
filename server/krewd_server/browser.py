@@ -278,12 +278,13 @@ class Browser:
             await link.call("Emulation.clearDeviceMetricsOverride")
             link.emulated = False
 
-    async def watch(self, on_activity, on_connect=None) -> None:
+    async def watch(self, on_activity, on_connect=None, on_closed=None) -> None:
         """Follow the browser's tabs; report a tab that opens or navigates while the owner is not using it.
 
         `on_activity({id, url, title})` returns the session it was linked to, or None. A linked tab that is
         in the vertical view goes back to horizontal, since an agent is now driving it. `on_connect()` runs
         each time the browser is reached (at start and after Brave restarts), without holding up the watch.
+        `on_closed(tab_id)` runs when a tab closes.
         """
         while True:
             try:
@@ -302,6 +303,9 @@ class Browser:
                         if method == "Target.targetDestroyed":
                             known.pop(params.get("targetId"), None)
                             self.views.pop(params.get("targetId"), None)
+                            if on_closed and params.get("targetId"):
+                                with contextlib.suppress(Exception):
+                                    await on_closed(params["targetId"])
                             continue
                         if method not in ("Target.targetCreated", "Target.targetInfoChanged"):
                             continue

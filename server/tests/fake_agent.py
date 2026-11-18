@@ -1,4 +1,4 @@
-"""A tiny ACP agent for tests. Prompt words steer it: perm, slow, pause, crash. Supports `_session/steering`."""
+"""A tiny ACP agent for tests. Prompt words steer it: perm, slow, hold, pause, crash. Supports `_session/steering`."""
 
 import asyncio
 import re
@@ -129,6 +129,13 @@ async def run_prompt(request_id: int, sid: str, text: str, params: dict) -> None
                      "content": [{"type": "content", "content": {"type": "image", "data": png, "mimeType": "image/png"}}]})
     if "slow" in text:
         for _ in range(200):
+            if sid in cancelled:
+                cancelled.discard(sid)
+                send({"jsonrpc": "2.0", "id": request_id, "result": {"stopReason": "cancelled"}})
+                return
+            await asyncio.sleep(0.05)
+    if "hold" in text:  # a turn that runs until it is stopped (at most 10 minutes), for live checks
+        for _ in range(12000):
             if sid in cancelled:
                 cancelled.discard(sid)
                 send({"jsonrpc": "2.0", "id": request_id, "result": {"stopReason": "cancelled"}})

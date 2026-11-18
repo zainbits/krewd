@@ -18,6 +18,16 @@ warn() { printf '  %swarn%s  %s\n' "$Y" "$N" "$1"; [[ -n "${2:-}" ]] && printf '
 bad()  { printf '  %sFAIL%s  %s\n' "$R" "$N" "$1"; [[ -n "${2:-}" ]] && printf '        fix: %s\n' "$2"; FAILS=$((FAILS + 1)); }
 ask()  { local reply; read -r -p "$1 [y/N] " reply; [[ "$reply" =~ ^[Yy] ]]; }
 has()  { command -v "$1" >/dev/null 2>&1; }
+# The Krewd hook (deploy/browser-harness/agent_helpers.py) patches browser-harness internals: check it still applies.
+harness_hook_works() {
+  local exe py
+  exe="$(command -v browser-harness)" || return 1
+  py="$(head -1 "$exe" | sed 's/^#!//')"
+  [[ -x "$py" ]] || return 1
+  env -u BU_NAME -u CODEX_THREAD_ID BH_AGENT_WORKSPACE="$REPO/deploy/browser-harness" CLAUDE_CODE_SESSION_ID=doctor-check BH_TELEMETRY=0 \
+    "$py" -I -c 'import sys, browser_harness.helpers as h, browser_harness.admin as a
+sys.exit(0 if getattr(h, "_krewd_hooked", False) and h.NAME == a.NAME == "krewd-doctor-check" and h._send.__name__ == "krewd_send" else 1)' >/dev/null 2>&1
+}
 uvrun() { "$(find_uv)" run --project "$REPO/server" --frozen --quiet "$@"; }
 port() { conf KREWD_PORT 8800; }
 cdp_port() { conf KREWD_CDP_PORT 9222; }
@@ -58,6 +68,11 @@ doctor() {
   [[ -f "$(signing_file)" ]] && ok "APK signing key ($(signing_file))" \
     || warn "no APK signing key: ./master.sh app makes debug-signed APKs" "put a signing properties file at $(signing_file) (AGENTS.md, new machine step 10)"
   has browser-harness && ok "browser-harness" || bad "browser-harness is missing" "uv tool install browser-harness (AGENTS.md, new machine step 5)"
+  if has browser-harness; then
+    harness_hook_works && ok "browser-harness loads Krewd's tab hook (a daemon per chat, tab claims)" \
+      || bad "browser-harness does not load deploy/browser-harness/agent_helpers.py as Krewd expects: chats would not lock their tabs" \
+             "check the hook against the installed browser-harness (uv tool list), see AGENTS.md, The agents' browser"
+  fi
   if [[ "$(conf KREWD_BROWSER_DISPLAY virtual)" == virtual ]]; then
     if has Xvfb && has xauth && has mcookie; then ok "Xvfb (the agents' Brave gets its own invisible screen)"
     else warn "Xvfb or xauth is missing: the agents' Brave falls back to a window on the desktop" "sudo apt install xvfb xauth (AGENTS.md, new machine step 5)"; fi

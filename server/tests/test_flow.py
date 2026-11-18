@@ -33,7 +33,7 @@ TOKEN = "test-token"
 async def hub(tmp_path):
     pool = await db.connect(DATABASE_URL)
     await pool.execute(
-        "drop table if exists proposals, session_agents, routine_triggers, routine_runs, routine_versions, routines, messages, events, approvals, sessions,"
+        "drop table if exists browser_tabs, proposals, session_agents, routine_triggers, routine_runs, routine_versions, routines, messages, events, approvals, sessions,"
         " engines, devices, app_prefs, browser_locations, schema_version cascade"
     )
     settings = Settings(
@@ -1138,3 +1138,85 @@ async def test_a_deleted_or_interrupted_sub_agent_tells_its_parent(hub):
     note = await wait_for(hub, pid, "user", lambda p: p.get("purpose") == "result" and p["meta"]["from"] == str(cid))
     assert "interrupted by a Krewd restart" in note["text"]
     assert (await hub.get_session(pid))["waiting_on"] == []
+
+
+async def test_agents_claim_their_tabs_and_other_chats_are_refused(hub, monkeypatch):
+    from krewd_server import harness
+    from krewd_server.hub import TabTaken
+
+    a = uuid.UUID((await hub.create_session("slow"))["id"])
+    b = uuid.UUID((await hub.create_session("slow"))["id"])
+    await wait_for(hub, a, "turn_start")
+    await wait_for(hub, b, "turn_start")
+    for _ in range(100):  # the agent session is made once the turn starts
+        agent_a, agent_b = hub.runtimes[a].agent_session, hub.runtimes[b].agent_session
+        if agent_a and agent_b and hub.runtimes[a].running and hub.runtimes[b].running:
+            break
+        await asyncio.sleep(0.05)
+    page = {"id": "T1", "url": "https://mail.example.com/draft", "title": "Draft"}
+    # No navigation needed: browser-harness claims the tab before it clicks or types in it.
+    assert (await hub.claim_tab(agent_a, "T1", page)) == {"session_id": str(a), "locked": True}
+    assert hub.tab_busy("T1") == a
+    assert (await hub.get_session(a))["browser_tab"]["url"] == "https://mail.example.com/draft"
+    with pytest.raises(TabTaken):
+        await hub.claim_tab(agent_b, "T1", page)
+    # The guess from navigation does not hand a held tab to another running chat.
+    assert await hub.browser_activity({"id": "T1", "url": "https://mail.example.com/sent", "title": "Sent"}) == a
+    with pytest.raises(NotFound):
+        await hub.claim_tab("not-a-krewd-agent", "T1", page)
+    app = create_app(hub, TOKEN, lifespan_hub=False)
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        taken = await client.post("/api/browser/claim", json={"agent_session": agent_b, "tab_id": "T1"}, headers=headers)
+        assert taken.status_code == 409 and "open your own with new_tab()" in taken.json()["detail"]
+        assert (await client.post("/api/browser/claim", json={"agent_session": "x", "tab_id": "T1"},
+                                  headers=headers)).status_code == 404
+        mine = await client.post("/api/browser/claim", json={"agent_session": agent_b, "tab_id": "T2"}, headers=headers)
+        assert mine.status_code == 200 and mine.json()["locked"] is True
+        assert (await client.post("/api/browser/tabs/T1/input", json={"type": "key", "key": "Enter"},
+                                  headers=headers)).status_code == 409
+    # The lock lasts the turn: once A's turn ends, B may take the tab.
+    await hub.cancel(a)
+    await wait_for(hub, a, "turn_end")
+    assert hub.tab_busy("T1") is None
+    assert (await hub.claim_tab(agent_b, "T1", None))["session_id"] == str(b)
+    # Owners are kept across a restart, for every tab, and forgotten when the tab closes.
+    await hub.cancel(b)
+    await wait_for(hub, b, "turn_end")
+    again = Hub(hub.settings, hub.pool)
+    await again.start()
+    try:
+        assert again.tab_owner["T1"] == b and again.tab_owner["T2"] == b
+        await again.forget_tabs({"T2"})
+        assert "T1" not in again.tab_owner
+        await again.forget_tabs(closed="T2")
+        assert await hub.pool.fetchval("select count(*) from browser_tabs") == 0
+    finally:
+        await again.close()
+    # The agents load the hook from Krewd's browser-harness workspace.
+    link = hub.harness_workspace / "agent_helpers.py"
+    assert link.is_symlink() and link.resolve() == harness.HOOK
+
+
+async def test_quiet_chats_lose_their_browser_harness_daemon(hub, monkeypatch):
+    from krewd_server import harness
+
+    sid = uuid.UUID((await hub.create_session("hello"))["id"])
+    await wait_for(hub, sid, "turn_end")
+    agent = await hub.pool.fetchval("select agent_session from sessions where id = $1", sid)
+    mine, gone = harness.daemon_name(agent), "krewd-deleted-chat"
+    monkeypatch.setattr(harness, "krewd_daemons", lambda: {mine, gone})
+    stopped: list[str] = []
+
+    async def stop(name):
+        stopped.append(name)
+        return True
+
+    monkeypatch.setattr(harness, "stop_daemon", stop)
+    assert await hub.sweep_harness() == [gone]  # this chat was active just now
+    await hub.pool.execute("update sessions set updated_at = now() - interval '2 hours' where id = $1", sid)
+    assert sorted(await hub.sweep_harness()) == sorted([gone, mine])
+    stopped.clear()
+    await hub.delete_session(sid)
+    await asyncio.sleep(0.1)
+    assert stopped == [mine]

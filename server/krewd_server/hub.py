@@ -24,6 +24,7 @@ import asyncpg
 
 from . import db
 from . import files as shared_files
+from . import harness
 from . import routines as rtn
 from .acp import AcpError, AcpProcess, MethodNotFound
 from .tool_images import ToolImages, is_empty, split as split_images
@@ -61,6 +62,15 @@ SWITCH_PROMPT = (
     "owner's preferences and rules from this chat, what was done while you handled it and its result, and what "
     "is still open or next. Be complete but brief; use short Markdown sections. Do not run tools for this."
 )
+
+
+class TabTaken(Exception):
+    """Another chat's running turn holds the tab."""
+
+    def __init__(self, session_id: uuid.UUID, title: str):
+        super().__init__(f"this tab is in use by the chat \"{title}\" until its turn ends; open your own with new_tab()")
+        self.session_id = session_id
+        self.title = title
 
 
 class NotFound(Exception):
@@ -271,7 +281,9 @@ class Hub:
         self.transcripts = store.Transcripts(settings.workdir, settings.claude_dir, settings.codex_dir)
         self.storage_lock = asyncio.Lock()  # one storage scan or cleanup at a time
         self.probing: set[str] = set()
-        self.tab_owner: dict[str, uuid.UUID] = {}  # browser tab id -> session that last used it
+        self.tab_owner: dict[str, uuid.UUID] = {}  # browser tab id -> session that last used it (table browser_tabs)
+        self.harness_workspace = settings.data_dir / "browser-harness"  # BH_AGENT_WORKSPACE of the agents
+        self.harness_sweeper: asyncio.Task | None = None
         self.last_sent: dict[uuid.UUID, dict[str, Any]] = {}  # last session state emitted, to skip repeats
         self.default_timezone = rtn.local_timezone()
         self.scheduler: asyncio.Task | None = None
@@ -307,14 +319,22 @@ class Hub:
             self._kick(await self._runtime(row["session_id"]))
         for row in await self.pool.fetch("select id, browser_tab from sessions where browser_tab is not null"):
             self.tab_owner.setdefault(row["browser_tab"]["id"], row["id"])
+        for row in await self.pool.fetch("select tab_id, session_id from browser_tabs"):
+            self.tab_owner[row["tab_id"]] = row["session_id"]
+        try:
+            harness.prepare_workspace(self.harness_workspace)
+        except OSError as exc:
+            log.warning("could not prepare the browser-harness workspace: %s", exc)
+        self.harness_sweeper = asyncio.create_task(self._sweep_harness_loop())
         self.scheduler = asyncio.create_task(self._schedule_loop())
 
     async def close(self) -> None:
         self.closing = True
         await self.logins.close()
-        if self.scheduler:
-            self.scheduler.cancel()
-            await asyncio.gather(self.scheduler, return_exceptions=True)
+        for task in (self.scheduler, self.harness_sweeper):
+            if task:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
         for task in list(self.probe_tasks):
             task.cancel()
         await asyncio.gather(*self.probe_tasks, return_exceptions=True)
@@ -951,6 +971,8 @@ class Hub:
             if owner == session_id:
                 del self.tab_owner[tab]
         ids = await self._agent_sessions(session_id)
+        for agent_session in ids:
+            self._background(harness.stop_daemon(harness.daemon_name(agent_session)))
         owed = await self.pool.fetch(
             """select id from messages where session_id = $1 and return_to is not null and returned_at is null
                and state <> 'cancelled'""",
@@ -1443,28 +1465,121 @@ class Hub:
         rt = self.runtimes.get(owner) if owner else None
         return owner if rt and rt.running else None
 
+    async def _own_tab(self, rt: Runtime, tab: dict[str, Any] | None, tab_id: str) -> None:
+        """Record that a session uses a tab (kept across restarts) and, for a page, show it in the chat."""
+        self.tab_owner[tab_id] = rt.id
+        await self.pool.execute(
+            """insert into browser_tabs (tab_id, session_id) values ($1, $2)
+               on conflict (tab_id) do update set session_id = excluded.session_id, updated_at = now()""",
+            tab_id, rt.id,
+        )
+        if tab is None:
+            return
+        info = {"id": tab_id, "url": tab.get("url", ""), "title": tab.get("title") or tab.get("url", "")}
+        if rt.browser_tab and rt.browser_tab["id"] == info["id"] and rt.browser_tab["url"] == info["url"]:
+            return
+        rt.browser_tab = info
+        await self.pool.execute("update sessions set browser_tab = $2 where id = $1", rt.id, info)
+        await self.emit(rt.id, "browser", info)
+        await self.emit_session(rt.id)
+
     async def browser_activity(self, tab: dict[str, Any]) -> uuid.UUID | None:
         """A tab opened or navigated without the owner touching it: link it to the session doing that.
 
-        Detected from the browser side, so it works for any engine: the one session with a running turn
-        (or, if several run, the one in the middle of a tool call) is taken to be the one browsing.
+        Detected from the browser side, so it works for any engine and for browsing that does not go through
+        browser-harness (which claims its tabs, see claim_tab): the one session with a running turn (or, if
+        several run, the one in the middle of a tool call) is taken to be the one browsing. A tab another
+        running turn holds stays with it.
         """
+        busy = self.tab_busy(tab["id"])
+        if busy:
+            await self._own_tab(self.runtimes[busy], tab, tab["id"])
+            return busy
         running = [rt for rt in self.runtimes.values() if rt.running]
         if len(running) > 1:
             running = [rt for rt in running
                        if any(t.get("status") in (None, "pending", "in_progress") for t in rt.tools.values())]
         if len(running) != 1:
             return None
-        rt = running[0]
-        info = {"id": tab["id"], "url": tab.get("url", ""), "title": tab.get("title") or tab.get("url", "")}
-        self.tab_owner[info["id"]] = rt.id
-        if rt.browser_tab and rt.browser_tab["id"] == info["id"] and rt.browser_tab["url"] == info["url"]:
-            return rt.id
-        rt.browser_tab = info
-        await self.pool.execute("update sessions set browser_tab = $2 where id = $1", rt.id, info)
-        await self.emit(rt.id, "browser", info)
-        await self.emit_session(rt.id)
-        return rt.id
+        await self._own_tab(running[0], tab, tab["id"])
+        return running[0].id
+
+    async def session_of_agent(self, agent_session: str) -> uuid.UUID | None:
+        """The chat an agent session belongs to (its current agent or one it switched from)."""
+        for (_, known), session_id in self.by_agent_session.items():
+            if known == agent_session:
+                return session_id
+        return await self.pool.fetchval(
+            """select id from sessions where agent_session = $1
+               union select session_id from session_agents where agent_session = $1 limit 1""",
+            agent_session,
+        )
+
+    async def claim_tab(self, agent_session: str, tab_id: str, tab: dict[str, Any] | None) -> dict[str, Any]:
+        """An agent's browser-harness is about to use a tab: lock it for the agent's chat.
+
+        `tab` is the page as the browser lists it (None for a target that is not a page, such as an iframe).
+        Raises NotFound for an agent session Krewd does not run, and TabTaken when another chat's turn holds it.
+        """
+        session_id = await self.session_of_agent(agent_session)
+        if session_id is None:
+            raise NotFound("not an agent session of a Krewd chat")
+        busy = self.tab_busy(tab_id)
+        if busy and busy != session_id:
+            row = await self.pool.fetchrow("select title from sessions where id = $1", busy)
+            raise TabTaken(busy, (row["title"] if row else "") or "another chat")
+        rt = await self._runtime(session_id)
+        await self._own_tab(rt, tab, tab_id)
+        return {"session_id": str(session_id), "locked": rt.running}
+
+    async def forget_tabs(self, open_ids: set[str] | None = None, closed: str | None = None) -> None:
+        """Drop owners of tabs that closed: one that just closed, or every tab not in the browser's list."""
+        gone = {closed} if closed else {t for t in self.tab_owner if open_ids is not None and t not in open_ids}
+        if not gone:
+            return
+        for tab_id in gone:
+            self.tab_owner.pop(tab_id, None)
+        await self.pool.execute("delete from browser_tabs where tab_id = any($1::text[])", list(gone))
+
+    def _background(self, coro) -> None:
+        task = asyncio.create_task(coro)
+        self.probe_tasks.add(task)
+        task.add_done_callback(self.probe_tasks.discard)
+
+    HARNESS_IDLE = timedelta(minutes=30)
+
+    async def _sweep_harness_loop(self) -> None:
+        while True:
+            await asyncio.sleep(600)
+            try:
+                await self.sweep_harness()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.warning("browser-harness sweep: %s", exc)
+
+    async def sweep_harness(self) -> list[str]:
+        """Stop the chat daemons whose chat is gone or has had no running turn for HARNESS_IDLE."""
+        names = await asyncio.to_thread(harness.krewd_daemons)
+        if not names:
+            return []
+        rows = await self.pool.fetch(
+            """select s.id, s.updated_at, a.agent_session from sessions s
+               join (select id as session_id, agent_session from sessions where agent_session is not null
+                     union select session_id, agent_session from session_agents where agent_session is not null) a
+                 on a.session_id = s.id""",
+        )
+        quiet_since = datetime.now(UTC) - self.HARNESS_IDLE
+        keep = set()
+        for row in rows:
+            rt = self.runtimes.get(row["id"])
+            if (rt and rt.running) or row["updated_at"] > quiet_since:
+                keep.add(harness.daemon_name(row["agent_session"]))
+        stopped = []
+        for name in sorted(names - keep):
+            if await harness.stop_daemon(name):
+                stopped.append(name)
+        return stopped
 
     # approvals
 
@@ -1521,6 +1636,8 @@ class Hub:
                 return proc
             engine = self.settings.engines[engine_id]
             env = dict(engine.env)
+            # browser-harness loads the Krewd hook from here: a daemon per chat, and tab claims (harness.py).
+            env.setdefault("BH_AGENT_WORKSPACE", str(self.harness_workspace))
             profile = self._profile_of(engine)
             try:
                 if profile:

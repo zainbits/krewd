@@ -22,7 +22,7 @@ from .security import Principal, Security, SecurityError
 from . import files as shared_files
 from .attachments import TooLarge
 from .browser import Browser, BrowserUnavailable, TabGone
-from .hub import Conflict, Hub, NotFound
+from .hub import Conflict, Hub, NotFound, TabTaken
 from .locations import LOCATION_SCRIPT, Invalid as LocationInvalid, Locations
 from .profiles import ProfileError
 from .routines import Invalid
@@ -224,6 +224,12 @@ class BrowserInput(BaseModel):
     __str__ = __repr__
 
 
+class TabClaim(BaseModel):
+    """An agent's browser-harness claims a tab for its chat (deploy/browser-harness/agent_helpers.py)."""
+    agent_session: str = Field(min_length=1, max_length=200)
+    tab_id: str = Field(min_length=1, max_length=200)
+
+
 class NewTab(BaseModel):
     url: str | None = Field(default=None, max_length=4000)
 
@@ -269,7 +275,13 @@ def create_app(hub: Hub, token: str, lifespan_hub: bool = True) -> FastAPI:
     async def lifespan(_: FastAPI):
         if lifespan_hub:
             await hub.start()
-        watcher = asyncio.create_task(browser.watch(hub.browser_activity, locations.sync))
+        async def on_connect() -> None:
+            with suppress(Exception):
+                await hub.forget_tabs({t["id"] for t in await browser.tabs()})
+            await locations.sync()
+
+        watcher = asyncio.create_task(browser.watch(hub.browser_activity, on_connect,
+                                                    lambda tab_id: hub.forget_tabs(closed=tab_id)))
         try:
             yield
         finally:
@@ -848,6 +860,22 @@ def create_app(hub: Hub, token: str, lifespan_hub: bool = True) -> FastAPI:
             tab["session_id"] = str(owner) if owner else None
             tab["agent_active"] = hub.tab_busy(tab["id"]) is not None
         return {"available": True, "tabs": tabs}
+
+    @app.post("/api/browser/claim", dependencies=auth)
+    async def browser_claim(body: TabClaim) -> dict[str, Any]:
+        """Lock a tab for the chat of the agent session that is about to use it; 409 if another chat's turn holds it."""
+        try:
+            tab = next((t for t in await browser.tabs() if t["id"] == body.tab_id), None)
+        except BrowserUnavailable:
+            tab = None
+        try:
+            claimed = await hub.claim_tab(body.agent_session, body.tab_id, tab)
+        except TabTaken as exc:
+            raise HTTPException(409, str(exc)) from None
+        if tab and tab.get("view") == "vertical":  # agents work in the horizontal view
+            with suppress(Exception):
+                await browser.set_view(body.tab_id, "horizontal")
+        return claimed
 
     def not_while_agent(tab_id: str) -> None:
         """The owner watches, and does not steer, a tab an agent is using (view only); Stop ends the turn."""
