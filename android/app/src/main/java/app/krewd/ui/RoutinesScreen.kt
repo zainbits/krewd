@@ -275,7 +275,7 @@ fun RoutineScreen(state: UiState, viewModel: KrewdViewModel) {
                             OutlinedButton(onClick = { viewModel.openRoutineChat(routine) }, enabled = routine.sessionId != null) {
                                 Icon(painterResource(R.drawable.ic_chat_24), contentDescription = null, modifier = Modifier.size(18.dp))
                                 Spacer(Modifier.width(6.dp))
-                                Text("Open chat")
+                                Text("Latest chat")
                             }
                         }
                         Text(
@@ -320,12 +320,14 @@ fun RoutineScreen(state: UiState, viewModel: KrewdViewModel) {
                     }
                 }
                 item(key = "runs-title") {
-                    Text(
-                        "Runs",
-                        style = MaterialTheme.typography.labelLarge,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(start = 8.dp, top = 6.dp),
-                    )
+                    Column(Modifier.padding(start = 8.dp, top = 6.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text("Runs", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(
+                            "Each run has its own chat. The next run deletes it, unless it failed or waits for you: those stay until you delete them.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                 }
                 val runs = state.routineDetail?.takeIf { it.id == routine.id }?.runs
                 if (runs == null) {
@@ -365,7 +367,7 @@ fun RoutineScreen(state: UiState, viewModel: KrewdViewModel) {
         AlertDialog(
             onDismissRequest = { confirmDelete = false },
             title = { Text("Delete this routine?") },
-            text = { Text("“${routine.title}” and its run history are deleted. Its chat stays as an ordinary task.") },
+            text = { Text("“${routine.title}” and its run history are deleted. Its run chats stay as ordinary tasks.") },
             confirmButton = {
                 TextButton(onClick = {
                     confirmDelete = false
@@ -438,6 +440,9 @@ private fun RunRow(run: RoutineRun, onClick: () -> Unit) {
                 )
                 RunChip(run.status)
             }
+            run.resultReason?.takeIf { run.status == "failed" || run.status == "waiting" }?.let {
+                Text(plainLine(it), style = MaterialTheme.typography.bodySmall, color = if (run.status == "failed") MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.tertiary, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            }
             run.summary?.let {
                 Text(plainLine(it), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 3, overflow = TextOverflow.Ellipsis)
             }
@@ -452,6 +457,8 @@ fun RunChip(status: String) {
         "running" -> "Running" to MaterialTheme.colorScheme.primary
         "queued" -> "Queued" to MaterialTheme.colorScheme.tertiary
         "error" -> "Error" to MaterialTheme.colorScheme.error
+        "failed" -> "Failed" to MaterialTheme.colorScheme.error
+        "waiting" -> "Needs you" to MaterialTheme.colorScheme.tertiary
         "cancelled" -> "Stopped" to MaterialTheme.colorScheme.outline
         "skipped" -> "Skipped" to MaterialTheme.colorScheme.outline
         else -> status to MaterialTheme.colorScheme.outline

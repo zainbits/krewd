@@ -7,6 +7,7 @@
     krewd routines pause ID | resume ID | delete ID | versions ID
     krewd routines run ID [--trigger NAME]
     krewd routines later ID (--in 5m | --at 19:05) --reason TEXT     during a run: try this trigger again later
+    krewd routines result ID failed|waiting --reason TEXT     during a run: it failed, or waits for the owner
     krewd routines notes ID [--set TEXT | --set-file PATH | --append TEXT]
     krewd schedule CRON [--timezone TZ]      check a schedule and show its next runs
     krewd chat history CHAT [--last N] [--after SEQ]     a chat's messages (owner, agents), e.g. after a switch
@@ -14,9 +15,11 @@
     krewd security status | revoke PHONE | remove-key ID | reset   the owner's phones and keys (this machine only)
 
 A routine has one or more named triggers (cron schedules), e.g. check-in "55 9 * * 1-5" and check-out
-"0 19 * * 1-5". Every run goes into the routine's own chat and is told which trigger fired. A trigger can
-allow more than one attempt (--attempts check-out 3): a run that cannot finish yet asks for a follow-up with
-`krewd routines later`, and Krewd refuses past the limit. Notes are kept between runs and shown to each run.
+"0 19 * * 1-5". Every run gets its own new chat and is told which trigger fired; the next run deletes the
+last one's chat, unless that run failed or waits for the owner (`krewd routines result`). A trigger can allow
+more than one attempt (--attempts check-out 3): a run that cannot finish yet asks for a follow-up with
+`krewd routines later`, and the next attempt continues in the same chat; Krewd refuses past the limit.
+Notes are kept between runs and shown to each run: only lasting lessons go there, never what a run did.
 
 A sign-in request (`krewd secret request`) asks the owner for a password, a one-time code or another secret on
 the phone. The agent never sees it: the owner types it there, Krewd types it into the page's fields and submits
@@ -53,7 +56,11 @@ Rules for agents:
   - Put the calendar rules ("on Fridays", "skip leave days") in the instructions; a trigger's cron says when to
     look. `L` is the month's last day and `LW` its last weekday ("0 18 LW * *").
   - Retries: give a trigger attempts only when the owner wants retries, and use `krewd routines later` only for
-    "not yet" (a counter or time not reached). On a real failure, stop and tell the owner.
+    "not yet" (a counter or time not reached). On a real failure, run `krewd routines result ID failed`,
+    stop and tell the owner.
+  - Notes: append only something lasting a later run needs (where a button is, an exact name, a trap, a
+    correction to a note). Never what a run did or found ("checked in at 09:55", "nothing changed"): that is in
+    the run's summary already. If nothing new was learned, do not touch the notes.
 """
 
 
@@ -439,6 +446,10 @@ def main(argv: list[str] | None = None) -> int:
     when.add_argument("--in", dest="in_", metavar="5m", help="minutes (5m) or hours (1h) from now")
     when.add_argument("--at", metavar="19:05", help="a local time today (or tomorrow if passed)")
     later.add_argument("--reason", required=True, help="why it could not be done yet, shown to the next attempt")
+    result = rsub.add_parser("result", help="during a run: it failed, or it waits for the owner (its chat is kept)")
+    result.add_argument("id")
+    result.add_argument("outcome", choices=["failed", "waiting"])
+    result.add_argument("--reason", required=True, help="one line: what went wrong, or what the owner must answer")
     notes = rsub.add_parser("notes", help="show or change the notes kept between runs")
     notes.add_argument("id")
     ngroup = notes.add_mutually_exclusive_group()
@@ -534,8 +545,11 @@ def main(argv: list[str] | None = None) -> int:
         elif args.action == "run":
             run_body = {"trigger": args.trigger} if args.trigger else {}
             run = call("POST", f"/api/routines/{routine_id}/run", run_body)
-            print(f"Run {run['id'][:8]} ({','.join(run.get('triggers') or [])}) {run['status']}: it goes into the "
-                  f"routine's chat {run['session_id']}.")
+            print(f"Run {run['id'][:8]} ({','.join(run.get('triggers') or [])}) {run['status']}: it runs in its own "
+                  f"chat {run['session_id']}.")
+        elif args.action == "result":
+            call("POST", f"/api/routines/{routine_id}/result", {"result": args.outcome, "reason": args.reason})
+            print(f"This run is marked {args.outcome}; its chat is kept for the owner. Tell the owner in your reply.")
         elif args.action == "later":
             body = _later_time(args.in_) if args.in_ else _at_time(args.at)
             body["reason"] = args.reason
@@ -555,7 +569,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Notes saved ({len(r.get('notes') or '')} characters).")
         elif args.action == "delete":
             call("DELETE", f"/api/routines/{routine_id}")
-            print("Deleted the routine. Its chat stays as an ordinary task.")
+            print("Deleted the routine. Its run chats stay as ordinary tasks.")
         elif args.action == "versions":
             for v in call("GET", f"/api/routines/{routine_id}/versions"):
                 trig = ", ".join(f"{t['name']} {t['schedule']}" for t in v.get("triggers") or []) or v["schedule"]

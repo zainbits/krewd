@@ -464,7 +464,7 @@ async def wait_run(hub: Hub, routine_id, status: str, timeout: float = 10.0) -> 
     raise AssertionError(f"no run with status {status}: {runs}")
 
 
-async def test_routine_has_its_own_chat_and_runs_into_it(hub):
+async def test_every_routine_run_has_its_own_chat_and_the_next_run_deletes_the_last(hub):
     routine = await hub.create_routine(
         "Timesheet", "Fill the timesheet on Fridays.", "0 19 * * 1-5", timezone="Asia/Kolkata"
     )
@@ -472,33 +472,86 @@ async def test_routine_has_its_own_chat_and_runs_into_it(hub):
     assert routine["schedule_text"] == "Weekdays at 19:00" and routine["version"] == 1
     assert len(routine["next_runs"]) == 3 and routine["next_run_at"]
     chat = await hub.get_session(sid)
-    assert chat["routine_id"] == routine["id"] and chat["title"] == "Timesheet" and chat["status"] == "idle"
+    assert chat["routine_id"] == routine["id"] and chat["run_chat"] and chat["status"] == "idle"
 
+    # The first run uses the chat made with the routine, named after the day.
     run = await hub.run_routine(rid)
     assert run["trigger"] == "manual" and run["session_id"] == str(sid)
     done = await wait_run(hub, rid, "done")
     assert "routine-ran" in done["summary"] and done["started_at"] and done["seq"]
     user = next(e for e in await hub.events(0, sid) if e["kind"] == "user")
     assert user["payload"]["purpose"] == "routine" and user["payload"]["meta"]["run_id"] == run["id"]
-    assert "Fill the timesheet on Fridays." in user["payload"]["text"]
-    assert "This month ends on" in user["payload"]["text"]
-    assert "fresh session" in user["payload"]["text"]
-    first_agent = await hub.pool.fetchval("select agent_session from sessions where id = $1", sid)
-    assert first_agent
+    text = user["payload"]["text"]
+    assert "Fill the timesheet on Fridays." in text and "This month ends on" in text
+    assert "its own new chat" in text and "krewd routines result" in text and "Never note what this run did" in text
+    assert (await hub.get_session(sid))["title"].startswith("Timesheet · ")
 
-    # A second run goes into the same chat, with the edited instructions as a new version,
-    # in a fresh agent session: the last run's one is ended, so the context does not grow run after run.
+    # The next run, with the edited instructions as a new version, gets a new chat and deletes the last one;
+    # the last run's summary stays in the routine.
     edited = await hub.update_routine(rid, {"instructions": "Fill it and ask me to review."}, note="review first")
     assert edited["version"] == 2
-    await hub.run_routine(rid)
+    second = await hub.run_routine(rid)
+    sid2 = uuid.UUID(second["session_id"])
+    assert sid2 != sid
     await wait_run(hub, rid, "done")
-    users = [e for e in await hub.events(0, sid) if e["kind"] == "user"]
-    assert len(users) == 2 and "ask me to review" in users[1]["payload"]["text"]
-    second_agent = await hub.pool.fetchval("select agent_session from sessions where id = $1", sid)
-    assert second_agent and second_agent != first_agent
-    assert len(await hub.list_sessions()) == 1
+    with pytest.raises(Exception, match="not found"):
+        await hub.get_session(sid)
+    assert any(e["kind"] == "chat_deleted" and e["payload"]["id"] == str(sid) for e in await hub.events(0, sid2))
+    users = [e for e in await hub.events(0, sid2) if e["kind"] == "user"]
+    assert len(users) == 1 and "ask me to review" in users[0]["payload"]["text"]
+    runs = await hub.routine_runs(rid)
+    assert runs[1]["session_id"] is None and "routine-ran" in runs[1]["summary"]
+    assert [s["id"] for s in await hub.list_sessions()] == [str(sid2)]
+    assert (await hub.get_session(sid2))["routine_id"] == routine["id"]
     versions = await hub.routine_versions(rid)
     assert [v["version"] for v in versions] == [2, 1] and versions[0]["note"] == "review first"
+
+    # A chat the owner wrote in is kept, and so is the chat of a run that reports a failure.
+    await hub.send(sid2, "thanks")
+    for _ in range(200):
+        if sum(e["kind"] == "turn_end" for e in await hub.events(0, sid2)) == 2:
+            break
+        await asyncio.sleep(0.05)
+    await hub.update_routine(rid, {"instructions": "pause, then fail."})
+    third = await hub.run_routine(rid)
+    sid3 = uuid.UUID(third["session_id"])
+    await wait_run(hub, rid, "running")
+    marked = await hub.run_result(rid, "failed", "Check-out did not record")
+    assert marked["id"] == third["id"]
+    failed = await wait_run(hub, rid, "failed")
+    assert failed["result_reason"] == "Check-out did not record"
+    with pytest.raises(Exception, match="during a run"):
+        await hub.run_result(rid, "failed", "too late")
+    fourth = await hub.run_routine(rid)
+    await wait_run(hub, rid, "done")
+    ids = {s["id"] for s in await hub.list_sessions()}
+    assert {str(sid2), str(sid3), fourth["session_id"]} <= ids
+    # The fourth run's chat goes at the next run; the kept ones stay.
+    await hub.run_routine(rid)
+    await wait_run(hub, rid, "done")
+    ids = {s["id"] for s in await hub.list_sessions()}
+    assert fourth["session_id"] not in ids and {str(sid2), str(sid3)} <= ids
+
+
+async def test_a_follow_up_attempt_continues_in_the_same_chat_and_session(hub):
+    routine = await hub.create_routine("Out", "pause, then check out.", triggers=[
+        {"name": "check-out", "schedule": "0 19 * * *", "max_attempts": 2}], timezone="UTC")
+    rid = uuid.UUID(routine["id"])
+    first = await hub.run_routine(rid)
+    sid = uuid.UUID(first["session_id"])
+    await wait_run(hub, rid, "running")
+    await hub.follow_up(rid, minutes=5, reason="counter at 8:50")
+    await wait_run(hub, rid, "done")
+    agent = await hub.pool.fetchval("select agent_session from sessions where id = $1", sid)
+    await hub.pool.execute("update routine_triggers set next_run_at = now() - interval '1 second' "
+                           "where routine_id = $1 and kind = 'once'", rid)
+    assert await hub.run_due() == 1
+    second = await wait_run(hub, rid, "done")
+    assert second["attempt"] == 2 and second["session_id"] == str(sid)
+    assert await hub.pool.fetchval("select agent_session from sessions where id = $1", sid) == agent
+    users = [e for e in await hub.events(0, sid) if e["kind"] == "user"]
+    assert len(users) == 2 and "continues in the chat and session of the last one" in users[1]["payload"]["text"]
+    assert "counter at 8:50" in users[1]["payload"]["text"]
 
 
 async def test_scheduler_runs_due_routines_once_and_skips_stale_ones(hub):
@@ -805,40 +858,26 @@ async def test_switching_agents_keeps_one_chat_and_each_agents_session(hub):
     assert any("Switched from Fake to Fake with /compact" in m["text"] for m in transcript)
 
 
-async def test_switch_without_context_is_immediate_and_routines_switch_their_chat(hub):
+async def test_a_routine_on_another_agent_runs_there_in_a_clean_chat(hub):
     routine = await hub.create_routine("R", "Do it.", "0 9 * * *", timezone="UTC")
     rid, sid = uuid.UUID(routine["id"]), uuid.UUID(routine["session_id"])
-    edited = await hub.update_routine(rid, {"engine": "native", "config": {"model": "big"}})
-    assert edited["session_id"] == routine["session_id"]
-    await wait_engine(hub, sid, "native")
-    row = await hub.pool.fetchrow("select engine, config_wanted from sessions where id = $1", sid)
-    assert row["engine"] == "native" and row["config_wanted"] == {"model": "big"}
     await hub.run_routine(rid)
     await wait_run(hub, rid, "done")
-    assert (await hub.get_routine(rid))["engine"] == "native"
-    # The chat's own switch moves the routine with it.
-    await hub.switch_engine(sid, "fake")
-    await wait_engine(hub, sid, "fake")
+    # A chat's own switch is the chat's business: the routine keeps its agent.
+    await hub.switch_engine(sid, "native")
+    await wait_engine(hub, sid, "native")
     assert (await hub.get_routine(rid))["engine"] == "fake"
-    # A run after a switch still starts clean: a fresh agent session without the switch handover, which is
-    # about earlier runs. (The fake joins this chat for the first time; the native agent returns to it.)
-    for engine in ("fake", "native"):
-        if engine == "native":
-            await hub.switch_engine(sid, "native")
-            await wait_engine(hub, sid, "native")
-        assert await hub.pool.fetchval("select carry from sessions where id = $1", sid)
-        before = await hub.pool.fetchval("select agent_session from sessions where id = $1", sid)
-        after = (await hub.events(0, sid))[-1]["seq"]
-        await hub.run_routine(rid)
-        for _ in range(200):
-            events = await hub.events(after, sid)
-            if any(e["kind"] == "turn_end" for e in events):
-                break
-            await asyncio.sleep(0.05)
-        texts = "".join(e["payload"].get("text", "") for e in events if e["kind"] == "text")
-        assert "routine-ran" in texts and "briefed" not in texts
-        row = await hub.pool.fetchrow("select agent_session, carry from sessions where id = $1", sid)
-        assert row["carry"] is None and row["agent_session"] and row["agent_session"] != before
+    # A changed routine takes effect at its next run, in a new chat on the new agent with its settings,
+    # without any handover from earlier runs.
+    await hub.update_routine(rid, {"engine": "native", "config": {"model": "big"}})
+    assert await hub.pool.fetchval("select engine from sessions where id = $1", sid) == "native"
+    run = await hub.run_routine(rid)
+    new = uuid.UUID(run["session_id"])
+    await wait_run(hub, rid, "done")
+    row = await hub.pool.fetchrow("select engine, config_wanted, carry from sessions where id = $1", new)
+    assert row["engine"] == "native" and row["config_wanted"] == {"model": "big"} and row["carry"] is None
+    texts = "".join(e["payload"].get("text", "") for e in await hub.events(0, new) if e["kind"] == "text")
+    assert "routine-ran" in texts and "briefed" not in texts
 
 
 async def test_switch_api_and_transcript(hub):

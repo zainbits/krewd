@@ -139,6 +139,11 @@ class FollowUp(BaseModel):
     reason: str = Field(default="", max_length=300)
 
 
+class RunResult(BaseModel):
+    result: Literal["failed", "waiting"]
+    reason: str = Field(min_length=1, max_length=300)
+
+
 class NotesChange(BaseModel):
     notes: str = Field(max_length=8000)
     append: bool = False
@@ -733,6 +738,11 @@ def create_app(hub: Hub, token: str, lifespan_hub: bool = True) -> FastAPI:
     async def routine_later(routine_id: uuid.UUID, body: FollowUp) -> dict[str, Any]:
         """During a run: try this trigger again later, as its next attempt (refused past the trigger's limit)."""
         return await hub.follow_up(routine_id, body.minutes, body.at, body.reason)
+
+    @app.post("/api/routines/{routine_id}/result", dependencies=auth)
+    async def routine_result(routine_id: uuid.UUID, body: RunResult) -> dict[str, Any]:
+        """During a run: it did not do the job (failed) or needs the owner's answer (waiting). Its chat is kept."""
+        return await hub.run_result(routine_id, body.result, body.reason)
 
     @app.delete("/api/routines/{routine_id}/later/{trigger_id}", dependencies=auth)
     async def routine_cancel_later(routine_id: uuid.UUID, trigger_id: uuid.UUID) -> dict[str, Any]:

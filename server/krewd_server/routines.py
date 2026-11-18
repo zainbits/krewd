@@ -156,6 +156,7 @@ def run_prompt(
     reason: str | None = None,
     notes: str = "",
     several: bool = False,
+    continued: bool = False,
 ) -> str:
     """The message a run puts into the routine's chat: what fired, today's date facts, notes, the instructions."""
     tz = zone(routine["timezone"])
@@ -178,10 +179,13 @@ def run_prompt(
         lines.append(f"Attempt {attempt} of {max_attempts}.")
     if reason:
         lines.append(f"This is the follow-up you asked for in the last attempt: {reason}")
-    lines.append(
-        "This run starts in a fresh session: earlier runs are not in your context. What they learned is in the "
-        "notes below, so keep the notes up to date."
-    )
+    if continued:
+        lines.append("This attempt continues in the chat and session of the last one: what you did then is above.")
+    else:
+        lines.append(
+            "This run has its own new chat and session: earlier runs are not in your context. What they learned "
+            "is in the notes below."
+        )
     rid = routine["id"][:8]
     lines += [
         "",
@@ -203,9 +207,19 @@ def run_prompt(
     else:
         lines.append("No attempts are left after this one: if it cannot be done, stop and tell the owner it could not be done.")
     lines.append(
-        f"When you learn something lasting about doing this (where a button is, a code's exact name), update the notes "
-        f"with `krewd routines notes {rid} --append \"...\"`. Ask in this chat before anything consequential the "
-        "instructions do not clearly allow, and wait for the owner's answer. Change the routine itself only when the "
-        "owner asks (`krewd routines --help`)."
+        f"If the job was not done (a failure, or no attempts left), run `krewd routines result {rid} failed --reason "
+        f"\"...\"` before you reply. If you ask the owner something and must wait for the answer, run "
+        f"`krewd routines result {rid} waiting --reason \"...\"`. Krewd keeps those chats for the owner; a run "
+        "that did its job needs neither."
+    )
+    lines.append(
+        f"Notes: only when you learned something lasting that a later run needs (where a button is, an exact name, "
+        f"a trap, or a correction to a note), add it with `krewd routines notes {rid} --append \"...\"`, or fix the "
+        "note it corrects. Never note what this run did or found (\"checked in at 09:55\", \"no change needed\"): "
+        "your reply is kept as the run's summary. If nothing new was learned, leave the notes alone."
+    )
+    lines.append(
+        "Ask in this chat before anything consequential the instructions do not clearly allow, and wait for the "
+        "owner's answer. Change the routine itself only when the owner asks (`krewd routines --help`)."
     )
     return "\n".join(lines)

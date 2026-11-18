@@ -445,6 +445,7 @@ class KrewdViewModel(private val app: Application) {
             }
             "error" -> lastError[sid] = event.payload.optString("message", "Something went wrong")
             "routine" -> routineEvent(event.payload)
+            "chat_deleted" -> chatGone(event.payload.optString("id"))
             "proposal" -> {
                 val proposal = Proposal.from(event.payload)
                 val known = _state.value.proposals.any { it.id == proposal.id }
@@ -621,7 +622,7 @@ class KrewdViewModel(private val app: Application) {
     fun runRoutine(id: String, trigger: String? = null) = act { client ->
         client.runRoutine(id, trigger)
         loadRoutine(client, id)
-        _state.update { it.copy(message = "Started: it runs in the routine's chat") }
+        _state.update { it.copy(message = "Started: it runs in a new chat") }
     }
 
     fun saveRoutineNotes(id: String, notes: String) = act { client ->
@@ -1206,6 +1207,20 @@ class KrewdViewModel(private val app: Application) {
     }
 
     /** Deletes a chat on the server at once (Settings > Storage confirms first, so there is no Undo). */
+    /** A chat deleted on the server (a routine's earlier run chat, removed when its next run starts). */
+    private fun chatGone(id: String) {
+        if (id.isBlank() || _state.value.sessions.none { it.id == id }) return
+        _state.update { s -> s.copy(sessions = s.sessions.filterNot { it.id == id }) }
+        live.remove(id)
+        pushLive()
+        notifier.clear(id)
+        prefs.setTextDraft(id, "")
+        if (_state.value.openSessionId == id) {
+            closeSession()
+            toast("That run's chat was deleted: a newer run started")
+        }
+    }
+
     fun deleteSessionNow(id: String, done: (String?) -> Unit) {
         request({ it.deleteSession(id) }) { _, problem ->
             if (problem == null) {

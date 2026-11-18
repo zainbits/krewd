@@ -747,10 +747,10 @@ private fun RoutineRunRow(item: UserItem) {
                     color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.75f),
                 )
             }
-            if (item.state != "cancelled") {
-                // Every run (retries too) starts a new agent session, so the chat's long history is not its context.
+            if (item.state != "cancelled" && item.continued) {
+                // A follow-up attempt goes on in the same chat and agent session; a first attempt has its own chat.
                 Text(
-                    "New agent session · only the routine's notes carry over",
+                    "Same agent session as the attempt above",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.75f),
                 )

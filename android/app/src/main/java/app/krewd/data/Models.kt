@@ -299,7 +299,7 @@ data class RoutineTrigger(
     }
 }
 
-/** One run of a routine: it went into the routine's chat as the message at [seq]. */
+/** One run of a routine: it went into its own chat as the message at [seq] (null once that chat is deleted). */
 data class RoutineRun(
     val id: String,
     val sessionId: String?,
@@ -312,6 +312,8 @@ data class RoutineRun(
     val version: Int,
     val status: String,
     val summary: String?,
+    /** Why it failed or what it waits for, as the run reported it (status failed or waiting). */
+    val resultReason: String? = null,
     val scheduledFor: String?,
     val startedAt: String?,
     val finishedAt: String?,
@@ -331,6 +333,7 @@ data class RoutineRun(
             version = o.optInt("version"),
             status = o.optString("status"),
             summary = o.optStringOrNull("summary"),
+            resultReason = o.optStringOrNull("result_reason"),
             scheduledFor = o.optStringOrNull("scheduled_for"),
             startedAt = o.optStringOrNull("started_at"),
             finishedAt = o.optStringOrNull("finished_at"),
@@ -339,7 +342,7 @@ data class RoutineRun(
     }
 }
 
-/** Instructions Krewd runs on a schedule, every run in the routine's own chat. */
+/** Instructions Krewd runs on a schedule, every run in its own chat. */
 data class Routine(
     val id: String,
     val title: String,

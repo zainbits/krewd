@@ -30,6 +30,8 @@ data class UserItem(
     val triggers: List<String> = emptyList(),
     val attempt: Int = 1,
     val maxAttempts: Int = 1,
+    /** A follow-up attempt that continues the chat and agent session of the attempt before it. */
+    val continued: Boolean = false,
     /** For a switch: the agent (engine id) the chat moves to. */
     val switchTo: String? = null,
     /** Krewd chats attached with @. */
@@ -118,6 +120,7 @@ class Timeline {
                     triggers = p.optJSONObject("meta")?.optJSONArray("triggers")?.let { a -> (0 until a.length()).map { a.optString(it) } } ?: emptyList(),
                     attempt = p.optJSONObject("meta")?.optInt("attempt", 1) ?: 1,
                     maxAttempts = p.optJSONObject("meta")?.optInt("max_attempts", 1) ?: 1,
+                    continued = p.optJSONObject("meta")?.optBoolean("continued") ?: false,
                     switchTo = p.optJSONObject("meta")?.optStringOrNull("to"),
                     chats = ChatRef.list(p.optJSONArray("chats")),
                     fromId = p.optJSONObject("meta")?.optStringOrNull("from"),

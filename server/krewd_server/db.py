@@ -11,7 +11,7 @@ import asyncpg
 SCHEMA_VERSION = 6
 MIGRATIONS = {1: "schema.sql", 2: "schema_v2.sql", 3: "schema_v3.sql", 4: "schema_v4.sql", 5: "schema_v5.sql",
               6: "schema_v6.sql", 7: "schema_v7.sql", 8: "schema_v8.sql",
-              9: "schema_v9.sql"}
+              9: "schema_v9.sql", 10: "schema_v10.sql"}
 
 
 async def _init_connection(conn: asyncpg.Connection) -> None:
@@ -33,10 +33,16 @@ async def migrate(pool: asyncpg.Pool) -> None:
                 await conn.execute("insert into schema_version values ($1)", version)
 
 
+# The routine a chat belongs to: one of its run chats, or (before version 10) the one chat all its runs went to.
+ROUTINE_OF = (
+    "coalesce((select rr.routine_id from routine_runs rr where rr.session_id = s.id order by rr.created_at desc"
+    " limit 1), (select r.id from routines r where r.session_id = s.id order by r.created_at limit 1))"
+)
+
 SESSION_COLUMNS = (
     "id, engine, title, status, mode, modes, auto_approve, usage, last_text, pinned, archived, created_at, updated_at,"
     " agent, config_options, config_wanted, model_used, browser_tab, commands,"
-    " (select r.id from routines r where r.session_id = s.id order by r.created_at limit 1) as routine_id,"
+    f" {ROUTINE_OF} as routine_id, run_chat,"
     " parent_id, returns, (select p.title from sessions p where p.id = s.parent_id) as parent_title,"
     # The chats this one waits on: each owes it a reply (a sub-agent's or a prompted chat's) not sent yet.
     " array(select distinct m.session_id from messages m where m.return_to = s.id and m.returned_at is null"
@@ -93,6 +99,7 @@ def session_json(row: asyncpg.Record, pending_approvals: int = 0) -> dict[str, A
         "model_used": row["model_used"],
         "browser_tab": row["browser_tab"],
         "routine_id": str(row["routine_id"]) if row["routine_id"] else None,
+        "run_chat": row["run_chat"],  # made for one run of a routine; that routine's next run may delete it
         # How Compact works here: the agent's own /compact, or Krewd's handover to a fresh agent session.
         "compact": "native" if "compact" in command_names(row["commands"]) else "handover",
         # The agent's own slash commands and skills (ACP available_commands_update), for the composer's suggestions.
@@ -209,6 +216,7 @@ def run_json(row: asyncpg.Record) -> dict[str, Any]:
         "max_attempts": row["max_attempts"],
         "version": row["version"],
         "status": row["status"],
+        "result_reason": row["result_reason"] if "result_reason" in row.keys() else None,
         "summary": row["summary"],
         "scheduled_for": _iso(row["scheduled_for"]),
         "started_at": _iso(row["started_at"]),

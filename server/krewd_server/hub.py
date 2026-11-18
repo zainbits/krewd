@@ -813,7 +813,7 @@ class Hub:
 
     async def _insert_session(
         self, title: str, engine: str | None, mode: str | None, auto_approve: bool, config: dict[str, str] | None,
-        title_locked: bool = False,
+        title_locked: bool = False, run_chat: bool = False,
     ) -> uuid.UUID:
         engine = engine or self.settings.default_engine
         if engine not in self.settings.engines:
@@ -821,8 +821,8 @@ class Hub:
         session_id = uuid.uuid4()
         await self.pool.execute(
             """insert into sessions (id, engine, title, title_locked, mode, auto_approve, config_wanted, agent,
-                   config_options, commands)
-               values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)""",
+                   config_options, commands, run_chat)
+               values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)""",
             session_id,
             engine,
             title,
@@ -833,6 +833,7 @@ class Hub:
             (self.engine_info.get(engine) or {}).get("agent"),
             (self.engine_info.get(engine) or {}).get("config_options"),
             (self.engine_info.get(engine) or {}).get("commands"),
+            run_chat,
         )
         return session_id
 
@@ -1002,8 +1003,8 @@ class Hub:
         """What each chat takes, and what can go without touching any chat an agent can still resume."""
         async with self.storage_lock:
             sessions = await self.pool.fetch(
-                """select s.id, s.title, s.engine, s.status, s.pinned, s.archived, s.updated_at,
-                          (select r.id from routines r where r.session_id = s.id limit 1) as routine_id,
+                f"""select s.id, s.title, s.engine, s.status, s.pinned, s.archived, s.updated_at,
+                          {db.ROUTINE_OF} as routine_id,
                           coalesce(e.n, 0) as events, coalesce(e.bytes, 0) as event_bytes
                    from sessions s left join (select session_id, count(*) as n, sum(pg_column_size(payload)) as bytes
                                               from events group by session_id) e on e.session_id = s.id"""
@@ -1693,12 +1694,11 @@ class Hub:
         usage = None
         carry = None
         try:
-            if purpose == "routine":
-                # Every run starts in a fresh agent session: a routine's context does not grow run after run.
-                # The last run's session stays until here, so the owner can follow up on it in the chat.
-                # What runs learn lives in the routine's notes, which every run's prompt carries, so a run also
-                # starts without any carried text (a switch handover or a compact summary): that is about
-                # earlier runs, and a run that read it would act on stale facts from another day or agent.
+            if purpose == "routine" and not (meta or {}).get("continued"):
+                # A run starts in a fresh agent session (its own new chat, so normally there is none to drop) and
+                # without carried text (a switch handover or a compact summary): what runs learn lives in the
+                # routine's notes, which every run's prompt carries. A follow-up attempt continues its chat's
+                # session instead.
                 await self._drop_agent_session(rt)
                 await self.emit_session(rt.id)
             fresh = rt.agent_session is None
@@ -2107,8 +2107,6 @@ class Hub:
         carry = "\n".join(lines)
         if cur["carry"]:
             carry = cur["carry"] + "\n\n" + carry
-        # A routine's chat and its routine use the same agent.
-        await self.pool.execute("update routines set engine = $2 where session_id = $1 and engine <> $2", rt.id, to)
         info = self.engine_info.get(to) or {}
         config_wanted = dict((target["config_wanted"] if target else None) or {})
         config_wanted.update(meta.get("config") or {})
@@ -2597,8 +2595,9 @@ class Hub:
         if not title or not instructions:
             raise rtn.Invalid("a routine needs a title and instructions")
         routine_id = uuid.uuid4()
-        # The routine's own chat exists from the start, so it can be opened (and pinned) before the first run.
-        session_id = await self._insert_session(title, engine, mode, auto_approve, config, title_locked=True)
+        # A chat exists from the start, so the routine can be opened before its first run; that run uses it.
+        session_id = await self._insert_session(title, engine, mode, auto_approve, config, title_locked=True,
+                                                run_chat=True)
         now = datetime.now(UTC)
         async with self.pool.acquire() as conn, conn.transaction():
             await conn.execute(
@@ -2661,7 +2660,6 @@ class Hub:
         versioned = (any(new[k] != row[k] for k in ("title", "instructions", "timezone")) or found != old_triggers)
         version = row["version"] + 1 if versioned else row["version"]
         session_id = row["session_id"]
-        switching = new["engine"] != row["engine"]
         now = datetime.now(UTC)
         by_name = {t["name"]: t for t in existing}
         resumed = new["enabled"] and not row["enabled"]
@@ -2706,23 +2704,7 @@ class Hub:
                     changed_by, note, found,
                 )
         await self._sync_routine(routine_id)
-        if session_id and await self.pool.fetchval("select 1 from sessions where id = $1", session_id):
-            chat: dict[str, Any] = {}
-            if new["title"] != row["title"]:
-                chat["title"] = new["title"]
-            if new["auto_approve"] != row["auto_approve"]:
-                chat["auto_approve"] = new["auto_approve"]
-            if switching:
-                # One chat for the routine: its agent changes with a handover, after any running turn, and the
-                # routine's settings go to the new agent.
-                await self.switch_engine(session_id, new["engine"], config=new["config"], mode=new["mode"])
-            else:
-                if new["mode"] != row["mode"] and new["mode"]:
-                    chat["mode"] = new["mode"]
-                if new["config"] != (row["config"] or {}):
-                    chat["config"] = new["config"]
-            if chat:
-                await self.update_session(session_id, chat)
+        # A run's chat takes the routine's agent and settings when the run starts; chats already made keep theirs.
         return await self._routine_changed(routine_id)
 
     async def set_routine_notes(self, routine_id: uuid.UUID, notes: str, append: bool = False) -> dict[str, Any]:
@@ -2798,6 +2780,23 @@ class Hub:
         t = await self.pool.fetchrow("select * from routine_triggers where id = $1", trigger_id)
         return self._trigger_json(t, parent["name"])
 
+    async def run_result(self, routine_id: uuid.UUID, result: str, reason: str) -> dict[str, Any]:
+        """During a run: it did not do the job (failed) or waits for the owner's answer (waiting).
+
+        The run ends as that status instead of done, and its chat is never deleted by a later run.
+        """
+        await self._routine_row(routine_id)
+        run_id = await self.pool.fetchval(
+            """update routine_runs set result = $2, result_reason = $3
+               where id = (select id from routine_runs where routine_id = $1 and status = 'running'
+                           order by created_at desc limit 1) returning id""",
+            routine_id, result, reason.strip()[:300],
+        )
+        if run_id is None:
+            raise Conflict("a result can only be given during a run of this routine")
+        await self._routine_changed(routine_id)
+        return await self._run_json(run_id)
+
     async def cancel_follow_up(self, routine_id: uuid.UUID, trigger_id: uuid.UUID) -> None:
         done = await self.pool.fetchval(
             "delete from routine_triggers where id = $1 and routine_id = $2 and kind = 'once' returning id",
@@ -2817,17 +2816,76 @@ class Hub:
             await self.emit_session(sid)
         return routine
 
-    async def _routine_chat(self, row: asyncpg.Record) -> uuid.UUID:
-        """The routine's chat, made again if it was deleted (or the routine moved to another agent)."""
+    async def _run_chat(self, row: asyncpg.Record, lead: dict[str, Any], when: datetime) -> tuple[uuid.UUID, bool]:
+        """The chat a run goes to, and whether it continues the chat of the attempt before it.
+
+        Every run gets a new chat, like any task, named after the routine, the trigger and the day. A follow-up
+        attempt continues in the chat (and agent session) of the attempt that asked for it. The chat made with
+        the routine is used by its first run.
+        """
+        name = lead["trigger"]["name"]
+        if lead["attempt"] > 1:
+            prev = await self.pool.fetchval(
+                """select rr.session_id from routine_runs rr join sessions s on s.id = rr.session_id
+                   where rr.routine_id = $1 and rr.trigger_names[1] = $2 and rr.status <> 'skipped'
+                   order by rr.created_at desc limit 1""",
+                row["id"], name,
+            )
+            if prev:
+                return prev, True
         if row["session_id"]:
-            exists = await self.pool.fetchval("select 1 from sessions where id = $1", row["session_id"])
-            if exists:
-                return row["session_id"]
+            unused = await self.pool.fetchval(
+                """select 1 from sessions s where s.id = $1 and s.run_chat and s.engine = $2
+                   and not exists (select 1 from routine_runs rr where rr.session_id = s.id)
+                   and not exists (select 1 from messages m where m.session_id = s.id)""",
+                row["session_id"], row["engine"],
+            )
+            if unused:
+                await self.pool.execute("update sessions set title = $2 where id = $1", row["session_id"],
+                                        self._run_title(row, name, when))
+                return row["session_id"], False
         session_id = await self._insert_session(
-            row["title"], row["engine"], row["mode"], row["auto_approve"], row["config"], title_locked=True
+            self._run_title(row, name, when), row["engine"], row["mode"], row["auto_approve"], row["config"],
+            title_locked=True, run_chat=True,
         )
         await self.pool.execute("update routines set session_id = $2 where id = $1", row["id"], session_id)
-        return session_id
+        return session_id, False
+
+    @staticmethod
+    def _run_title(row: asyncpg.Record, trigger: str, when: datetime) -> str:
+        local = when.astimezone(rtn.zone(row["timezone"]))
+        return f"{row['title']} · " + (f"{trigger} · " if trigger != "main" else "") + f"{local:%a %-d %b}"
+
+    async def _clean_run_chats(self, routine_id: uuid.UUID, keep: uuid.UUID) -> None:
+        """Delete the chats of this routine's earlier runs once a new run starts: their summaries stay in the runs.
+
+        Kept: a run that failed, stopped, errored or waits for the owner (the owner deletes those), a chat the owner
+        wrote in, pinned or archived, one that is busy or has an approval waiting, and the chat a pending follow-up
+        will continue. Chats from before run chats (one chat for every run) are never deleted here.
+        """
+        rows = await self.pool.fetch(
+            """select s.id from sessions s
+               where s.run_chat and s.id <> $2 and not s.pinned and not s.archived and s.status <> 'running'
+                 and (exists (select 1 from routine_runs rr where rr.session_id = s.id and rr.routine_id = $1)
+                      or exists (select 1 from routines r where r.id = $1 and r.session_id = s.id))
+                 and not exists (select 1 from routine_runs rr where rr.session_id = s.id
+                                 and (rr.status not in ('done', 'skipped') or rr.result is not null))
+                 and not exists (select 1 from messages m where m.session_id = s.id and m.purpose is null)
+                 and not exists (select 1 from approvals a where a.session_id = s.id and a.status = 'pending')
+                 and not exists (select 1 from routine_triggers t join routine_runs rr
+                                   on rr.routine_id = t.routine_id and rr.trigger_names[1] = t.name
+                                 where t.routine_id = $1 and t.kind = 'once' and rr.session_id = s.id)""",
+            routine_id, keep,
+        )
+        for r in rows:
+            try:
+                await self.delete_session(r["id"])
+                # Its own events went with it, so the apps hear it on the new run's chat.
+                await self.emit(keep, "chat_deleted", {"id": str(r["id"])})
+            except NotFound:
+                pass
+            except Exception:
+                log.exception("could not delete run chat %s", r["id"])
 
     async def _start_run(
         self,
@@ -2846,17 +2904,17 @@ class Hub:
         )
         if busy and trigger == "manual":
             raise Conflict("This routine's last run has not finished yet")
-        session_id = await self._routine_chat(row)
         if busy or skip_reason:
             await self.pool.execute(
                 """insert into routine_runs (id, routine_id, session_id, trigger, version, scheduled_for, status,
                        summary, finished_at, trigger_names, attempt, max_attempts)
-                   values ($1, $2, $3, $4, $5, $6, 'skipped', $7, now(), $8, $9, $10)""",
-                run_id, row["id"], session_id, trigger, row["version"], scheduled_for,
+                   values ($1, $2, null, $3, $4, $5, 'skipped', $6, now(), $7, $8, $9)""",
+                run_id, row["id"], trigger, row["version"], scheduled_for,
                 skip_reason or "Skipped: the previous run had not finished.", names, lead["attempt"], lead["max"],
             )
             await self._routine_changed(row["id"])
             return await self._run_json(run_id)
+        session_id, continued = await self._run_chat(row, lead, scheduled_for or datetime.now(UTC))
         message_id = uuid.uuid4()
         all_cron = [t for t in await self._triggers(row["id"]) if t["kind"] == "cron"]
         routine = db.routine_json(row)
@@ -2865,7 +2923,7 @@ class Hub:
             triggers=[(f["trigger"]["name"], rtn.describe(f["trigger"]["schedule"] or "") if f["trigger"]["schedule"]
                        else None) for f in fired if f["trigger"]["name"] in names],
             attempt=lead["attempt"], max_attempts=lead["max"], reason=lead["reason"], notes=row["notes"],
-            several=len(all_cron) > 1,
+            several=len(all_cron) > 1, continued=continued,
         )
         await self.pool.execute(
             """insert into routine_runs (id, routine_id, session_id, message_id, trigger, version, scheduled_for,
@@ -2874,11 +2932,13 @@ class Hub:
             lead["attempt"], lead["max"],
         )
         await self.pool.execute("update routines set last_run_at = now() where id = $1", row["id"])
+        await self._clean_run_chats(row["id"], session_id)
         label = ", ".join(names) if names != ["main"] else ""
         await self.send(
             session_id, text, delivery="queue", purpose="routine", message_id=message_id,
             meta={"routine_id": str(row["id"]), "run_id": str(run_id), "title": row["title"], "trigger": trigger,
-                  "version": row["version"], "triggers": names, "attempt": lead["attempt"], "max_attempts": lead["max"]},
+                  "version": row["version"], "triggers": names, "attempt": lead["attempt"], "max_attempts": lead["max"],
+                  "continued": continued},
             preview=("Scheduled run" if trigger == "schedule" else "Run now") + (f" ({label})" if label else "")
                     + f": {row['title']}",
         )
@@ -2904,7 +2964,8 @@ class Hub:
 
     async def _run_finished(self, message_id: uuid.UUID, status: str, summary: str | None) -> None:
         routine_id = await self.pool.fetchval(
-            """update routine_runs set status = $2, summary = coalesce($3, summary), finished_at = now()
+            """update routine_runs set status = case when $2 = 'done' then coalesce(result, 'done') else $2 end,
+                   summary = coalesce($3, summary), finished_at = now()
                where message_id = $1 and status in ('queued', 'running') returning routine_id""",
             message_id,
             status,
