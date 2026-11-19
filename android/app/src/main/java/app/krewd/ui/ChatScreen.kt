@@ -179,6 +179,8 @@ fun ChatScreen(state: UiState, viewModel: KrewdViewModel) {
     var settingsOpen by rememberSaveable(state.openSessionId) { mutableStateOf(false) }
     // The title opened into its quick panel (models, effort); back, or a tap on the chat, folds it.
     var titleOpen by rememberSaveable(state.openSessionId) { mutableStateOf(false) }
+    // The context ring's card above the composer.
+    var contextOpen by remember(state.openSessionId) { mutableStateOf(false) }
     BackHandler(enabled = titleOpen) { titleOpen = false }
     // This chat's sign-in requests, at the bottom of the chat (also under Needs you on the Krewd tab).
     val signIns = state.secrets.filter { it.pending && it.sessionId == session?.id }
@@ -392,8 +394,7 @@ fun ChatScreen(state: UiState, viewModel: KrewdViewModel) {
                     onSteps = { scope.launch { listState.animateScrollToItem(0) } },
                     contextUsed = session.contextUsed,
                     contextSize = session.contextSize,
-                    onCompact = if (state.connection is Connection.Online) ({ viewModel.compact(session.id) }) else null,
-                    compactNative = session.compact == "native",
+                    onContext = { contextOpen = !contextOpen },
                     steering = state.engine(session.engine)?.steering == true,
                     commands = commands,
                     files = files,
@@ -410,6 +411,27 @@ fun ChatScreen(state: UiState, viewModel: KrewdViewModel) {
                     onRemoveFile = { viewModel.removeAttachment(session.id, it) },
                 )
             }
+        }
+        val used = session?.contextUsed
+        val window = session?.contextSize
+        if (contextOpen && session != null && used != null && window != null && window > 0) {
+            BackHandler { contextOpen = false }
+            Box(
+                Modifier.fillMaxSize().clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) {
+                    contextOpen = false
+                },
+            )
+            ContextCard(
+                backdrop = backdrop,
+                used = used,
+                size = window,
+                onCompact = if (state.connection is Connection.Online) ({ viewModel.compact(session.id) }) else null,
+                compactNative = session.compact == "native",
+                onClose = { contextOpen = false },
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(end = ShellDimensions.COMPOSER_MARGIN + 8.dp, bottom = bottomStack + 8.dp),
+            )
         }
     }
 }
@@ -559,8 +581,7 @@ private fun Composer(
     onSteps: () -> Unit,
     contextUsed: Long?,
     contextSize: Long?,
-    onCompact: (() -> Unit)?,
-    compactNative: Boolean,
+    onContext: () -> Unit,
     steering: Boolean,
     commands: List<AgentCommand>,
     files: List<PendingFile>,
@@ -599,9 +620,8 @@ private fun Composer(
     val hasDraft = text.isNotBlank() || files.isNotEmpty() || hasTabs
     val colors = MaterialTheme.colorScheme
     ComposerShell(backdrop, modifier.fillMaxWidth()) {
-        // On glass the text follows what is behind it (Vitreous: dark over bright content).
-        val textColor = if (LocalKrewdGlass.current.on) LocalContentColor.current else colors.onSurface
-        val hintColor = if (LocalKrewdGlass.current.on) textColor.copy(alpha = 0.62f) else colors.onSurfaceVariant
+        val textColor = colors.onSurface
+        val hintColor = colors.onSurfaceVariant
         CompositionLocalProvider(LocalContentColor provides textColor) {
         Column(Modifier.animateContentSize().padding(start = 6.dp, end = 6.dp, top = 4.dp, bottom = 6.dp)) {
             // Attached files fill the composer's top, so it grows instead of stacking chips above it.
@@ -695,7 +715,7 @@ private fun Composer(
                     Spacer(Modifier.width(6.dp))
                 }
                 if (contextUsed != null && contextSize != null && contextSize > 0) {
-                    ContextRing(contextUsed, contextSize, onCompact, compactNative)
+                    ContextRing(contextUsed, contextSize, onContext)
                     Spacer(Modifier.width(6.dp))
                 }
                 val stop = busy && !hasDraft
@@ -738,7 +758,8 @@ private fun Composer(
 @Composable
 private fun ComposerShell(backdrop: GlassBackdrop, modifier: Modifier, content: @Composable () -> Unit) {
     if (LocalKrewdGlass.current.on) {
-        GlassSurface(backdrop = backdrop, modifier = modifier, shape = GlassShape.rounded(30.dp)) { content() }
+        // The composer keeps its own colours (no light/dark switching while you type).
+        GlassSurface(backdrop = backdrop, modifier = modifier, shape = GlassShape.rounded(30.dp), adaptiveContent = false) { content() }
     } else {
         Surface(
             modifier = modifier,
@@ -751,90 +772,109 @@ private fun ComposerShell(backdrop: GlassBackdrop, modifier: Modifier, content: 
     }
 }
 
-/** How full the agent's context window is: a small ring with the percentage; tap for the exact tokens. */
+/** How full the agent's context window is: a small ring with the percentage; tap for the card with the tokens. */
 @Composable
-private fun ContextRing(used: Long, size: Long, onCompact: (() -> Unit)?, compactNative: Boolean) {
-    var open by remember { mutableStateOf(false) }
+private fun ContextRing(used: Long, size: Long, onClick: () -> Unit) {
     val fraction = (used.toFloat() / size).coerceIn(0f, 1f)
-    val percent = (fraction * 100).toInt()
     val colors = MaterialTheme.colorScheme
-    val tone = when {
-        fraction >= 0.9f -> colors.error
-        fraction >= 0.7f -> app.krewd.LocalKrewdColors.current.needs
-        else -> colors.primary
+    Box(
+        Modifier.size(40.dp).clip(CircleShape).clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        CircularProgressIndicator(
+            progress = { fraction },
+            modifier = Modifier.size(28.dp),
+            color = contextTone(fraction),
+            trackColor = colors.surfaceContainerHighest,
+            strokeWidth = 2.5.dp,
+            gapSize = 0.dp,
+            strokeCap = StrokeCap.Round,
+        )
+        Text(
+            "${(fraction * 100).toInt()}",
+            style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.sp, lineHeight = 9.sp),
+            fontWeight = FontWeight.SemiBold,
+            color = colors.onSurface,
+        )
     }
-    Box {
-        Box(
-            Modifier.size(40.dp).clip(CircleShape).clickable { open = true },
-            contentAlignment = Alignment.Center,
-        ) {
-            CircularProgressIndicator(
+}
+
+@Composable
+private fun contextTone(fraction: Float) = when {
+    fraction >= 0.9f -> MaterialTheme.colorScheme.error
+    fraction >= 0.7f -> app.krewd.LocalKrewdColors.current.needs
+    else -> MaterialTheme.colorScheme.primary
+}
+
+/**
+ * The context ring's card: a small glass panel above the composer with the tokens, and a solid Compact
+ * button. Drawn in the chat (not a popup window), so the glass shows the chat behind it.
+ */
+@Composable
+private fun ContextCard(
+    backdrop: GlassBackdrop,
+    used: Long,
+    size: Long,
+    onCompact: (() -> Unit)?,
+    compactNative: Boolean,
+    onClose: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val fraction = (used.toFloat() / size).coerceIn(0f, 1f)
+    val tone = contextTone(fraction)
+    val body: @Composable () -> Unit = {
+        val ink = LocalContentColor.current
+        Column(Modifier.padding(horizontal = 14.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("CONTEXT", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                Text("${(fraction * 100).toInt()}%", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold, color = tone)
+            }
+            LinearProgressIndicator(
                 progress = { fraction },
-                modifier = Modifier.size(28.dp),
+                modifier = Modifier.fillMaxWidth().height(4.dp).clip(RoundedCornerShape(2.dp)),
                 color = tone,
-                trackColor = colors.surfaceContainerHighest,
-                strokeWidth = 2.5.dp,
+                trackColor = ink.copy(alpha = 0.15f),
                 gapSize = 0.dp,
-                strokeCap = StrokeCap.Round,
+                drawStopIndicator = {},
             )
-            Text(
-                "$percent",
-                style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.sp, lineHeight = 9.sp),
-                fontWeight = FontWeight.SemiBold,
-                color = colors.onSurface,
-            )
-        }
-        DropdownMenu(
-            expanded = open,
-            onDismissRequest = { open = false },
-            shape = RoundedCornerShape(20.dp),
-            containerColor = colors.surfaceContainerHighest,
-        ) {
-            Column(Modifier.padding(horizontal = 18.dp, vertical = 10.dp).widthIn(min = 220.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Row(verticalAlignment = Alignment.Bottom) {
-                    Text("Context", style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
-                    Text("$percent%", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, color = tone)
+            TokenLine("Used", used)
+            TokenLine("Left", (size - used).coerceAtLeast(0))
+            TokenLine("Window", size)
+            if (onCompact != null) {
+                FilledTonalButton(
+                    onClick = { onClose(); onCompact() },
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                    modifier = Modifier.fillMaxWidth().padding(top = 4.dp).height(36.dp),
+                ) {
+                    Icon(painterResource(R.drawable.ic_compress_24), contentDescription = null, modifier = Modifier.size(16.dp))
+                    Text("Compact now", style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(start = 6.dp))
                 }
-                LinearProgressIndicator(
-                    progress = { fraction },
-                    modifier = Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(3.dp)),
-                    color = tone,
-                    trackColor = colors.surfaceContainer,
-                    gapSize = 0.dp,
-                    drawStopIndicator = {},
+                Text(
+                    if (compactNative) "Runs the agent's /compact after this turn." else "A fresh session takes over after this turn.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = ink.copy(alpha = 0.66f),
                 )
-                TokenLine("Used", used)
-                TokenLine("Remaining", (size - used).coerceAtLeast(0))
-                HorizontalDivider(color = colors.outlineVariant)
-                TokenLine("Window", size)
-                if (onCompact != null) {
-                    FilledTonalButton(
-                        onClick = { open = false; onCompact() },
-                        modifier = Modifier.fillMaxWidth().padding(top = 2.dp),
-                    ) {
-                        Icon(painterResource(R.drawable.ic_compress_24), contentDescription = null, modifier = Modifier.size(18.dp))
-                        Text("Compact now", modifier = Modifier.padding(start = 8.dp))
-                    }
-                    Text(
-                        if (compactNative) "The agent summarises the chat with its own /compact. Runs after the current turn."
-                        else "The agent writes a handover and a fresh session continues from it. Runs after the current turn.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = colors.onSurfaceVariant,
-                    )
-                }
             }
         }
+    }
+    if (LocalKrewdGlass.current.on) {
+        GlassSurface(backdrop = backdrop, modifier = modifier.width(212.dp), shape = GlassShape.rounded(22.dp)) { body() }
+    } else {
+        Surface(
+            modifier = modifier.width(212.dp),
+            shape = RoundedCornerShape(22.dp),
+            color = MaterialTheme.colorScheme.surfaceContainerHighest,
+            shadowElevation = 3.dp,
+        ) { body() }
     }
 }
 
 @Composable
 private fun TokenLine(label: String, tokens: Long) {
+    val ink = LocalContentColor.current
     Row(Modifier.fillMaxWidth()) {
-        Text(label, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.weight(1f))
-        Text(
-            "%,d".format(tokens),
-            style = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
-        )
+        Text(label, style = MaterialTheme.typography.bodySmall, color = ink.copy(alpha = 0.7f), modifier = Modifier.weight(1f))
+        Text("%,d".format(tokens), style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace))
     }
 }
 

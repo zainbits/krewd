@@ -27,6 +27,7 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import app.krewd.Connection
 import app.krewd.KrewdViewModel
 import app.krewd.R
@@ -72,9 +73,10 @@ fun ChatQuickPanel(state: UiState, viewModel: KrewdViewModel, session: SessionIn
                         onClick = { if (!selected) viewModel.setConfig(session.id, model.id, choice.value) },
                         enabled = online,
                         shape = RoundedCornerShape(18.dp),
-                        color = ink.copy(alpha = if (selected) 0.16f else 0.06f),
-                        contentColor = ink,
-                        border = if (selected) BorderStroke(1.5.dp, ink.copy(alpha = 0.55f)) else null,
+                        // Solid cards on the glass, so they read over any chat.
+                        color = if (selected) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surfaceContainerHighest,
+                        contentColor = if (selected) MaterialTheme.colorScheme.onSecondaryContainer else MaterialTheme.colorScheme.onSurface,
+                        border = if (selected) BorderStroke(2.dp, MaterialTheme.colorScheme.primary) else null,
                         // One size for every card, so the row (and the slider under it) never jumps while it scrolls.
                         modifier = Modifier.width(148.dp).height(76.dp),
                     ) {
@@ -90,7 +92,7 @@ fun ChatQuickPanel(state: UiState, viewModel: KrewdViewModel, session: SessionIn
                                 Text(
                                     it,
                                     style = MaterialTheme.typography.labelSmall,
-                                    color = ink.copy(alpha = 0.66f),
+                                    color = LocalContentColor.current.copy(alpha = 0.7f),
                                     maxLines = 2,
                                     overflow = TextOverflow.Ellipsis,
                                 )
@@ -117,8 +119,8 @@ fun ChatQuickPanel(state: UiState, viewModel: KrewdViewModel, session: SessionIn
         Surface(
             onClick = onAllSettings,
             shape = RoundedCornerShape(16.dp),
-            color = ink.copy(alpha = 0.06f),
-            contentColor = ink,
+            color = MaterialTheme.colorScheme.surfaceContainerHighest,
+            contentColor = MaterialTheme.colorScheme.onSurface,
             modifier = Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 14.dp).glassPullExempt(pull),
         ) {
             Row(Modifier.padding(horizontal = 14.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -128,7 +130,7 @@ fun ChatQuickPanel(state: UiState, viewModel: KrewdViewModel, session: SessionIn
                     style = MaterialTheme.typography.labelLarge,
                     modifier = Modifier.weight(1f).padding(start = 10.dp),
                 )
-                Icon(painterResource(R.drawable.ic_chevron_right_24), contentDescription = null, tint = ink.copy(alpha = 0.66f), modifier = Modifier.size(18.dp))
+                Icon(painterResource(R.drawable.ic_chevron_right_24), contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(18.dp))
             }
         }
     }
@@ -137,9 +139,11 @@ fun ChatQuickPanel(state: UiState, viewModel: KrewdViewModel, session: SessionIn
 @Composable
 private fun PanelLabel(text: String) {
     Text(
-        text,
+        text.uppercase(),
         style = MaterialTheme.typography.labelMedium,
-        color = LocalContentColor.current.copy(alpha = 0.66f),
+        fontWeight = FontWeight.Bold,
+        letterSpacing = 0.8.sp,
+        color = LocalContentColor.current.copy(alpha = 0.8f),
         modifier = Modifier.padding(start = 16.dp, top = 12.dp, bottom = 6.dp),
     )
 }
