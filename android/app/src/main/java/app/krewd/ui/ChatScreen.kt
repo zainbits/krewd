@@ -57,6 +57,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -136,10 +137,23 @@ fun ChatScreen(state: UiState, viewModel: KrewdViewModel) {
     }
 
     // Follow the newest output while you are at the bottom; leave the list alone once you scroll up to read.
+    // Only your own scrolling (drag, fling, a jump) decides it: rows and text arriving never do, so a reply that
+    // streams in below you does not pull you back down. Scroll to the bottom again and it follows again.
+    var follow by remember(listState) { mutableStateOf(true) }
+    LaunchedEffect(listState) {
+        snapshotFlow { listState.isScrollInProgress to !listState.canScrollBackward }
+            .collect { (scrolling, atBottom) -> if (scrolling) follow = atBottom }
+    }
+    // Sending a message takes you down to it.
+    val lastKey = items.lastOrNull()?.key
+    LaunchedEffect(lastKey) { if (items.lastOrNull() is UserItem) follow = true }
     LaunchedEffect(rowCount, lastLength) {
         if (rowCount == 0 || state.chatFocus != null) return@LaunchedEffect
-        if (listState.firstVisibleItemIndex <= 1) listState.scrollToItem(0)
+        if (follow) listState.scrollToItem(0)
     }
+    // The reply streaming in now. While you read above the bottom, the text you are reading stays put as it grows.
+    val liveKey = (items.lastOrNull() as? TextItem)?.takeIf { busy && !it.isThought }?.key
+    val liveReply = remember(listState, liveKey) { LiveReply(liveKey) { key -> if (!follow) listState.holdRow(key) } }
 
     val bars = WindowInsets.statusBars.union(WindowInsets.displayCutout).asPaddingValues()
     var settingsOpen by rememberSaveable(state.openSessionId) { mutableStateOf(false) }
@@ -195,7 +209,7 @@ fun ChatScreen(state: UiState, viewModel: KrewdViewModel) {
     Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surface)) {
         // Rows that open and close keep their top edge in place (KeepInPlace.kt).
         val holdRow = remember(listState) { { key: Any -> listState.holdRow(key) } }
-        CompositionLocalProvider(LocalHoldRow provides holdRow, LocalNoteHooks provides noteHooks) {
+        CompositionLocalProvider(LocalHoldRow provides holdRow, LocalNoteHooks provides noteHooks, LocalLiveReply provides liveReply) {
         LazyColumn(
             state = listState,
             modifier = Modifier.fillMaxSize(),
@@ -770,13 +784,15 @@ private fun UserRow(
 @Composable
 private fun ReplyText(item: TextItem) {
     val hooks = LocalNoteHooks.current
+    val live = LocalLiveReply.current
+    val text = rememberSmoothText(item.key, item.text, live = live.key == item.key, onGrow = { live.hold(item.key) })
     if (hooks == null || item.role != "assistant") {
-        SelectionContainer { Markdown(item.text) }
+        SelectionContainer { Markdown(text) }
         return
     }
     CompositionLocalProvider(LocalNoteItem provides item.key) {
         Box(Modifier.noteSelectionMenu { quote -> hooks.onSelectionNote(item.key, item.text, quote) }) {
-            SelectionContainer { Markdown(item.text) }
+            SelectionContainer { Markdown(text) }
         }
     }
 }
