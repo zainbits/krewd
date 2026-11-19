@@ -8,7 +8,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -34,6 +34,8 @@ import app.krewd.KrewdViewModel
 import app.krewd.R
 import app.krewd.UiState
 import app.krewd.data.SessionInfo
+import io.github.zainbits.cohesion.glassPullExempt
+import io.github.zainbits.vitreous.LocalGlassPull
 
 /**
  * What the chat's title opens into: the agent's models as cards that scroll sideways, its effort as a
@@ -46,10 +48,12 @@ fun ChatQuickPanel(state: UiState, viewModel: KrewdViewModel, session: SessionIn
     val ink = LocalContentColor.current
     val model = session.config.firstOrNull { it.category == "model" }
     val effort = session.config.firstOrNull { it.category == "thought_level" }?.takeIf { it.choices.size in 2..7 }
-    // Taps between the controls stay in the panel (they do not fold it).
+    // Touches on the panel belong to its controls: they neither bounce the glass nor fold the panel.
+    // Only the title row above pulls the glass and folds it.
     Column(
         Modifier
             .fillMaxWidth()
+            .glassPullExempt(LocalGlassPull.current)
             .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) {}
             .padding(bottom = 10.dp),
     ) {
@@ -71,7 +75,8 @@ fun ChatQuickPanel(state: UiState, viewModel: KrewdViewModel, session: SessionIn
                         color = ink.copy(alpha = if (selected) 0.16f else 0.06f),
                         contentColor = ink,
                         border = if (selected) BorderStroke(1.5.dp, ink.copy(alpha = 0.55f)) else null,
-                        modifier = Modifier.width(140.dp).heightIn(min = 64.dp),
+                        // One size for every card, so the row (and the slider under it) never jumps while it scrolls.
+                        modifier = Modifier.width(148.dp).height(76.dp),
                     ) {
                         Column(Modifier.padding(horizontal = 12.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                             Text(
