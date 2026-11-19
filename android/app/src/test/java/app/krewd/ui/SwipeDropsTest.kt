@@ -34,18 +34,20 @@ class SwipeDropsTest {
     }
 
     @Test
-    fun deleteGrowsFlushOutOfTheMovingEndBeforeItPops() {
+    fun deleteStartsHiddenInTheEndAndSlidesOutBeforeItPops() {
         val d = drops()
+        d.slide(0f, 1f, 0.1f, hold = 0.2f)
+        // Hidden: its right edge on the card's end, all of it inside the card.
+        assertEquals(width - 1f, d.center(SwipeDrops.DELETE) + d.width(SwipeDrops.DELETE) / 2f, 1f)
         val slide = d.firstPop * 0.6f
-        d.slide(0f, slide, 0.6f, hold = 0.3f)
+        d.slide(1f, slide, 0.6f, hold = 0.3f)
         assertFalse(d.isPopped(SwipeDrops.DELETE))
-        // Held by the card: a slice flush against the card's moving end (no overlap, so no lump),
-        // not parked at the row's right edge.
+        // Partly out past the card's moving end, partly still in it; no icon before the pop.
         val edge = width - slide
+        val right = d.center(SwipeDrops.DELETE) + d.width(SwipeDrops.DELETE) / 2f
         val left = d.center(SwipeDrops.DELETE) - d.width(SwipeDrops.DELETE) / 2f
-        assertEquals(edge, left, 1f)
-        assertTrue(d.width(SwipeDrops.DELETE) > 0f && d.width(SwipeDrops.DELETE) <= tile + 0.5f)
-        assertTrue(d.center(SwipeDrops.DELETE) < d.spot(SwipeDrops.DELETE) - 1f)
+        assertTrue(right > edge + 1f && left < edge)
+        assertEquals(0f, d.exposure(SwipeDrops.DELETE), 0f)
     }
 
     @Test
