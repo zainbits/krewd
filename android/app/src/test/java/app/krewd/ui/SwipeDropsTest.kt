@@ -34,13 +34,17 @@ class SwipeDropsTest {
     }
 
     @Test
-    fun deleteBulgesOutOfTheMovingEndBeforeItPops() {
+    fun deleteGrowsFlushOutOfTheMovingEndBeforeItPops() {
         val d = drops()
-        d.slide(0f, d.firstPop * 0.8f, 0.6f, hold = 0.3f)
+        val slide = d.firstPop * 0.6f
+        d.slide(0f, slide, 0.6f, hold = 0.3f)
         assertFalse(d.isPopped(SwipeDrops.DELETE))
-        // Held by the card: it sticks out of the card's end, not parked at the row's right edge.
-        val edge = width - d.firstPop * 0.8f
-        assertTrue(d.center(SwipeDrops.DELETE) + tile / 2f > edge)
+        // Held by the card: a slice flush against the card's moving end (no overlap, so no lump),
+        // not parked at the row's right edge.
+        val edge = width - slide
+        val left = d.center(SwipeDrops.DELETE) - d.width(SwipeDrops.DELETE) / 2f
+        assertEquals(edge, left, 1f)
+        assertTrue(d.width(SwipeDrops.DELETE) > 0f && d.width(SwipeDrops.DELETE) <= tile + 0.5f)
         assertTrue(d.center(SwipeDrops.DELETE) < d.spot(SwipeDrops.DELETE) - 1f)
     }
 
