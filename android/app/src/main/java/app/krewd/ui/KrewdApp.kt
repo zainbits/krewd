@@ -123,6 +123,7 @@ fun KrewdApp(viewModel: KrewdViewModel) {
     val darkGlass = MaterialTheme.colorScheme.surface.luminance() < 0.5f
     // The tab screens are what the nav bar's glass (Meniscus) shows through.
     val tabsBackdrop = rememberGlassBackdrop()
+    val homeAsk = rememberHomeAsk()
     val navGlass = remember(tabsBackdrop, glass.on) { if (glass.on) MeniscusGlass(tabsBackdrop) else null }
     CompositionLocalProvider(
         LocalCodeWrap provides CodeWrap(state.codeWrap, viewModel::setCodeWrap),
@@ -157,13 +158,15 @@ fun KrewdApp(viewModel: KrewdViewModel) {
                 // only the plain background (the same look for the nav bar, at no cost).
                 Box(Modifier.fillMaxSize().then(if (glass.on) Modifier.glassSource(tabsBackdrop) else Modifier).background(MaterialTheme.colorScheme.surface)) {
                     when (tab) {
-                        Tab.Tasks -> TasksScreen(state, viewModel, padding, tasksList, onOpenSettings = { viewModel.navigate(NavTab.SETTINGS) })
+                        Tab.Tasks -> TasksScreen(state, viewModel, padding, tasksList, homeAsk, onOpenSettings = { viewModel.navigate(NavTab.SETTINGS) })
                         Tab.Routines -> RoutinesScreen(state, viewModel, padding, routinesList)
                         Tab.Browser -> {}
                         Tab.Settings -> SettingsScreen(state, viewModel, padding, settingsList)
                     }
                 }
                 if (tab == Tab.Browser) BrowserScreen(state, viewModel, landscape)
+                // Outside the glass source, so it can be glass over the tasks.
+                if (tab == Tab.Tasks) HomeAskBar(state, viewModel, homeAsk)
                 if (tab != Tab.Browser) TitlePill(
                     title = if (tab == Tab.Tasks) "Krewd" else tab.title,
                     wordmark = tab == Tab.Tasks,

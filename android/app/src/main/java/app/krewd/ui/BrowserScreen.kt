@@ -76,6 +76,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.foundation.layout.RowScope
+import androidx.compose.ui.zIndex
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
@@ -293,7 +295,8 @@ private fun TabsRow(state: UiState, actions: TabActions, onNew: () -> Unit, onAl
     // only when you swipe it or a tab opens or closes, never with the page's video.
     val glassOn = LocalKrewdGlass.current.on
     val strip = rememberGlassBackdrop()
-    Box(Modifier.fillMaxWidth().padding(top = 6.dp)) {
+    // Above the controls and the page, so a stretched button is drawn over them.
+    Box(Modifier.fillMaxWidth().zIndex(2f).padding(top = 6.dp)) {
         LazyRow(
             state = listState,
             modifier = Modifier
@@ -331,8 +334,8 @@ private fun SmallPill(modifier: Modifier = Modifier, color: Color = MaterialThem
 }
 
 @Composable
-private fun TabCount(count: Int, onClick: () -> Unit, glass: Boolean = true) {
-    KrewdPill(Modifier.width(SMALL_PILL), onClick = onClick, glass = glass, height = SMALL_PILL, contentAlignment = Alignment.Center) {
+private fun TabCount(count: Int, onClick: () -> Unit, modifier: Modifier = Modifier) {
+    KrewdPill(modifier.width(SMALL_PILL), onClick = onClick, height = SMALL_PILL, contentAlignment = Alignment.Center) {
         Box(
             Modifier.border(1.5.dp, LocalContentColor.current, RoundedCornerShape(5.dp)).padding(horizontal = 4.dp),
         ) { Text(if (count > 99) "∞" else count.toString(), style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold) }
@@ -550,20 +553,23 @@ private fun ControlsRow(
     onAll: () -> Unit,
 ) {
     var menu by remember { mutableStateOf(false) }
-    Row(
-        Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 6.dp),
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        // Nothing passes under these bars, so they are flat pieces (no glass) that still stretch. Back, Forward and
-        // Reload touch: one liquid bar whose buttons bulge into each other when pressed.
-        if (landscape) TabCount(tabCount, onAll, glass = false)
-        if (LocalKrewdGlass.current.on) {
-            LiquidRow(glass = false, horizontalArrangement = Arrangement.spacedBy(0.dp)) {
-                KrewdIconPill(onClick = { onNav("back") }, icon = R.drawable.ic_chevron_left_24, contentDescription = "Back", enabled = !viewOnly, size = SMALL_PILL)
-                KrewdIconPill(onClick = { onNav("forward") }, icon = R.drawable.ic_chevron_right_24, contentDescription = "Forward", enabled = !viewOnly, size = SMALL_PILL)
-                KrewdIconPill(onClick = { onNav("reload") }, icon = R.drawable.ic_refresh_24, contentDescription = "Reload", enabled = !viewOnly, size = SMALL_PILL, iconSize = 20.dp)
-            }
+    val glassOn = LocalKrewdGlass.current.on
+    val row: @Composable (@Composable RowScope.() -> Unit) -> Unit = { content ->
+        // Above the page (zIndex), so a button stretched toward it is drawn over it, not cut off by it.
+        val modifier = Modifier.fillMaxWidth().zIndex(1f).padding(horizontal = 10.dp, vertical = 6.dp)
+        // Glass: one liquid bar over the screen's plain background (the tab glass source, which holds only that
+        // while the browser shows: it never records again). Back, Forward and Reload touch and flow into each
+        // other; the others sit a small gap apart and flow in only when stretched into them.
+        if (glassOn) LiquidRow(modifier, horizontalArrangement = Arrangement.spacedBy(0.dp), content = content)
+        else Row(modifier, horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically, content = content)
+    }
+    val gap = if (glassOn) 6.dp else 0.dp
+    row {
+        if (landscape) TabCount(tabCount, onAll, modifier = Modifier.padding(end = gap))
+        if (glassOn) {
+            KrewdIconPill(onClick = { onNav("back") }, icon = R.drawable.ic_chevron_left_24, contentDescription = "Back", enabled = !viewOnly, size = SMALL_PILL)
+            KrewdIconPill(onClick = { onNav("forward") }, icon = R.drawable.ic_chevron_right_24, contentDescription = "Forward", enabled = !viewOnly, size = SMALL_PILL)
+            KrewdIconPill(onClick = { onNav("reload") }, icon = R.drawable.ic_refresh_24, contentDescription = "Reload", enabled = !viewOnly, size = SMALL_PILL, iconSize = 20.dp)
         } else {
             // Glass off: the plain single pill with three buttons.
             SmallPill {
@@ -574,11 +580,11 @@ private fun ControlsRow(
                 }
             }
         }
-        KrewdPill(Modifier.weight(1f), glass = false, height = SMALL_PILL) {
+        KrewdPill(Modifier.weight(1f).padding(start = gap), height = SMALL_PILL) {
             UrlField(tab, editing && !viewOnly, { if (!viewOnly) onEditing(it) }, onGo, onCopy)
         }
-        Box {
-            KrewdIconPill(onClick = { menu = true }, icon = R.drawable.ic_more_24, contentDescription = "Browser options", glass = false, size = SMALL_PILL)
+        Box(Modifier.padding(start = gap)) {
+            KrewdIconPill(onClick = { menu = true }, icon = R.drawable.ic_more_24, contentDescription = "Browser options", size = SMALL_PILL)
             DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                 Text("Display", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp))
                 CheckRow("Horizontal (1080p)", !vertical, enabled = !viewOnly) { menu = false; onVertical(false) }

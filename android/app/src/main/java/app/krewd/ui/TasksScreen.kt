@@ -48,6 +48,10 @@ import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.material3.LocalContentColor
+import androidx.compose.foundation.layout.BoxScope
+import androidx.compose.runtime.saveable.listSaver
+import androidx.compose.runtime.Stable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -113,12 +117,11 @@ fun TasksScreen(
     viewModel: KrewdViewModel,
     padding: PaddingValues,
     listState: androidx.compose.foundation.lazy.LazyListState,
+    home: HomeAsk,
     onOpenSettings: () -> Unit,
 ) {
-    var asking by rememberSaveable { mutableStateOf(false) }
-    var askEngine by rememberSaveable { mutableStateOf<String?>(null) }
+    val ask: (String?) -> Unit = home::open
     var showEarlier by rememberSaveable { mutableStateOf(false) }
-    val ask: (String?) -> Unit = { askEngine = it; asking = true }
 
     val sessions = state.sessions.filter { !it.archived }
     val pending = state.approvals.filter { it.pending }
@@ -255,7 +258,8 @@ fun TasksScreen(
             }
         }
 
-        // The Ask Krewd bar floats above the nav bar; rows scroll full bleed behind both.
+        // The Ask Krewd bar ([HomeAskBar], drawn by the shell outside the glass source so it can be glass) floats
+        // above the nav bar; rows scroll full bleed behind both.
         val navRoom = MeniscusNavBarDefaults.BottomGap + MeniscusNavBarDefaults.Height
         // Transparent shield over the dock: taps on the gaps around the bar and nav bar must not reach rows behind;
         // drags still pass through, so the list scrolls from there.
@@ -267,19 +271,10 @@ fun TasksScreen(
                 .height(navRoom + ASK_BAR_GAP + ASK_BAR_HEIGHT)
                 .pointerInput(Unit) { detectTapGestures { } },
         )
-        AskBar(
-            text = state.newTaskText,
-            look = lookFor(viewModel.lastEngine() ?: state.engines.firstOrNull { it.isDefault }?.id, state.engines),
-            onClick = { ask(null) },
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .windowInsetsPadding(WindowInsets.navigationBars)
-                .padding(start = MeniscusNavBarDefaults.SideMargin, end = MeniscusNavBarDefaults.SideMargin, bottom = navRoom + ASK_BAR_GAP),
-        )
     }
     }
 
-    if (asking) NewTaskSheet(state, viewModel, askEngine, onDismiss = { asking = false }, onOpenSettings = onOpenSettings)
+    if (home.asking) NewTaskSheet(state, viewModel, home.engine, onDismiss = { home.asking = false }, onOpenSettings = onOpenSettings)
     reviewing?.let { id ->
         val proposal = state.proposals.firstOrNull { it.id == id }
         if (proposal == null) {
@@ -596,21 +591,45 @@ private fun dayOf(iso: String?): String? {
     }
 }
 
+/** Whether the new-task sheet is open on the Krewd tab, and for which agent; shared with its [HomeAskBar]. */
+@Stable
+class HomeAsk(asking: Boolean = false, engine: String? = null) {
+    var asking by mutableStateOf(asking)
+    var engine by mutableStateOf(engine)
+
+    fun open(engine: String?) {
+        this.engine = engine
+        asking = true
+    }
+}
+
 @Composable
-private fun AskBar(text: String, look: KrewdLook, onClick: () -> Unit, modifier: Modifier = Modifier) {
-    Surface(
-        onClick = onClick,
-        shape = CircleShape,
-        color = MaterialTheme.colorScheme.surfaceContainerHighest,
-        shadowElevation = 6.dp,
-        modifier = modifier.fillMaxWidth().height(ASK_BAR_HEIGHT),
+fun rememberHomeAsk(): HomeAsk = rememberSaveable(
+    saver = listSaver(save = { listOf(it.asking, it.engine.orEmpty()) }, restore = { HomeAsk(it[0] as Boolean, (it[1] as String).ifEmpty { null }) }),
+) { HomeAsk() }
+
+/** The Krewd tab's floating "Ask Krewd" bar, above the nav bar: glass over the tasks scrolling behind it. */
+@Composable
+fun BoxScope.HomeAskBar(state: UiState, viewModel: KrewdViewModel, home: HomeAsk) {
+    val navRoom = MeniscusNavBarDefaults.BottomGap + MeniscusNavBarDefaults.Height
+    val look = lookFor(viewModel.lastEngine() ?: state.engines.firstOrNull { it.isDefault }?.id, state.engines)
+    val text = state.newTaskText
+    KrewdPill(
+        onClick = { home.open(null) },
+        height = ASK_BAR_HEIGHT,
+        modifier = Modifier
+            .align(Alignment.BottomCenter)
+            .windowInsetsPadding(WindowInsets.navigationBars)
+            .padding(start = MeniscusNavBarDefaults.SideMargin, end = MeniscusNavBarDefaults.SideMargin, bottom = navRoom + ASK_BAR_GAP)
+            .fillMaxWidth(),
     ) {
         Row(Modifier.padding(horizontal = 10.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             CrewFace(look, FaceState.Idle, 38.dp, description = null)
             Text(
                 text.ifBlank { "Ask Krewd…" },
                 style = MaterialTheme.typography.bodyLarge,
-                color = if (text.isBlank()) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface,
+                // The content colour follows the glass (light or dark over what scrolls behind it).
+                color = if (text.isBlank()) LocalContentColor.current.copy(alpha = 0.7f) else LocalContentColor.current,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f),
