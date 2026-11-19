@@ -68,6 +68,7 @@ import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.CornerRadius
@@ -163,6 +164,7 @@ fun NoteTarget(blockId: String, plain: () -> String, content: @Composable () -> 
     val scrolls = remember { mutableStateListOf<ScrollState>() }
     val slide = remember { Animatable(0f) }
     val flash = remember { Animatable(0f) }
+    val pop = remember { Animatable(1f) }
     val bring = remember { BringIntoViewRequester() }
     val scope = rememberCoroutineScope()
     val haptic = LocalHapticFeedback.current
@@ -188,7 +190,9 @@ fun NoteTarget(blockId: String, plain: () -> String, content: @Composable () -> 
             Box(
                 Modifier
                     .align(Alignment.CenterStart)
-                    .offset { IntOffset((slide.value / 2 - 14.dp.toPx()).roundToInt(), 0) }
+                    // Rides just left of the sliding text: it comes in from off the screen's edge, never over the words.
+                    .offset { IntOffset((slide.value - 44.dp.toPx()).roundToInt(), 0) }
+                    .graphicsLayer { scaleX = pop.value; scaleY = pop.value }
                     .size(28.dp)
                     .background(accent.copy(alpha = 0.15f + 0.85f * (if (reached >= 1f) 1f else reached * 0.5f)), CircleShape),
                 contentAlignment = Alignment.Center,
@@ -197,7 +201,8 @@ fun NoteTarget(blockId: String, plain: () -> String, content: @Composable () -> 
                     painterResource(R.drawable.ic_reply_24),
                     contentDescription = null,
                     tint = if (reached >= 1f) MaterialTheme.colorScheme.onPrimary else accent,
-                    modifier = Modifier.size(16.dp),
+                    // Stands upright, turns as the swipe goes on, and lands level at the note point.
+                    modifier = Modifier.size(16.dp).graphicsLayer { rotationZ = 90f * (1f - reached) },
                 )
             }
         }
@@ -241,7 +246,13 @@ fun NoteTarget(blockId: String, plain: () -> String, content: @Composable () -> 
                                 val nowArmed = x >= notePx
                                 if (nowArmed != armed) {
                                     armed = nowArmed
-                                    if (armed) haptic.performHapticFeedback(HapticFeedbackType.GestureThresholdActivate)
+                                    if (armed) {
+                                        haptic.performHapticFeedback(HapticFeedbackType.GestureThresholdActivate)
+                                        scope.launch {
+                                            pop.animateTo(1.35f, tween(70))
+                                            pop.animateTo(1f, spring(dampingRatio = 0.3f, stiffness = Spring.StiffnessMediumLow))
+                                        }
+                                    }
                                 }
                             }
                             if (claimed) {
