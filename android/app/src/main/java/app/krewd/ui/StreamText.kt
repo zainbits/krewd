@@ -13,12 +13,13 @@ import androidx.compose.runtime.withFrameNanos
 import kotlinx.coroutines.flow.first
 
 /**
- * The reply that is streaming in right now, and what to call when it grows on screen by some pixels. Provided by
- * the chat: while you read above the bottom, it scrolls by the same amount, so the text you are on stays put.
+ * The reply that is streaming in right now, and whether to hold back new text. Provided by the chat: while you
+ * are scrolled up from the bottom, replies stop growing on screen (the list keeps its bottom edge still, so any
+ * growth would push what you read upward) and go on from where they stopped once you are back at the bottom.
  */
-class LiveReply(val key: Any?, val grew: (key: Any, px: Int) -> Unit)
+class LiveReply(val key: Any?, val paused: () -> Boolean)
 
-val LocalLiveReply = staticCompositionLocalOf { LiveReply(null) { _, _ -> } }
+val LocalLiveReply = staticCompositionLocalOf { LiveReply(null) { false } }
 
 /**
  * Streamed text as shown: how much of it, and how faded in each of its last characters is. [fade] takes a
@@ -35,15 +36,18 @@ private const val FADE_NS = 380_000_000L
  * battery). Text that is not live (history, a finished reply) shows in full at once.
  */
 @Composable
-fun rememberSmoothText(key: Any, text: String, live: Boolean): SmoothText {
+fun rememberSmoothText(key: Any, text: String, live: Boolean, paused: () -> Boolean): SmoothText {
     // A chat opened in the middle of a long reply shows what is there; a reply that starts now is let out.
     var shown by remember(key) { mutableStateOf(if (live && text.length < 200) 0 else text.length) }
     var fade by remember(key) { mutableStateOf<((Int) -> Float)?>(null) }
+    // Still letting text out: while live, and after the turn ends until what was held back is out.
+    var revealing by remember(key) { mutableStateOf(live) }
+    if (live && !revealing) revealing = true
+    if (!revealing && shown != text.length) shown = text.length
     val target by rememberUpdatedState(text)
-    if (!live && shown != text.length) shown = text.length
-    if (!live && fade != null) fade = null
-    LaunchedEffect(key, live) {
-        if (!live) return@LaunchedEffect
+    val isLive by rememberUpdatedState(live)
+    LaunchedEffect(key, revealing) {
+        if (!revealing) return@LaunchedEffect
         var pos = shown.toDouble()
         var seenLength = target.length
         var lastChunk = System.nanoTime()
@@ -53,11 +57,16 @@ fun rememberSmoothText(key: Any, text: String, live: Boolean): SmoothText {
         val steps = ArrayDeque<Pair<Int, Long>>()
         var opaque = shown // characters before this have finished fading in
         while (true) {
-            if (shown >= target.length && steps.isEmpty()) {
-                // Caught up and nothing fading: sleep until the next chunk instead of waking every frame.
+            if (steps.isEmpty() && (shown >= target.length || paused())) {
                 fade = null
-                snapshotFlow { target.length }.first { it > shown }
+                if (!isLive && shown >= target.length) {
+                    revealing = false
+                    return@LaunchedEffect
+                }
+                // Caught up or held back, nothing fading: sleep instead of waking every frame (battery).
+                snapshotFlow { !paused() && target.length > shown || !isLive && shown >= target.length }.first { it }
                 lastFrame = 0L
+                continue
             }
             withFrameNanos { now ->
                 val text = target
@@ -71,7 +80,7 @@ fun rememberSmoothText(key: Any, text: String, live: Boolean): SmoothText {
                 val dt = if (lastFrame == 0L) 1.0 / 60 else (now - lastFrame) / 1e9
                 lastFrame = now
                 val waiting = text.length - pos
-                if (waiting > 0) {
+                if (waiting > 0 && !paused()) {
                     val speed = maxOf(waiting / gap.coerceIn(0.12, 0.8), 30.0) // characters per second
                     pos = minOf(text.length.toDouble(), pos + speed * dt)
                 }
