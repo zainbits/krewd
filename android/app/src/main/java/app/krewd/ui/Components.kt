@@ -47,31 +47,17 @@ fun FloatingPill(modifier: Modifier = Modifier, content: @Composable () -> Unit)
     }
 }
 
-/**
- * The page's name at the top left and the connection beside it, two pieces of one liquid bar (glass over the
- * page when the glass switch is on). [onConnection] makes the connection chip open something (Settings).
- */
+/** The page's name at the top left: a liquid glass capsule over the page when the glass switch is on. */
 @Composable
-fun TitlePill(
-    title: String,
-    connection: Connection,
-    modifier: Modifier = Modifier,
-    wordmark: Boolean = false,
-    onConnection: (() -> Unit)? = null,
-) {
-    LiquidRow(modifier) {
-        KrewdPill {
-            Text(
-                text = title,
-                style = if (wordmark) MaterialTheme.typography.titleLarge.copy(fontFamily = KrewdType.wordmark, fontSize = 22.sp) else MaterialTheme.typography.titleLarge,
-                color = LocalContentColor.current,
-                maxLines = 1,
-                modifier = Modifier.padding(horizontal = ShellDimensions.TITLE_PILL_HORIZONTAL_PADDING).semantics { heading() },
-            )
-        }
-        KrewdPill(onClick = onConnection, height = 36.dp) {
-            Box(Modifier.padding(horizontal = 12.dp)) { ConnectionDot(connection) }
-        }
+fun TitlePill(title: String, modifier: Modifier = Modifier, wordmark: Boolean = false) {
+    KrewdPill(modifier) {
+        Text(
+            text = title,
+            style = if (wordmark) MaterialTheme.typography.titleLarge.copy(fontFamily = KrewdType.wordmark, fontSize = 22.sp) else MaterialTheme.typography.titleLarge,
+            color = LocalContentColor.current,
+            maxLines = 1,
+            modifier = Modifier.padding(horizontal = ShellDimensions.TITLE_PILL_HORIZONTAL_PADDING).semantics { heading() },
+        )
     }
 }
 

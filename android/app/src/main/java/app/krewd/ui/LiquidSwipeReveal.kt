@@ -65,26 +65,41 @@ import io.github.zainbits.vitreous.rememberGlassGroup
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlin.math.min
+import kotlin.math.sqrt
+import kotlin.math.ceil
+import kotlin.math.abs
+import kotlinx.coroutines.flow.first
+import androidx.compose.ui.MotionDurationScale
+import androidx.compose.runtime.withFrameNanos
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.MutableLongState
 import kotlin.math.roundToInt
 
 private val TILE_MAX_WIDTH = 64.dp
-private val TILE_GAP = 8.dp
+private val TILE_GAP = 12.dp
 private val TILE_ICON = 22.dp
 
-/** Same liquid as the chat's back button and title: closer than half of this, two pieces are one. */
-private val TILE_MERGE = 10.dp
+/**
+ * How close a drop and the card (or two drops) melt together: a neck joins them until they are half of this
+ * apart, so the neck snaps at the moment the drop pops ([BREAK_GAP]). The resting gap is wider, so open
+ * tiles stand apart.
+ */
+private val TILE_MERGE = 16.dp
+private val BREAK_GAP = 8.dp
+private val JOIN_GAP = 2.dp
 private val TILE_PULL = GlassPullSpec(maxPull = 12.dp)
 private const val OVERDRAG_RESISTANCE = 0.5f
 private const val OVERDRAG_LIMIT = 1.6f
 private const val FLING_VELOCITY = 1500f
 
 /**
- * Slide a row left and the card divides: its end splits off as Delete (or Stop), then Pin, tiles of the same
- * card on the same level, joined by a liquid neck that thins and pinches off (a haptic tick each). Sliding back
- * merges them into the card the same way. It is one Cohesion group drawn flat (no glass, no offscreen pass), so
- * the necks are the same smooth merge as the glass top bar's, and with the glass switch on the tiles stretch
- * under the finger like the app's other buttons. Releasing past half the reveal keeps them out; a tap on a tile
- * calls it with a function that slides the row back. TalkBack gets both as custom actions on the row.
+ * Slide a row left and the drops come out of the card's moving end: the card slides, its end bulges, a dip
+ * forms where a drop is pulled out, then the neck snaps and the drop pops off and springs to its spot at the
+ * right edge (Delete or Stop first, then Pin, a haptic tick each). Sliding back, the card's end swallows them
+ * again. Tiles are the card's height, on the same level. It is one Cohesion group drawn flat (no glass, no
+ * offscreen pass), so the necks are the same smooth merge as the glass top bar's; with the glass switch on the
+ * tiles also stretch under the finger. Releasing past half the reveal keeps them out; a tap on a tile calls it
+ * with a function that slides the row back. TalkBack gets both as custom actions on the row.
  *
  * @param cardCorner the card's largest right-hand corner, so the shape behind it never shows past its edge.
  */
@@ -108,9 +123,9 @@ internal fun LiquidSwipeReveal(
     // drag cancels that settle, so a late drag step can never cancel the spring back (which left the card stuck).
     var offset by remember { mutableFloatStateOf(0f) }
     val settling = remember { arrayOfNulls<Job>(1) }
-    var tilePx by remember { mutableFloatStateOf(0f) }
-    val gapPx = with(density) { TILE_GAP.toPx() }
-    val revealPx = SwipeTiles.reveal(tilePx, gapPx)
+    val drops = remember { SwipeDrops() }
+    val frame = remember { mutableLongStateOf(0L) }
+    var revealPx by remember { mutableFloatStateOf(0f) }
     val scope = rememberCoroutineScope()
     val settle = spring<Float>(dampingRatio = 0.78f, stiffness = Spring.StiffnessMediumLow)
     val shut = spring<Float>(dampingRatio = 0.85f, stiffness = 700f)
@@ -125,22 +140,22 @@ internal fun LiquidSwipeReveal(
     val group = rememberGlassGroup()
     val style = remember(cardColor) { GlassStyle(solidColor = cardColor) }
 
-    // A tick each time a tile pinches off the card (the neck snaps at half the merge distance).
-    LaunchedEffect(gapPx) {
-        val tiles = FloatArray(SwipeTiles.SIZE)
-        val pinch = with(density) { TILE_MERGE.toPx() } / 2f
-        var lastPin = 0f
-        var lastDelete = 0f
-        snapshotFlow { offset }.collect { o ->
-            if (tilePx <= 0f) return@collect
-            SwipeTiles.place(-o, 0f, tilePx, gapPx, tiles)
-            val pin = tiles[SwipeTiles.PIN_GAP]
-            val delete = tiles[SwipeTiles.DELETE_GAP]
-            if ((lastDelete <= pinch && delete > pinch) || (lastPin <= pinch && pin > pinch)) {
-                view.performHapticFeedback(HapticFeedbackConstants.SEGMENT_TICK)
+    // The drops' springs run while the card is out (or they are still settling), one step per frame.
+    LaunchedEffect(drops) {
+        var last = -1L
+        while (true) {
+            if (offset == 0f && drops.isAtRest) {
+                snapshotFlow { offset }.first { it != 0f }
+                last = -1L
             }
-            lastPin = pin
-            lastDelete = delete
+            val scale = coroutineContext[MotionDurationScale]?.scaleFactor ?: 1f
+            withFrameNanos { now ->
+                val dt = if (last < 0L || scale == 0f) 0f else ((now - last) / 1e9f / scale).coerceAtMost(0.05f)
+                last = now
+                val pops = if (scale == 0f) drops.snap(-offset) else drops.step(dt, -offset)
+                if (pops > 0) view.performHapticFeedback(HapticFeedbackConstants.SEGMENT_TICK)
+                frame.longValue = now
+            }
         }
     }
 
@@ -149,18 +164,28 @@ internal fun LiquidSwipeReveal(
             .fillMaxWidth()
             .height(IntrinsicSize.Min)
             .onSizeChanged { size ->
-                tilePx = min(with(density) { TILE_MAX_WIDTH.toPx() }, size.height.toFloat())
+                with(density) {
+                    drops.configure(
+                        width = size.width.toFloat(),
+                        tile = min(TILE_MAX_WIDTH.toPx(), size.height.toFloat()),
+                        gap = TILE_GAP.toPx(),
+                        breakGap = BREAK_GAP.toPx(),
+                        joinGap = JOIN_GAP.toPx(),
+                        squashLimit = 12.dp.toPx(),
+                    )
+                }
+                revealPx = drops.reveal
             }
             .glassGroup(backdrop = null, group = group, style = style, mode = GlassMode.Solid, merge = TILE_MERGE),
     ) {
         if (active) {
             SwipeTile(
-                index = 0, slide = { -offset }, tilePx = tilePx, gapPx = gapPx, group = group, stretchy = stretchy,
+                index = SwipeDrops.PIN, drops = drops, frame = frame, group = group, stretchy = stretchy,
                 icon = pinIcon, label = if (pinned) "Unpin" else "Pin", tint = colors.primary, enabled = isOpen,
                 onClick = { onPin(close) },
             )
             SwipeTile(
-                index = 1, slide = { -offset }, tilePx = tilePx, gapPx = gapPx, group = group, stretchy = stretchy,
+                index = SwipeDrops.DELETE, drops = drops, frame = frame, group = group, stretchy = stretchy,
                 icon = deleteIcon, label = deleteLabel, tint = colors.error, enabled = isOpen,
                 onClick = { onDelete(close) },
             )
@@ -178,14 +203,17 @@ internal fun LiquidSwipeReveal(
                     orientation = Orientation.Horizontal,
                     state = rememberDraggableState { delta ->
                         // Past the full reveal the card pulls like a rubber band: heavier the further it goes.
+                        val limit = drops.maxSlide
                         val over = (-offset - revealPx).coerceAtLeast(0f)
-                        val room = revealPx * (OVERDRAG_LIMIT - 1f)
+                        val room = (limit - revealPx).coerceAtLeast(1f)
                         val give = if (delta < 0f && over > 0f) OVERDRAG_RESISTANCE * (1f - over / room).coerceIn(0f, 1f) else 1f
-                        offset = (offset + delta * give).coerceIn(-revealPx * OVERDRAG_LIMIT, 0f)
+                        offset = (offset + delta * give).coerceIn(-limit, 0f)
                     },
                     onDragStarted = { settling[0]?.cancel() },
                     onDragStopped = { velocity ->
                         val open = velocity < -FLING_VELOCITY || (offset < -revealPx / 2f && velocity < FLING_VELOCITY)
+                        // Kept open: any drop still held by the card pops now and springs to its spot.
+                        if (open && drops.popAll() > 0) view.performHapticFeedback(HapticFeedbackConstants.SEGMENT_TICK)
                         settleTo(if (open) -revealPx else 0f, if (open) settle else shut, velocity)
                     },
                 )
@@ -195,13 +223,12 @@ internal fun LiquidSwipeReveal(
     }
 }
 
-/** One tile: a piece of the group sized and placed from the slide in the layout pass (no recomposition). */
+/** One drop: a piece of the group, sized and placed from [SwipeDrops] in the layout pass (no recomposition). */
 @Composable
 private fun BoxScope.SwipeTile(
     index: Int,
-    slide: () -> Float,
-    tilePx: Float,
-    gapPx: Float,
+    drops: SwipeDrops,
+    frame: MutableLongState,
     group: GlassGroupState,
     stretchy: Boolean,
     @DrawableRes icon: Int,
@@ -211,20 +238,22 @@ private fun BoxScope.SwipeTile(
     onClick: () -> Unit,
 ) {
     val pull = rememberGlassPullState(TILE_PULL)
-    val tiles = remember { FloatArray(SwipeTiles.SIZE) }
     val shape = RoundedCornerShape(ShellDimensions.CARD_CORNER)
     Box(
         Modifier
             .matchParentSize()
             .layout { measurable, constraints ->
+                frame.longValue
                 // The row's height comes from the card alone: when the row measures intrinsics the tile is 0 x 0.
                 val rowW = if (constraints.hasBoundedWidth) constraints.maxWidth else 0
                 val rowH = if (constraints.hasBoundedHeight) constraints.maxHeight else 0
-                SwipeTiles.place(slide(), rowW.toFloat(), tilePx, gapPx, tiles)
-                val x = tiles[index * 2]
-                val w = tiles[index * 2 + 1].roundToInt().coerceIn(0, rowW)
-                val placeable = measurable.measure(Constraints.fixed(w, rowH))
-                layout(rowW, rowH) { placeable.place(x.roundToInt(), 0) }
+                val squash = drops.squash(index)
+                val w = (drops.tile + squash).roundToInt().coerceIn(0, rowW)
+                val h = (rowH - squash * 0.6f).roundToInt().coerceIn(0, rowH)
+                val placeable = measurable.measure(Constraints.fixed(w, h))
+                layout(rowW, rowH) {
+                    placeable.place((drops.center(index) - w / 2f).roundToInt(), (rowH - h) / 2)
+                }
             }
             .glassPart(group, GlassShape.rounded(ShellDimensions.CARD_CORNER), if (stretchy) pull else null)
             .then(
@@ -246,8 +275,8 @@ private fun BoxScope.SwipeTile(
                 .matchParentSize()
                 .then(if (stretchy) Modifier.glassPullContent(pull) else Modifier)
                 .graphicsLayer {
-                    // The icon appears as the tile grows to full width, before it pinches off.
-                    val e = if (tilePx > 0f) ((size.width / tilePx - 0.45f) / 0.55f).coerceIn(0f, 1f) else 0f
+                    frame.longValue
+                    val e = drops.exposure(index)
                     alpha = e * e
                 },
             contentAlignment = Alignment.Center,
@@ -258,41 +287,135 @@ private fun BoxScope.SwipeTile(
 }
 
 /**
- * Where the tiles are when the card has slid [SwipeTiles.place]'s `slide` pixels left. The slid-out strip at the
- * row's end is shared out in two stages: Delete grows out of the card's end, then the neck between them opens and
- * pinches; then Pin grows between the card and Delete and pinches off the same way. Past the full reveal the
- * extra widens both tiles (the rubber band). Plain numbers, so it is tested on the JVM.
+ * The two drops of a swipe row, as springs (plain numbers, tested on the JVM). Positions are drop centres in
+ * pixels from the row's left edge; the card's right edge is `width - slide`.
+ *
+ * While the card holds a drop it sits in the card's end and lags behind as the card slides ([HOLD_LAG]), so it
+ * bulges out and a neck forms; once it is [breakGap] clear of the card the neck snaps: it pops (a stiff hold
+ * becomes a bouncy spring) and springs to its spot at the right edge. Delete pops first; Pin starts bulging
+ * from the card's end after it. Sliding back, the card touching a drop ([joinGap]) takes it again and swallows
+ * it as the card closes.
  */
-internal object SwipeTiles {
-    const val SIZE = 6
-    const val PIN_GAP = 4
-    const val DELETE_GAP = 5
+internal class SwipeDrops {
+    var width = 0f
+        private set
+    var tile = 0f
+        private set
+    private var gap = 0f
+    private var breakGap = 0f
+    private var joinGap = 0f
+    private var squashLimit = 0f
+    private val x = FloatArray(2)
+    private val v = FloatArray(2)
+    private val popped = BooleanArray(2)
 
-    /** How far the card slides to show both tiles at full size. */
-    fun reveal(tile: Float, gap: Float): Float = 2f * (tile + gap)
+    /** A popped drop has left the card since it popped; only then can the card take it back. */
+    private val clear = BooleanArray(2)
+    private var slide = 0f
 
-    /**
-     * Fills [out] with Pin's left and width, Delete's left and width (pixels from the row's left edge in a row
-     * [width] wide), then the card–Pin gap ([PIN_GAP]) and the Pin–Delete gap ([DELETE_GAP]).
-     */
-    fun place(slide: Float, width: Float, tile: Float, gap: Float, out: FloatArray) {
-        val s = slide.coerceAtLeast(0f)
-        val extra = (s - reveal(tile, gap)).coerceAtLeast(0f)
-        val base = s - extra
-        val first = min(base, tile + gap)
-        var delete = min(first, tile)
-        val deleteGap = first - delete
-        val second = base - first
-        var pin = min(second, tile)
-        val pinGap = second - pin
-        delete += extra / 2f
-        pin += extra / 2f
-        val deleteLeft = width - delete
-        out[0] = deleteLeft - deleteGap - pin
-        out[1] = pin
-        out[2] = deleteLeft
-        out[3] = delete
-        out[PIN_GAP] = pinGap
-        out[DELETE_GAP] = deleteGap
+    /** Slide that shows both drops at their spots, with the resting gap before the card. */
+    val reveal: Float get() = 2f * (tile + gap)
+
+    /** Slide at which Delete pops (Pin pops at twice this). */
+    val firstPop: Float get() = (tile + breakGap) / HOLD_LAG
+
+    /** How far a finger can drag the card: a little past the second pop. */
+    val maxSlide: Float get() = maxOf(reveal * 1.6f, 2f * firstPop + gap)
+
+    val isAtRest: Boolean get() = !popped[0] && !popped[1] && abs(v[0]) < REST_SPEED && abs(v[1]) < REST_SPEED
+
+    fun configure(width: Float, tile: Float, gap: Float, breakGap: Float, joinGap: Float, squashLimit: Float) {
+        val fresh = this.width == 0f
+        this.width = width
+        this.tile = tile
+        this.gap = gap
+        this.breakGap = breakGap
+        this.joinGap = joinGap
+        this.squashLimit = squashLimit
+        if (fresh || slide == 0f) snap(0f)
+    }
+
+    fun spot(i: Int): Float = width - tile / 2f - i * (tile + gap)
+
+    private fun edge(): Float = width - slide
+
+    /** Where the card holds drop [i]: in its end, bulging out as the card slides on. */
+    private fun held(i: Int): Float {
+        val out = HOLD_LAG * (slide - i * firstPop).coerceAtLeast(0f)
+        return edge() - tile / 2f + minOf(out, tile + breakGap + joinGap)
+    }
+
+    fun center(i: Int): Float = x[i]
+
+    fun isPopped(i: Int): Boolean = popped[i]
+
+    /** Squash and stretch along the motion as it pops and bounces (pixels added to its width). */
+    fun squash(i: Int): Float = abs((v[i] * SQUASH_PER_SPEED).coerceIn(-squashLimit, squashLimit))
+
+    /** 0 inside the card, 1 once it is fully out: the icon fades in with it. */
+    fun exposure(i: Int): Float =
+        if (popped[i]) 1f else (((x[i] + tile / 2f - edge()) - tile * 0.1f) / tile).coerceIn(0f, 1f)
+
+    /** Pops every drop the card still holds; returns how many popped. */
+    fun popAll(): Int {
+        var n = 0
+        for (i in 0..1) if (!popped[i]) { popped[i] = true; clear[i] = false; n++ }
+        return n
+    }
+
+    /** Jumps straight to where the springs would settle (animations off). */
+    fun snap(slide: Float): Int {
+        this.slide = slide
+        var n = 0
+        if (slide <= 0f) { popped[0] = false; popped[1] = false }
+        for (i in 0..1) {
+            if (!popped[i] && slide >= (i + 1) * firstPop) { popped[i] = true; clear[i] = true; n++ }
+            x[i] = if (popped[i]) spot(i) else held(i)
+            v[i] = 0f
+        }
+        return n
+    }
+
+    /** Advances the springs by [dt] seconds with the card slid [slide] pixels; returns how many drops popped. */
+    fun step(dt: Float, slide: Float): Int {
+        this.slide = slide.coerceAtLeast(0f)
+        if (width <= 0f || tile <= 0f) return 0
+        var pops = 0
+        val steps = ceil(dt / STEP).toInt().coerceAtLeast(1)
+        val h = dt / steps
+        repeat(steps) {
+            val e = edge()
+            // Pops: Delete first, Pin only after it. The neck snaps once the drop is breakGap clear of the card.
+            for (i in 0..1) {
+                if (popped[i] || (i == PIN && !popped[DELETE])) continue
+                if ((x[i] - tile / 2f) - e > breakGap) { popped[i] = true; clear[i] = true; pops++ }
+            }
+            for (i in 0..1) if (popped[i] && (x[i] - tile / 2f) - e > joinGap) clear[i] = true
+            // Re-joins: the card has to reach the drop (Pin first, Delete only after it).
+            if (popped[PIN] && clear[PIN] && e + joinGap >= x[PIN] - tile / 2f) popped[PIN] = false
+            if (popped[DELETE] && clear[DELETE] && !popped[PIN] && e + joinGap >= x[DELETE] - tile / 2f) popped[DELETE] = false
+            for (i in 0..1) {
+                val goal = if (popped[i]) spot(i) else held(i)
+                val k = if (popped[i]) FREE_STIFFNESS else HELD_STIFFNESS
+                val c = 2f * sqrt(k) * if (popped[i]) FREE_DAMPING else HELD_DAMPING
+                v[i] += (k * (goal - x[i]) - c * v[i]) * h
+                x[i] += v[i] * h
+            }
+        }
+        return pops
+    }
+
+    companion object {
+        const val DELETE = 0
+        const val PIN = 1
+        /** The drop moves this much of the card's slide out of the card's end while held. */
+        const val HOLD_LAG = 0.7f
+        private const val STEP = 1f / 240f
+        private const val HELD_STIFFNESS = 1800f
+        private const val HELD_DAMPING = 0.95f
+        private const val FREE_STIFFNESS = 420f
+        private const val FREE_DAMPING = 0.38f
+        private const val SQUASH_PER_SPEED = 0.018f
+        private const val REST_SPEED = 1f
     }
 }

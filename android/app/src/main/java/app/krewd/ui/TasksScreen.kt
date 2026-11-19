@@ -148,8 +148,8 @@ fun TasksScreen(
             contentPadding = padding,
             verticalArrangement = Arrangement.spacedBy(3.dp),
         ) {
-            // The name and the connection float at the top (the title pill); only why it is offline is here.
-            (state.connection as? Connection.Offline)?.let { offline -> item(key = "offline") { OfflineReason(offline.reason) } }
+            // The name floats at the top left (the title pill); the connection is part of the page, at its top right.
+            item(key = "header") { HomeHeader(state.connection, onOpenSettings) }
             item(key = "hero") {
                 Hero(
                     needs = pending.size + signIns.size + proposals.size,
@@ -304,14 +304,24 @@ private fun groupShape(i: Int, n: Int): RoundedCornerShape {
     return RoundedCornerShape(top, top, bottom, bottom)
 }
 
+/** The top of the page, level with the floating title: the connection at the right (tap for Settings). */
 @Composable
-private fun OfflineReason(reason: String) {
-    Text(
-        "Can't reach Krewd: $reason",
-        style = MaterialTheme.typography.bodySmall,
-        color = MaterialTheme.colorScheme.error,
-        modifier = Modifier.padding(start = 6.dp, top = 2.dp),
-    )
+private fun HomeHeader(connection: Connection, onOpenSettings: () -> Unit) {
+    Row(Modifier.fillMaxWidth().height(ShellDimensions.TITLE_PILL_HEIGHT), verticalAlignment = Alignment.CenterVertically) {
+        Spacer(Modifier.weight(1f))
+        // A flat pill that stretches like the rest (it is part of the page, so not glass).
+        KrewdPill(onClick = onOpenSettings, glass = false, height = 36.dp, color = MaterialTheme.colorScheme.surfaceContainer) {
+            Box(Modifier.padding(horizontal = 12.dp)) { ConnectionDot(connection) }
+        }
+    }
+    if (connection is Connection.Offline) {
+        Text(
+            "Can't reach Krewd: ${connection.reason}",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.error,
+            modifier = Modifier.padding(start = 6.dp, top = 6.dp),
+        )
+    }
 }
 
 /** The headline: how many need you, or how many are working, or all clear. */

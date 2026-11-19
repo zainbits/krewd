@@ -149,8 +149,9 @@ fun KrewdApp(viewModel: KrewdViewModel) {
         } else {
             val tab = Tab.entries[tabIndex]
             Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surface)) {
-                // The Krewd tab has the Ask Krewd bar above the nav bar.
-                val padding = if (tab == Tab.Tasks) shellContentPadding(extraBottom = ASK_BAR_HEIGHT + ASK_BAR_GAP) else shellContentPadding()
+                // The Krewd tab's page starts level with the title (its connection status sits at the top right of
+                // the page, beside the title) and has the Ask Krewd bar above the nav bar.
+                val padding = if (tab == Tab.Tasks) shellContentPadding(titlePill = false, extraBottom = ASK_BAR_HEIGHT + ASK_BAR_GAP) else shellContentPadding()
                 // The glass (nav bar, title) shows the tab screens. Not the browser: its page never passes under the
                 // glass and changes with every video frame, so it is drawn outside the recording, which then holds
                 // only the plain background (the same look for the nav bar, at no cost).
@@ -166,8 +167,6 @@ fun KrewdApp(viewModel: KrewdViewModel) {
                 if (tab != Tab.Browser) TitlePill(
                     title = if (tab == Tab.Tasks) "Krewd" else tab.title,
                     wordmark = tab == Tab.Tasks,
-                    connection = state.connection,
-                    onConnection = if (tab == Tab.Settings) null else ({ viewModel.navigate(NavTab.SETTINGS) }),
                     modifier = Modifier
                         .align(Alignment.TopStart)
                         .windowInsetsPadding(
