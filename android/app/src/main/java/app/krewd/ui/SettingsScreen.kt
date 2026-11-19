@@ -8,6 +8,10 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.width
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
@@ -199,12 +203,18 @@ fun SettingsScreen(state: UiState, viewModel: KrewdViewModel, padding: PaddingVa
                         Text("Clear", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         androidx.compose.material3.Slider(
                             value = state.glassClarity,
-                            onValueChange = { viewModel.setGlassClarity(it, save = false) },
+                            // Whole steps of 1 (0 to 100), so the slider and the number always agree.
+                            onValueChange = { viewModel.setGlassClarity(Math.round(it * 100f) / 100f, save = false) },
                             onValueChangeFinished = { viewModel.setGlassClarity(viewModel.state.value.glassClarity, save = true) },
                             enabled = glass.on,
                             modifier = Modifier.weight(1f),
                         )
                         Text("Tinted", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        ClarityField(
+                            clarity = state.glassClarity,
+                            enabled = glass.on,
+                            onChange = { viewModel.setGlassClarity(it, save = true) },
+                        )
                     }
                 }
             }
@@ -248,4 +258,33 @@ fun SettingsScreen(state: UiState, viewModel: KrewdViewModel, padding: PaddingVa
             }
         }
     }
+}
+
+/** The clarity as a whole number from 0 (clear) to 100 (tinted), for setting an exact value. */
+@Composable
+private fun ClarityField(clarity: Float, enabled: Boolean, onChange: (Float) -> Unit) {
+    val shown = Math.round(clarity * 100f).toString()
+    var text by remember { mutableStateOf(shown) }
+    var focused by remember { mutableStateOf(false) }
+    // Follow the slider while the field is not being typed in.
+    LaunchedEffect(shown, focused) { if (!focused) text = shown }
+    val focus = androidx.compose.ui.platform.LocalFocusManager.current
+    OutlinedTextField(
+        value = text,
+        onValueChange = { typed ->
+            val digits = typed.filter(Char::isDigit).take(3)
+            text = digits
+            digits.toIntOrNull()?.takeIf { it in 0..100 }?.let { onChange(it / 100f) }
+        },
+        enabled = enabled,
+        singleLine = true,
+        isError = text.toIntOrNull()?.let { it !in 0..100 } ?: false,
+        textStyle = MaterialTheme.typography.bodyMedium.copy(textAlign = androidx.compose.ui.text.style.TextAlign.Center),
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = androidx.compose.ui.text.input.ImeAction.Done),
+        keyboardActions = androidx.compose.foundation.text.KeyboardActions(onDone = { focus.clearFocus() }),
+        modifier = Modifier
+            .width(72.dp)
+            .onFocusChanged { focused = it.isFocused }
+            .semantics { contentDescription = "Glass clarity, 0 to 100" },
+    )
 }
