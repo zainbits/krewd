@@ -130,7 +130,13 @@ fun KrewdApp(viewModel: KrewdViewModel) {
         LocalKrewdGlass provides glass,
         LocalKrewdBackdrop provides if (glass.on) tabsBackdrop else null,
     ) {
-    ProvideGlass(clarity = state.glassClarity, dark = darkGlass, mode = GlassMode.Full) {
+    ProvideGlass(
+        clarity = state.glassClarity,
+        dark = darkGlass,
+        mode = GlassMode.Full,
+        tint = state.glassTint,
+        lightDistance = state.glassLightDistance,
+    ) {
     Box(Modifier.fillMaxSize()) {
     AnimatedContent(
         targetState = depth,

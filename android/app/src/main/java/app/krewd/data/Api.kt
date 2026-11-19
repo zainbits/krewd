@@ -94,7 +94,7 @@ class Prefs(context: Context) {
                 key == "saved_prompts" && v is org.json.JSONArray -> edit.putString(key, v.toString())
                 key == "last_engine" && v is String -> edit.putString(key, v)
                 key in BOOLEANS && v is Boolean -> edit.putBoolean(key, v)
-                (key == "pip_wide_width" || key == "pip_tall_height" || key == "glass_clarity") && v is Number -> edit.putFloat(key, v.toFloat())
+                key in FLOATS && v is Number -> edit.putFloat(key, v.toFloat())
             }
         }
         edit.apply()
@@ -191,6 +191,23 @@ class Prefs(context: Context) {
         synced("glass_clarity", value)
     }
 
+    /** The veil of clear glass (0 to 1); null = the theme's default. */
+    fun glassTint(): Float? = prefs.getFloat("glass_tint", -1f).takeIf { it >= 0f }
+
+    fun setGlassTint(value: Float?) {
+        val v = value ?: -1f
+        prefs.edit().putFloat("glass_tint", v).apply()
+        synced("glass_tint", v)
+    }
+
+    /** How far away the glass's corner lights are: 0 = close (highlights on the corners), 1 = far (even all round). */
+    fun glassLightDistance(): Float = prefs.getFloat("glass_light_distance", DEFAULT_GLASS_LIGHT_DISTANCE)
+
+    fun setGlassLightDistance(value: Float) {
+        prefs.edit().putFloat("glass_light_distance", value).apply()
+        synced("glass_light_distance", value)
+    }
+
     /** Code blocks open wrapped or scrolling sideways: the last pick of their Wrap button. */
     fun codeWrap(): Boolean = prefs.getBoolean("code_wrap", false)
 
@@ -244,9 +261,11 @@ class Prefs(context: Context) {
     companion object {
         private val SYNCED = setOf(
             "last_engine", "pip_wide_width", "pip_tall_height", "browser_high_quality", "browser_cursor", "swipe_to_note", "code_wrap",
-            "glass_clarity", "glass_enabled",
+            "glass_clarity", "glass_enabled", "glass_tint", "glass_light_distance",
         )
+        private val FLOATS = setOf("pip_wide_width", "pip_tall_height", "glass_clarity", "glass_tint", "glass_light_distance")
         const val DEFAULT_GLASS_CLARITY = 0.35f
+        const val DEFAULT_GLASS_LIGHT_DISTANCE = io.github.zainbits.cohesion.GlassStyle.DEFAULT_LIGHT_DISTANCE
         private val BOOLEANS = setOf("browser_high_quality", "browser_cursor", "swipe_to_note", "code_wrap", "glass_enabled")
     }
 }

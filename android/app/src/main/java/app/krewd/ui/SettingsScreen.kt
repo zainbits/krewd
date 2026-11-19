@@ -31,6 +31,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.luminance
+import io.github.zainbits.cohesion.GlassStyle
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -197,26 +199,38 @@ fun SettingsScreen(state: UiState, viewModel: KrewdViewModel, padding: PaddingVa
                         enabled = !glass.throttled,
                     )
                 }
-                Column {
-                    Text("Glass clarity", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurface.copy(alpha = if (glass.on) 1f else 0.38f))
-                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text("Clear", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        androidx.compose.material3.Slider(
-                            value = state.glassClarity,
-                            // Whole steps of 1 (0 to 100), so the slider and the number always agree.
-                            onValueChange = { viewModel.setGlassClarity(Math.round(it * 100f) / 100f, save = false) },
-                            onValueChangeFinished = { viewModel.setGlassClarity(viewModel.state.value.glassClarity, save = true) },
-                            enabled = glass.on,
-                            modifier = Modifier.weight(1f),
-                        )
-                        Text("Tinted", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        ClarityField(
-                            clarity = state.glassClarity,
-                            enabled = glass.on,
-                            onChange = { viewModel.setGlassClarity(it, save = true) },
-                        )
-                    }
-                }
+                GlassSlider(
+                    title = "Glass clarity",
+                    start = "Clear",
+                    end = "Tinted",
+                    value = state.glassClarity,
+                    enabled = glass.on,
+                    onValue = { v, save -> viewModel.setGlassClarity(v, save) },
+                )
+                val darkTheme = MaterialTheme.colorScheme.surface.luminance() < 0.5f
+                val tintDefault = if (darkTheme) GlassStyle.DEFAULT_TINT_DARK else GlassStyle.DEFAULT_TINT_LIGHT
+                GlassSlider(
+                    title = if (darkTheme) "Dark tint" else "White tint",
+                    start = "None",
+                    end = "Strong",
+                    value = state.glassTint ?: tintDefault,
+                    enabled = glass.on,
+                    onValue = { v, save -> viewModel.setGlassTint(v, save) },
+                    onReset = if (state.glassTint != null) ({ viewModel.setGlassTint(null, save = true) }) else null,
+                )
+                GlassSlider(
+                    title = "Light distance",
+                    start = "Close",
+                    end = "Far",
+                    value = state.glassLightDistance,
+                    enabled = glass.on,
+                    onValue = { v, save -> viewModel.setGlassLightDistance(v, save) },
+                    onReset = if (state.glassLightDistance != GlassStyle.DEFAULT_LIGHT_DISTANCE) {
+                        { viewModel.setGlassLightDistance(GlassStyle.DEFAULT_LIGHT_DISTANCE, save = true) }
+                    } else {
+                        null
+                    },
+                )
             }
         }
         item {
@@ -260,10 +274,51 @@ fun SettingsScreen(state: UiState, viewModel: KrewdViewModel, padding: PaddingVa
     }
 }
 
-/** The clarity as a whole number from 0 (clear) to 100 (tinted), for setting an exact value. */
+/**
+ * One glass setting: a slider in whole steps of 1 (0 to 100) and a box to type the exact number, so the two
+ * always agree. [onValue] gets save = false while dragging and true when the finger lifts or a number is typed.
+ */
 @Composable
-private fun ClarityField(clarity: Float, enabled: Boolean, onChange: (Float) -> Unit) {
-    val shown = Math.round(clarity * 100f).toString()
+private fun GlassSlider(
+    title: String,
+    start: String,
+    end: String,
+    value: Float,
+    enabled: Boolean,
+    onValue: (Float, Boolean) -> Unit,
+    onReset: (() -> Unit)? = null,
+) {
+    var latest by remember { mutableStateOf(value) }
+    latest = value
+    Column {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                title,
+                style = MaterialTheme.typography.bodyLarge,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = if (enabled) 1f else 0.38f),
+                modifier = Modifier.weight(1f),
+            )
+            if (onReset != null) TextButton(onClick = onReset, enabled = enabled) { Text("Default") }
+        }
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(start, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            androidx.compose.material3.Slider(
+                value = value,
+                onValueChange = { onValue(Math.round(it * 100f) / 100f, false) },
+                onValueChangeFinished = { onValue(latest, true) },
+                enabled = enabled,
+                modifier = Modifier.weight(1f),
+            )
+            Text(end, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            NumberField(value = value, enabled = enabled, label = "$title, 0 to 100", onChange = { onValue(it, true) })
+        }
+    }
+}
+
+/** A value from 0 to 1 as a whole number from 0 to 100, for setting an exact value. */
+@Composable
+private fun NumberField(value: Float, enabled: Boolean, label: String, onChange: (Float) -> Unit) {
+    val shown = Math.round(value * 100f).toString()
     var text by remember { mutableStateOf(shown) }
     var focused by remember { mutableStateOf(false) }
     // Follow the slider while the field is not being typed in.
@@ -285,6 +340,6 @@ private fun ClarityField(clarity: Float, enabled: Boolean, onChange: (Float) -> 
         modifier = Modifier
             .width(72.dp)
             .onFocusChanged { focused = it.isFocused }
-            .semantics { contentDescription = "Glass clarity, 0 to 100" },
+            .semantics { contentDescription = label },
     )
 }
