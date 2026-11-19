@@ -31,8 +31,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.luminance
-import io.github.zainbits.cohesion.GlassStyle
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -206,26 +204,6 @@ fun SettingsScreen(state: UiState, viewModel: KrewdViewModel, padding: PaddingVa
                     value = state.glassClarity,
                     enabled = glass.on,
                     onValue = { v, save -> viewModel.setGlassClarity(v, save) },
-                )
-                val darkTheme = MaterialTheme.colorScheme.surface.luminance() < 0.5f
-                val tintDefault = if (darkTheme) GlassStyle.DEFAULT_TINT_DARK else GlassStyle.DEFAULT_TINT_LIGHT
-                GlassSlider(
-                    title = if (darkTheme) "Dark tint" else "White tint",
-                    start = "None",
-                    end = "Strong",
-                    value = state.glassTint ?: tintDefault,
-                    enabled = glass.on,
-                    onValue = { v, save -> viewModel.setGlassTint(v, save) },
-                    onReset = if (state.glassTint != null) ({ viewModel.setGlassTint(null, save = true) }) else null,
-                )
-                GlassSlider(
-                    title = "Edge light",
-                    start = "Off",
-                    end = "Bright",
-                    value = state.glassEdgeLight ?: GlassStyle.forClarity(state.glassClarity, darkTheme).rim.coerceIn(0f, 1f),
-                    enabled = glass.on,
-                    onValue = { v, save -> viewModel.setGlassEdgeLight(v, save) },
-                    onReset = if (state.glassEdgeLight != null) ({ viewModel.setGlassEdgeLight(null, save = true) }) else null,
                 )
             }
         }

@@ -134,10 +134,6 @@ fun KrewdApp(viewModel: KrewdViewModel) {
         clarity = state.glassClarity,
         dark = darkGlass,
         mode = GlassMode.Full,
-        tint = state.glassTint,
-        // Always even light, the same on every side; the border's brightness is the owner's to set.
-        lightDistance = 1f,
-        edgeLight = state.glassEdgeLight,
     ) {
     Box(Modifier.fillMaxSize()) {
     AnimatedContent(

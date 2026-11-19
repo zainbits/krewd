@@ -191,24 +191,6 @@ class Prefs(context: Context) {
         synced("glass_clarity", value)
     }
 
-    /** The veil of clear glass (0 to 1); null = the theme's default. */
-    fun glassTint(): Float? = prefs.getFloat("glass_tint", -1f).takeIf { it >= 0f }
-
-    fun setGlassTint(value: Float?) {
-        val v = value ?: -1f
-        prefs.edit().putFloat("glass_tint", v).apply()
-        synced("glass_tint", v)
-    }
-
-    /** How bright the glass's light border is (0 to 1); null = the default for the clarity. */
-    fun glassEdgeLight(): Float? = prefs.getFloat("glass_edge_light", -1f).takeIf { it >= 0f }
-
-    fun setGlassEdgeLight(value: Float?) {
-        val v = value ?: -1f
-        prefs.edit().putFloat("glass_edge_light", v).apply()
-        synced("glass_edge_light", v)
-    }
-
     /** Code blocks open wrapped or scrolling sideways: the last pick of their Wrap button. */
     fun codeWrap(): Boolean = prefs.getBoolean("code_wrap", false)
 
@@ -262,9 +244,9 @@ class Prefs(context: Context) {
     companion object {
         private val SYNCED = setOf(
             "last_engine", "pip_wide_width", "pip_tall_height", "browser_high_quality", "browser_cursor", "swipe_to_note", "code_wrap",
-            "glass_clarity", "glass_enabled", "glass_tint", "glass_edge_light",
+            "glass_clarity", "glass_enabled",
         )
-        private val FLOATS = setOf("pip_wide_width", "pip_tall_height", "glass_clarity", "glass_tint", "glass_edge_light")
+        private val FLOATS = setOf("pip_wide_width", "pip_tall_height", "glass_clarity")
         const val DEFAULT_GLASS_CLARITY = 0.35f
         private val BOOLEANS = setOf("browser_high_quality", "browser_cursor", "swipe_to_note", "code_wrap", "glass_enabled")
     }

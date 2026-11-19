@@ -144,10 +144,6 @@ data class UiState(
     val codeWrap: Boolean = false,
     /** How see-through the chat's liquid glass is (Settings > Chat): 0 = ultra-clear, 1 = fully tinted. */
     val glassClarity: Float = Prefs.DEFAULT_GLASS_CLARITY,
-    /** Veil of clear glass; null = the theme's default. */
-    val glassTint: Float? = null,
-    /** Brightness of the glass's light border; null = the default for the clarity. */
-    val glassEdgeLight: Float? = null,
     /** Liquid glass and its stretch are on (Settings > Chat); battery saver turns them off regardless. */
     val glassEnabled: Boolean = true,
     /** Side sessions, sub-agents and messages to other chats that agents drafted, waiting for the owner. */
@@ -252,7 +248,7 @@ class KrewdViewModel(private val app: Application) {
             newTaskText = prefs.textDraft(NEW_DRAFT),
             draftChats = prefs.chatDraftKeys().associateWith { prefs.chatDraft(it) }.filterValues { it.isNotEmpty() },
             draftNotes = prefs.noteDraftKeys().associateWith { prefs.noteDraft(it) }.filterValues { it.isNotEmpty() },
-            swipeToNote = prefs.swipeToNote(), codeWrap = prefs.codeWrap(), glassClarity = prefs.glassClarity(), glassTint = prefs.glassTint(), glassEdgeLight = prefs.glassEdgeLight(), glassEnabled = prefs.glassEnabled(),
+            swipeToNote = prefs.swipeToNote(), codeWrap = prefs.codeWrap(), glassClarity = prefs.glassClarity(), glassEnabled = prefs.glassEnabled(),
         ),
     )
     val state: StateFlow<UiState> = _state.asStateFlow()
@@ -852,18 +848,6 @@ class KrewdViewModel(private val app: Application) {
     fun setGlassClarity(value: Float, save: Boolean) {
         _state.update { it.copy(glassClarity = value) }
         if (save) prefs.setGlassClarity(value)
-    }
-
-    /** Moves the glass tint slider (null = back to the theme's default); [save] when the finger lifts. */
-    fun setGlassTint(value: Float?, save: Boolean) {
-        _state.update { it.copy(glassTint = value) }
-        if (save) prefs.setGlassTint(value)
-    }
-
-    /** Moves the glass edge light slider (null = back to the default); [save] when the finger lifts. */
-    fun setGlassEdgeLight(value: Float?, save: Boolean) {
-        _state.update { it.copy(glassEdgeLight = value) }
-        if (save) prefs.setGlassEdgeLight(value)
     }
 
     fun setGlassEnabled(on: Boolean) {
@@ -2025,7 +2009,7 @@ class KrewdViewModel(private val app: Application) {
             _state.update {
                 it.copy(
                     highQuality = prefs.highQuality(), savedPrompts = prefs.savedPrompts(),
-                    swipeToNote = prefs.swipeToNote(), codeWrap = prefs.codeWrap(), glassClarity = prefs.glassClarity(), glassTint = prefs.glassTint(), glassEdgeLight = prefs.glassEdgeLight(), glassEnabled = prefs.glassEnabled(),
+                    swipeToNote = prefs.swipeToNote(), codeWrap = prefs.codeWrap(), glassClarity = prefs.glassClarity(), glassEnabled = prefs.glassEnabled(),
                 )
             }
         }
