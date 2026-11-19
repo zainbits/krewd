@@ -148,7 +148,8 @@ fun TasksScreen(
             contentPadding = padding,
             verticalArrangement = Arrangement.spacedBy(3.dp),
         ) {
-            item(key = "header") { HomeHeader(state.connection, onOpenSettings) }
+            // The name and the connection float at the top (the title pill); only why it is offline is here.
+            (state.connection as? Connection.Offline)?.let { offline -> item(key = "offline") { OfflineReason(offline.reason) } }
             item(key = "hero") {
                 Hero(
                     needs = pending.size + signIns.size + proposals.size,
@@ -213,6 +214,7 @@ fun TasksScreen(
                         look = lookFor(session.engine, state.engines),
                         engineName = state.engine(session.engine)?.name ?: session.engine,
                         shape = groupShape(i, running.size),
+                        corner = groupEndCorner(i, running.size),
                         viewModel = viewModel,
                     )
                 }
@@ -293,6 +295,9 @@ private fun localDate(iso: String): LocalDate? =
     runCatching { OffsetDateTime.parse(iso).atZoneSameInstant(ZoneId.systemDefault()).toLocalDate() }.getOrNull()
 
 /** Rounded at the ends of a group, tight in the middle (Material 3 Expressive lists). */
+/** The larger right-hand corner of [groupShape], for the swipe's shape behind the card. */
+private fun groupEndCorner(i: Int, n: Int): Dp = if (i == 0 || i == n - 1) 28.dp else 8.dp
+
 private fun groupShape(i: Int, n: Int): RoundedCornerShape {
     val top = if (i == 0) 28.dp else 8.dp
     val bottom = if (i == n - 1) 28.dp else 8.dp
@@ -300,34 +305,13 @@ private fun groupShape(i: Int, n: Int): RoundedCornerShape {
 }
 
 @Composable
-private fun HomeHeader(connection: Connection, onOpenSettings: () -> Unit) {
-    Row(Modifier.fillMaxWidth().padding(start = 6.dp, top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-        Text("Krewd", fontFamily = KrewdType.wordmark, fontSize = 22.sp, modifier = Modifier.weight(1f).semantics { heading() })
-        val (dot, label) = when (connection) {
-            is Connection.Online -> LocalKrewdColors.current.ok to "Online · ${connection.route}"
-            Connection.Connecting -> MaterialTheme.colorScheme.outline to "Connecting"
-            Connection.NotSetUp -> MaterialTheme.colorScheme.outline to "Set up"
-            is Connection.Offline -> MaterialTheme.colorScheme.error to "Offline"
-        }
-        Surface(
-            onClick = onOpenSettings,
-            shape = CircleShape,
-            color = MaterialTheme.colorScheme.surfaceContainer,
-        ) {
-            Row(Modifier.padding(horizontal = 12.dp, vertical = 7.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-                Box(Modifier.size(8.dp).background(dot, CircleShape))
-                Text(label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-        }
-    }
-    if (connection is Connection.Offline) {
-        Text(
-            "Can't reach Krewd: ${connection.reason}",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.error,
-            modifier = Modifier.padding(start = 6.dp, top = 6.dp),
-        )
-    }
+private fun OfflineReason(reason: String) {
+    Text(
+        "Can't reach Krewd: $reason",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.error,
+        modifier = Modifier.padding(start = 6.dp, top = 2.dp),
+    )
 }
 
 /** The headline: how many need you, or how many are working, or all clear. */
@@ -465,9 +449,9 @@ private fun NeedsCard(
 
 /** A running task: the agent's face and what it is doing now, the time and steps so far, and its browser tab. */
 @Composable
-private fun WorkingCard(session: SessionInfo, live: LiveInfo?, look: KrewdLook, engineName: String, shape: RoundedCornerShape, viewModel: KrewdViewModel) {
+private fun WorkingCard(session: SessionInfo, live: LiveInfo?, look: KrewdLook, engineName: String, shape: RoundedCornerShape, corner: Dp, viewModel: KrewdViewModel) {
     val face = faceOf(session, live)
-    SwipeToPinOrDelete(session, viewModel) {
+    SwipeToPinOrDelete(session, viewModel, corner) {
         Surface(onClick = { viewModel.openSession(session.id) }, shape = shape, color = MaterialTheme.colorScheme.surfaceContainer, modifier = Modifier.fillMaxWidth()) {
             Row(Modifier.padding(start = 18.dp, end = 14.dp, top = 14.dp, bottom = 14.dp), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -644,7 +628,7 @@ private fun TaskRowItem(session: SessionInfo, state: UiState, viewModel: KrewdVi
  * chat stays). A working task pinned now stays in Working while it runs and shows under Pinned once it stops.
  */
 @Composable
-private fun SwipeToPinOrDelete(session: SessionInfo, viewModel: KrewdViewModel, content: @Composable () -> Unit) {
+private fun SwipeToPinOrDelete(session: SessionInfo, viewModel: KrewdViewModel, corner: Dp = ShellDimensions.CARD_CORNER, content: @Composable () -> Unit) {
     var confirm by remember { mutableStateOf(false) }
     var close by remember { mutableStateOf<() -> Unit>({}) }
     val working = session.status == "running" || session.status == "waiting"
@@ -657,6 +641,7 @@ private fun SwipeToPinOrDelete(session: SessionInfo, viewModel: KrewdViewModel, 
         pinIcon = R.drawable.ic_pin_24,
         deleteIcon = if (working) R.drawable.ic_stop_24 else R.drawable.ic_delete_24,
         deleteLabel = if (working) "Stop" else "Delete",
+        cardCorner = corner,
         content = content,
     )
     if (confirm) {

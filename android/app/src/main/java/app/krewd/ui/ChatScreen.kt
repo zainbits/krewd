@@ -241,7 +241,7 @@ fun ChatScreen(state: UiState, viewModel: KrewdViewModel) {
     Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surface)) {
         // Rows that open and close keep their top edge in place (KeepInPlace.kt).
         val holdRow = remember(listState) { { key: Any -> listState.holdRow(key) } }
-        // Everything the glass shows through: the chat and the browser picture-in-picture.
+        // Everything the glass shows through: the chat.
         Box(Modifier.fillMaxSize().then(if (glassOn) Modifier.glassSource(backdrop) else Modifier).background(MaterialTheme.colorScheme.surface)) {
         CompositionLocalProvider(LocalHoldRow provides holdRow, LocalNoteHooks provides noteHooks, LocalLiveReply provides liveReply) {
         LazyColumn(
@@ -274,6 +274,9 @@ fun ChatScreen(state: UiState, viewModel: KrewdViewModel) {
             }
         }
         }
+        }
+        // The picture-in-picture stays between the title bar and the composer, so it is drawn outside what the
+        // glass records: its live video would otherwise redraw the glass every frame.
         val pipTab = state.pipTab(session)
         if (session != null && pipTab != null) {
             val tab = state.browser?.tabs?.firstOrNull { it.id == pipTab } ?: session.browserTab?.takeIf { it.id == pipTab }
@@ -289,8 +292,6 @@ fun ChatScreen(state: UiState, viewModel: KrewdViewModel) {
             )
         }
 
-        }
-
         // Scrolled up from the bottom: one tap goes back down and follows the reply again.
         androidx.compose.animation.AnimatedVisibility(
             visible = !follow && rowCount > 0,
@@ -298,11 +299,14 @@ fun ChatScreen(state: UiState, viewModel: KrewdViewModel) {
             exit = androidx.compose.animation.fadeOut() + androidx.compose.animation.scaleOut(targetScale = 0.8f),
             modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = bottomStack + 12.dp),
         ) {
-            androidx.compose.material3.SmallFloatingActionButton(
-                onClick = { follow = true; scope.launch { listState.scrollToItem(0) } },
-                containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
-            ) {
-                Icon(painterResource(R.drawable.ic_arrow_down_24), contentDescription = "Go to latest")
+            // A round glass button over the chat (plain while the glass is off).
+            CompositionLocalProvider(LocalKrewdBackdrop provides if (glassOn) backdrop else null) {
+                KrewdIconPill(
+                    onClick = { follow = true; scope.launch { listState.scrollToItem(0) } },
+                    icon = R.drawable.ic_arrow_down_24,
+                    contentDescription = "Go to latest",
+                    size = 44.dp,
+                )
             }
         }
 
@@ -657,9 +661,7 @@ private fun Composer(
                 },
             )
             Row(verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = onAttach) {
-                    Icon(painterResource(R.drawable.ic_add_24), contentDescription = "Attach files")
-                }
+                StretchIconButton(onClick = onAttach, icon = R.drawable.ic_add_24, contentDescription = "Attach files")
                 if (steps != null) {
                     Spacer(Modifier.width(2.dp))
                     Surface(onClick = onSteps, shape = RoundedCornerShape(12.dp), color = colors.surfaceContainerHighest) {
@@ -720,7 +722,8 @@ private fun Composer(
                 }
                 val stop = busy && !hasDraft
                 val enabled = stop || ((text.isNotBlank() || ready) && !uploading)
-                Surface(
+                // A solid round button that stretches like the glass pieces (no glass of its own).
+                KrewdIconPill(
                     onClick = {
                         if (stop) {
                             onStop()
@@ -729,21 +732,17 @@ private fun Composer(
                             value = TextFieldValue("") // send() also forgets the saved draft
                         }
                     },
+                    icon = if (stop) R.drawable.ic_stop_24 else R.drawable.ic_send_24,
+                    contentDescription = if (stop) "Stop" else if (uploading) "Uploading" else "Send",
                     enabled = enabled,
-                    shape = CircleShape,
+                    glass = false,
+                    size = 40.dp,
+                    iconSize = 20.dp,
                     color = if (enabled) colors.primary else colors.surfaceContainerHighest,
-                    contentColor = if (enabled) colors.onPrimary else colors.onSurfaceVariant.copy(alpha = 0.6f),
+                    contentColor = if (enabled) colors.onPrimary else colors.onSurfaceVariant,
                     // 10 dp from the right edge, like the bottom (6 dp padding + the row's 4 dp).
-                    modifier = Modifier.padding(end = 4.dp).size(40.dp),
-                ) {
-                    Box(contentAlignment = Alignment.Center) {
-                        Icon(
-                            painterResource(if (stop) R.drawable.ic_stop_24 else R.drawable.ic_send_24),
-                            contentDescription = if (stop) "Stop" else if (uploading) "Uploading" else "Send",
-                            modifier = Modifier.size(20.dp),
-                        )
-                    }
-                }
+                    modifier = Modifier.padding(end = 4.dp),
+                )
             }
         }
         }

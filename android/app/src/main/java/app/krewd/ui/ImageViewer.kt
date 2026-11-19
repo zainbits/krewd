@@ -1,5 +1,8 @@
 package app.krewd.ui
 
+import io.github.zainbits.cohesion.rememberGlassBackdrop
+import io.github.zainbits.cohesion.glassSource
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animate
 import androidx.compose.animation.fadeIn
@@ -143,6 +146,9 @@ private fun ImageViewer(
         var zoomed by remember { mutableStateOf(false) }
         var drag by remember { mutableFloatStateOf(0f) }
         val dismissAt = with(LocalDensity.current) { 140.dp.toPx() }
+        // The bar's buttons are glass over the picture (a still image, so the glass redraws only on a swipe or zoom).
+        val glassOn = LocalKrewdGlass.current.on
+        val backdrop = rememberGlassBackdrop()
         Box(
             Modifier
                 .fillMaxSize()
@@ -153,7 +159,7 @@ private fun ImageViewer(
                 userScrollEnabled = !zoomed,
                 beyondViewportPageCount = 1,
                 key = { images[it].key },
-                modifier = Modifier.fillMaxSize(),
+                modifier = Modifier.fillMaxSize().then(if (glassOn) Modifier.glassSource(backdrop) else Modifier),
             ) { page ->
                 ZoomablePage(
                     ref = images[page],
@@ -175,8 +181,8 @@ private fun ImageViewer(
                         .padding(horizontal = 4.dp, vertical = 4.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    IconButton(onClick = onDismiss) {
-                        Icon(painterResource(R.drawable.ic_close_24), contentDescription = "Close", tint = Color.White)
+                    CompositionLocalProvider(LocalKrewdBackdrop provides if (glassOn) backdrop else null) {
+                        BarButton(glassOn, R.drawable.ic_close_24, "Close", onDismiss)
                     }
                     Column(Modifier.weight(1f).padding(horizontal = 4.dp)) {
                         Text(ref.name, color = Color.White, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -184,11 +190,12 @@ private fun ImageViewer(
                             Text("${pager.currentPage + 1} of ${images.size}", color = Color.White.copy(alpha = 0.7f), style = MaterialTheme.typography.labelSmall)
                         }
                     }
-                    IconButton(onClick = { onShare(ref) }) {
-                        Icon(painterResource(R.drawable.ic_share_24), contentDescription = "Share", tint = Color.White)
-                    }
-                    IconButton(onClick = { onSave(ref) }) {
-                        Icon(painterResource(R.drawable.ic_download_24), contentDescription = "Save to the phone", tint = Color.White)
+                    CompositionLocalProvider(LocalKrewdBackdrop provides if (glassOn) backdrop else null) {
+                        // Share and Save side by side: one liquid pair.
+                        LiquidRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            BarButton(glassOn, R.drawable.ic_share_24, "Share") { onShare(ref) }
+                            BarButton(glassOn, R.drawable.ic_download_24, "Save to the phone") { onSave(ref) }
+                        }
                     }
                 }
             }
@@ -209,6 +216,16 @@ private fun ImageViewer(
                 }
             }
         }
+    }
+}
+
+/** A top-bar button: glass over the picture, or the plain white icon while the glass is off. */
+@Composable
+private fun BarButton(glass: Boolean, @androidx.annotation.DrawableRes icon: Int, label: String, onClick: () -> Unit) {
+    if (glass) {
+        KrewdIconPill(onClick = onClick, icon = icon, contentDescription = label, size = 44.dp, modifier = Modifier.padding(horizontal = 2.dp))
+    } else {
+        IconButton(onClick = onClick) { Icon(painterResource(icon), contentDescription = label, tint = Color.White) }
     }
 }
 

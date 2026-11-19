@@ -124,7 +124,11 @@ fun KrewdApp(viewModel: KrewdViewModel) {
     // The tab screens are what the nav bar's glass (Meniscus) shows through.
     val tabsBackdrop = rememberGlassBackdrop()
     val navGlass = remember(tabsBackdrop, glass.on) { if (glass.on) MeniscusGlass(tabsBackdrop) else null }
-    CompositionLocalProvider(LocalCodeWrap provides CodeWrap(state.codeWrap, viewModel::setCodeWrap), LocalKrewdGlass provides glass) {
+    CompositionLocalProvider(
+        LocalCodeWrap provides CodeWrap(state.codeWrap, viewModel::setCodeWrap),
+        LocalKrewdGlass provides glass,
+        LocalKrewdBackdrop provides if (glass.on) tabsBackdrop else null,
+    ) {
     ProvideGlass(clarity = state.glassClarity, dark = darkGlass, mode = GlassMode.Full) {
     Box(Modifier.fillMaxSize()) {
     AnimatedContent(
@@ -145,19 +149,25 @@ fun KrewdApp(viewModel: KrewdViewModel) {
         } else {
             val tab = Tab.entries[tabIndex]
             Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surface)) {
-                // The Krewd tab has its own header (no title pill) and the Ask Krewd bar above the nav bar.
-                val padding = if (tab == Tab.Tasks) shellContentPadding(titlePill = false, extraBottom = ASK_BAR_HEIGHT + ASK_BAR_GAP) else shellContentPadding()
+                // The Krewd tab has the Ask Krewd bar above the nav bar.
+                val padding = if (tab == Tab.Tasks) shellContentPadding(extraBottom = ASK_BAR_HEIGHT + ASK_BAR_GAP) else shellContentPadding()
+                // The glass (nav bar, title) shows the tab screens. Not the browser: its page never passes under the
+                // glass and changes with every video frame, so it is drawn outside the recording, which then holds
+                // only the plain background (the same look for the nav bar, at no cost).
                 Box(Modifier.fillMaxSize().then(if (glass.on) Modifier.glassSource(tabsBackdrop) else Modifier).background(MaterialTheme.colorScheme.surface)) {
                     when (tab) {
                         Tab.Tasks -> TasksScreen(state, viewModel, padding, tasksList, onOpenSettings = { viewModel.navigate(NavTab.SETTINGS) })
                         Tab.Routines -> RoutinesScreen(state, viewModel, padding, routinesList)
-                        Tab.Browser -> BrowserScreen(state, viewModel, landscape)
+                        Tab.Browser -> {}
                         Tab.Settings -> SettingsScreen(state, viewModel, padding, settingsList)
                     }
                 }
-                if (tab != Tab.Browser && tab != Tab.Tasks) TitlePill(
-                    title = tab.title,
+                if (tab == Tab.Browser) BrowserScreen(state, viewModel, landscape)
+                if (tab != Tab.Browser) TitlePill(
+                    title = if (tab == Tab.Tasks) "Krewd" else tab.title,
+                    wordmark = tab == Tab.Tasks,
                     connection = state.connection,
+                    onConnection = if (tab == Tab.Settings) null else ({ viewModel.navigate(NavTab.SETTINGS) }),
                     modifier = Modifier
                         .align(Alignment.TopStart)
                         .windowInsetsPadding(
@@ -190,6 +200,7 @@ fun KrewdApp(viewModel: KrewdViewModel) {
         UndoPill(
             text = "Deleted \u201c${deleted.title}\u201d",
             onUndo = viewModel::undoDelete,
+            glass = depth == 0,
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .windowInsetsPadding(WindowInsets.navigationBars)
@@ -203,7 +214,8 @@ fun KrewdApp(viewModel: KrewdViewModel) {
     }
     if (state.restarting) {
         RestartingPill(
-            Modifier
+            glass = depth == 0,
+            modifier = Modifier
                 .align(Alignment.TopCenter)
                 .windowInsetsPadding(WindowInsets.statusBars)
                 .padding(top = ShellDimensions.TITLE_PILL_TOP_GAP + ShellDimensions.TITLE_PILL_HEIGHT + 8.dp),
@@ -216,8 +228,8 @@ fun KrewdApp(viewModel: KrewdViewModel) {
 
 /** "Deleted" with Undo, for the 3 seconds before a delete reaches the server. */
 @Composable
-private fun UndoPill(text: String, onUndo: () -> Unit, modifier: Modifier = Modifier) {
-    FloatingPill(modifier) {
+private fun UndoPill(text: String, onUndo: () -> Unit, glass: Boolean, modifier: Modifier = Modifier) {
+    KrewdPill(modifier, glass = glass) {
         Row(
             Modifier.padding(start = 20.dp, end = 6.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -237,8 +249,8 @@ private fun UndoPill(text: String, onUndo: () -> Unit, modifier: Modifier = Modi
 
 /** While the server restarts: a pill at the top until it answers again (the chat history is on the server). */
 @Composable
-private fun RestartingPill(modifier: Modifier = Modifier) {
-    FloatingPill(modifier) {
+private fun RestartingPill(glass: Boolean, modifier: Modifier = Modifier) {
+    KrewdPill(modifier, glass = glass) {
         Row(
             Modifier.padding(horizontal = 16.dp),
             horizontalArrangement = Arrangement.spacedBy(10.dp),

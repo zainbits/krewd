@@ -1,5 +1,9 @@
 package app.krewd.ui
 
+import io.github.zainbits.cohesion.rememberGlassBackdrop
+import io.github.zainbits.cohesion.glassSource
+import androidx.compose.material3.LocalContentColor
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -285,21 +289,31 @@ private fun TabsRow(state: UiState, actions: TabActions, onNew: () -> Unit, onAl
     val listState = rememberLazyListState()
     val selected = tabs.indexOfFirst { it.id == state.browserTabId }
     LaunchedEffect(selected) { if (selected >= 0) listState.animateScrollToItem(selected) }
-    Row(
-        Modifier.fillMaxWidth().padding(start = 10.dp, end = 10.dp, top = 6.dp),
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
+    // The tabs scroll under the New tab and tab-count buttons, which are glass over the strip alone: it changes
+    // only when you swipe it or a tab opens or closes, never with the page's video.
+    val glassOn = LocalKrewdGlass.current.on
+    val strip = rememberGlassBackdrop()
+    Box(Modifier.fillMaxWidth().padding(top = 6.dp)) {
         LazyRow(
             state = listState,
-            modifier = Modifier.weight(1f),
+            modifier = Modifier
+                .fillMaxWidth()
+                .then(if (glassOn) Modifier.glassSource(strip).background(MaterialTheme.colorScheme.surface) else Modifier),
             horizontalArrangement = Arrangement.spacedBy(6.dp),
-            contentPadding = PaddingValues(vertical = 2.dp),
+            // The last tab can scroll fully clear of the buttons.
+            contentPadding = PaddingValues(start = 10.dp, end = 10.dp + SMALL_PILL * 2 + 12.dp, top = 2.dp, bottom = 2.dp),
         ) {
             items(tabs, key = { it.id }) { tab -> TabPill(tab, tab.id == state.browserTabId, actions) }
         }
-        SmallPill { IconButton(onClick = onNew, modifier = Modifier.size(SMALL_PILL)) { Icon(painterResource(R.drawable.ic_add_24), contentDescription = "New tab") } }
-        TabCount(tabs.size, onAll)
+        CompositionLocalProvider(LocalKrewdBackdrop provides if (glassOn) strip else null) {
+            LiquidRow(
+                Modifier.align(Alignment.CenterEnd).padding(end = 10.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                KrewdIconPill(onClick = onNew, icon = R.drawable.ic_add_24, contentDescription = "New tab", size = SMALL_PILL)
+                TabCount(tabs.size, onAll)
+            }
+        }
     }
 }
 
@@ -317,10 +331,10 @@ private fun SmallPill(modifier: Modifier = Modifier, color: Color = MaterialThem
 }
 
 @Composable
-private fun TabCount(count: Int, onClick: () -> Unit) {
-    SmallPill(Modifier.width(SMALL_PILL).clickable(onClick = onClick)) {
+private fun TabCount(count: Int, onClick: () -> Unit, glass: Boolean = true) {
+    KrewdPill(Modifier.width(SMALL_PILL), onClick = onClick, glass = glass, height = SMALL_PILL, contentAlignment = Alignment.Center) {
         Box(
-            Modifier.border(1.5.dp, MaterialTheme.colorScheme.onSurface, RoundedCornerShape(5.dp)).padding(horizontal = 4.dp),
+            Modifier.border(1.5.dp, LocalContentColor.current, RoundedCornerShape(5.dp)).padding(horizontal = 4.dp),
         ) { Text(if (count > 99) "∞" else count.toString(), style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold) }
     }
 }
@@ -408,15 +422,17 @@ private fun AllTabs(state: UiState, actions: TabActions, onNew: () -> Unit, onDi
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                FloatingPill { IconButton(onClick = onDismiss) { Icon(painterResource(R.drawable.ic_chevron_left_24), contentDescription = "Back") } }
-                FloatingPill(Modifier.weight(1f)) {
-                    Text(
-                        if (tabs.size == 1) "1 tab" else "${tabs.size} tabs",
-                        style = MaterialTheme.typography.titleMedium,
-                        modifier = Modifier.padding(horizontal = 20.dp),
-                    )
+                LiquidRow(Modifier.fillMaxWidth(), glass = false) {
+                    KrewdIconPill(onClick = onDismiss, icon = R.drawable.ic_chevron_left_24, contentDescription = "Back")
+                    KrewdPill(Modifier.weight(1f)) {
+                        Text(
+                            if (tabs.size == 1) "1 tab" else "${tabs.size} tabs",
+                            style = MaterialTheme.typography.titleMedium,
+                            modifier = Modifier.padding(horizontal = 20.dp),
+                        )
+                    }
+                    KrewdIconPill(onClick = onNew, icon = R.drawable.ic_add_24, contentDescription = "New tab")
                 }
-                FloatingPill { IconButton(onClick = onNew) { Icon(painterResource(R.drawable.ic_add_24), contentDescription = "New tab") } }
             }
             LazyVerticalGrid(
                 columns = GridCells.Fixed(2),
@@ -539,19 +555,30 @@ private fun ControlsRow(
         horizontalArrangement = Arrangement.spacedBy(6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        if (landscape) TabCount(tabCount, onAll)
-        SmallPill {
-            Row {
-                IconButton(onClick = { onNav("back") }, enabled = !viewOnly, modifier = Modifier.size(SMALL_PILL)) { Icon(painterResource(R.drawable.ic_chevron_left_24), contentDescription = "Back") }
-                IconButton(onClick = { onNav("forward") }, enabled = !viewOnly, modifier = Modifier.size(SMALL_PILL)) { Icon(painterResource(R.drawable.ic_chevron_right_24), contentDescription = "Forward") }
-                IconButton(onClick = { onNav("reload") }, enabled = !viewOnly, modifier = Modifier.size(SMALL_PILL)) { Icon(painterResource(R.drawable.ic_refresh_24), contentDescription = "Reload", modifier = Modifier.size(20.dp)) }
+        // Nothing passes under these bars, so they are flat pieces (no glass) that still stretch. Back, Forward and
+        // Reload touch: one liquid bar whose buttons bulge into each other when pressed.
+        if (landscape) TabCount(tabCount, onAll, glass = false)
+        if (LocalKrewdGlass.current.on) {
+            LiquidRow(glass = false, horizontalArrangement = Arrangement.spacedBy(0.dp)) {
+                KrewdIconPill(onClick = { onNav("back") }, icon = R.drawable.ic_chevron_left_24, contentDescription = "Back", enabled = !viewOnly, size = SMALL_PILL)
+                KrewdIconPill(onClick = { onNav("forward") }, icon = R.drawable.ic_chevron_right_24, contentDescription = "Forward", enabled = !viewOnly, size = SMALL_PILL)
+                KrewdIconPill(onClick = { onNav("reload") }, icon = R.drawable.ic_refresh_24, contentDescription = "Reload", enabled = !viewOnly, size = SMALL_PILL, iconSize = 20.dp)
+            }
+        } else {
+            // Glass off: the plain single pill with three buttons.
+            SmallPill {
+                Row {
+                    IconButton(onClick = { onNav("back") }, enabled = !viewOnly, modifier = Modifier.size(SMALL_PILL)) { Icon(painterResource(R.drawable.ic_chevron_left_24), contentDescription = "Back") }
+                    IconButton(onClick = { onNav("forward") }, enabled = !viewOnly, modifier = Modifier.size(SMALL_PILL)) { Icon(painterResource(R.drawable.ic_chevron_right_24), contentDescription = "Forward") }
+                    IconButton(onClick = { onNav("reload") }, enabled = !viewOnly, modifier = Modifier.size(SMALL_PILL)) { Icon(painterResource(R.drawable.ic_refresh_24), contentDescription = "Reload", modifier = Modifier.size(20.dp)) }
+                }
             }
         }
-        SmallPill(Modifier.weight(1f)) {
+        KrewdPill(Modifier.weight(1f), glass = false, height = SMALL_PILL) {
             UrlField(tab, editing && !viewOnly, { if (!viewOnly) onEditing(it) }, onGo, onCopy)
         }
         Box {
-            SmallPill { IconButton(onClick = { menu = true }, modifier = Modifier.size(SMALL_PILL)) { Icon(painterResource(R.drawable.ic_more_24), contentDescription = "Browser options") } }
+            KrewdIconPill(onClick = { menu = true }, icon = R.drawable.ic_more_24, contentDescription = "Browser options", glass = false, size = SMALL_PILL)
             DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                 Text("Display", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp))
                 CheckRow("Horizontal (1080p)", !vertical, enabled = !viewOnly) { menu = false; onVertical(false) }

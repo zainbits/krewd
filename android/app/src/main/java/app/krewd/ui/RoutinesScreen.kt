@@ -1,5 +1,9 @@
 package app.krewd.ui
 
+import io.github.zainbits.cohesion.rememberGlassBackdrop
+import io.github.zainbits.cohesion.glassSource
+import androidx.compose.material3.LocalContentColor
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -219,6 +223,9 @@ fun RoutineScreen(state: UiState, viewModel: KrewdViewModel, listState: androidx
     var confirmDelete by remember { mutableStateOf(false) }
     val bars = WindowInsets.statusBars.union(WindowInsets.displayCutout).asPaddingValues()
     val bottom = WindowInsets.systemBars.asPaddingValues().calculateBottomPadding()
+    // The page scrolls under its glass top bar.
+    val glassOn = LocalKrewdGlass.current.on
+    val backdrop = rememberGlassBackdrop()
     Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surface)) {
         if (routine != null) {
             val online = state.connection is Connection.Online
@@ -226,7 +233,9 @@ fun RoutineScreen(state: UiState, viewModel: KrewdViewModel, listState: androidx
             val busy = chat?.isBusy == true || routine.lastRun?.active == true
             LazyColumn(
                 state = listState,
-                modifier = Modifier.fillMaxSize(),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .then(if (glassOn) Modifier.glassSource(backdrop).background(MaterialTheme.colorScheme.surface) else Modifier),
                 contentPadding = PaddingValues(
                     start = ShellDimensions.CONTENT_HORIZONTAL_PADDING,
                     end = ShellDimensions.CONTENT_HORIZONTAL_PADDING,
@@ -347,14 +356,16 @@ fun RoutineScreen(state: UiState, viewModel: KrewdViewModel, listState: androidx
                 }
             }
         }
-        RoutineTopBar(
-            title = routine?.title ?: "Routine",
-            enabled = routine?.enabled,
-            onBack = viewModel::closeRoutine,
-            onEdit = { editing = true },
-            onToggle = { routine?.let { viewModel.setRoutineEnabled(it.id, !it.enabled) } },
-            onDelete = { confirmDelete = true },
-        )
+        CompositionLocalProvider(LocalKrewdBackdrop provides if (glassOn && routine != null) backdrop else null) {
+            RoutineTopBar(
+                title = routine?.title ?: "Routine",
+                enabled = routine?.enabled,
+                onBack = viewModel::closeRoutine,
+                onEdit = { editing = true },
+                onToggle = { routine?.let { viewModel.setRoutineEnabled(it.id, !it.enabled) } },
+                onDelete = { confirmDelete = true },
+            )
+        }
     }
     if (editing && routine != null) {
         RoutineEditor(state, viewModel, existing = routine, onDismiss = { editing = false }, onSaved = { editing = false })
@@ -391,25 +402,20 @@ private fun RoutineTopBar(
     onDelete: () -> Unit,
 ) {
     var menuOpen by remember { mutableStateOf(false) }
-    Row(
+    // Back, title and options: one liquid glass bar, like the chat's.
+    LiquidRow(
         modifier = Modifier
             .fillMaxWidth()
             .windowInsetsPadding(WindowInsets.statusBars.union(WindowInsets.displayCutout).only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal))
             .padding(horizontal = ShellDimensions.TITLE_PILL_START_MARGIN)
             .padding(top = ShellDimensions.TITLE_PILL_TOP_GAP),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-        verticalAlignment = Alignment.CenterVertically,
     ) {
-        FloatingPill {
-            IconButton(onClick = onBack) { Icon(painterResource(R.drawable.ic_chevron_left_24), contentDescription = "Back") }
-        }
-        FloatingPill(Modifier.weight(1f)) {
-            Text(title, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(horizontal = 16.dp))
+        KrewdIconPill(onClick = onBack, icon = R.drawable.ic_chevron_left_24, contentDescription = "Back")
+        KrewdPill(Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.titleMedium, color = LocalContentColor.current, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(horizontal = 16.dp))
         }
         if (enabled != null) Box {
-            FloatingPill {
-                IconButton(onClick = { menuOpen = true }) { Icon(painterResource(R.drawable.ic_more_24), contentDescription = "Routine options") }
-            }
+            KrewdIconPill(onClick = { menuOpen = true }, icon = R.drawable.ic_more_24, contentDescription = "Routine options")
             DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
                 DropdownMenuItem(text = { Text("Edit") }, onClick = { menuOpen = false; onEdit() })
                 DropdownMenuItem(text = { Text(if (enabled) "Pause" else "Resume") }, onClick = { menuOpen = false; onToggle() })

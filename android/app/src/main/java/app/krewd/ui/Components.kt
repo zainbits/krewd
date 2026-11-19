@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -24,7 +25,10 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import app.krewd.Connection
+import app.krewd.KrewdType
+import app.krewd.LocalKrewdColors
 import app.krewd.constants.ShellDimensions
 
 /** Floating pill used for titles and toolbars. */
@@ -43,22 +47,30 @@ fun FloatingPill(modifier: Modifier = Modifier, content: @Composable () -> Unit)
     }
 }
 
+/**
+ * The page's name at the top left and the connection beside it, two pieces of one liquid bar (glass over the
+ * page when the glass switch is on). [onConnection] makes the connection chip open something (Settings).
+ */
 @Composable
-fun TitlePill(title: String, connection: Connection, modifier: Modifier = Modifier) {
-    FloatingPill(modifier) {
-        Row(
-            modifier = Modifier.padding(horizontal = ShellDimensions.TITLE_PILL_HORIZONTAL_PADDING),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
+fun TitlePill(
+    title: String,
+    connection: Connection,
+    modifier: Modifier = Modifier,
+    wordmark: Boolean = false,
+    onConnection: (() -> Unit)? = null,
+) {
+    LiquidRow(modifier) {
+        KrewdPill {
             Text(
                 text = title,
-                style = MaterialTheme.typography.titleLarge,
-                color = MaterialTheme.colorScheme.onSurface,
+                style = if (wordmark) MaterialTheme.typography.titleLarge.copy(fontFamily = KrewdType.wordmark, fontSize = 22.sp) else MaterialTheme.typography.titleLarge,
+                color = LocalContentColor.current,
                 maxLines = 1,
-                modifier = Modifier.semantics { heading() },
+                modifier = Modifier.padding(horizontal = ShellDimensions.TITLE_PILL_HORIZONTAL_PADDING).semantics { heading() },
             )
-            ConnectionDot(connection)
+        }
+        KrewdPill(onClick = onConnection, height = 36.dp) {
+            Box(Modifier.padding(horizontal = 12.dp)) { ConnectionDot(connection) }
         }
     }
 }
@@ -66,14 +78,14 @@ fun TitlePill(title: String, connection: Connection, modifier: Modifier = Modifi
 @Composable
 fun ConnectionDot(connection: Connection) {
     val (color, label) = when (connection) {
-        is Connection.Online -> MaterialTheme.colorScheme.primary to connection.route
+        is Connection.Online -> LocalKrewdColors.current.ok to "Online · ${connection.route}"
         Connection.Connecting -> MaterialTheme.colorScheme.outline to "Connecting"
         Connection.NotSetUp -> MaterialTheme.colorScheme.outline to "Set up"
         is Connection.Offline -> MaterialTheme.colorScheme.error to "Offline"
     }
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
         Box(Modifier.size(8.dp).background(color, CircleShape))
-        Text(label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(label, style = MaterialTheme.typography.labelMedium, color = LocalContentColor.current.copy(alpha = 0.78f))
     }
 }
 
