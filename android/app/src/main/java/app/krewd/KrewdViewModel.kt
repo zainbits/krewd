@@ -153,7 +153,12 @@ data class UiState(
     val outbox: List<OutgoingMessage> = emptyList(),
     /** Picture-in-picture picked by hand from the Browser screen, per session. */
     val pipTabs: Map<String, String> = emptyMap(),
-    /** "session:tab" pairs whose picture-in-picture the owner closed. */
+    /**
+     * Picture-in-picture the agents' browser use opened, per session: it opens when a turn first uses the
+     * browser and stays, after the turn too, until the owner closes it.
+     */
+    val pipUsed: Map<String, String> = emptyMap(),
+    /** "session:tab" pairs whose picture-in-picture the owner closed; the next turn that browses opens it again. */
     val pipHidden: Set<String> = emptySet(),
     val highQuality: Boolean = false,
     val restarting: Boolean = false,
@@ -190,9 +195,21 @@ data class UiState(
     /** The tab to show as picture-in-picture on a chat: picked by hand, or the one its agent is using right now. */
     fun pipTab(session: SessionInfo?): String? {
         session ?: return null
-        val tab = pipTabs[session.id] ?: session.browserTab?.id?.takeIf { session.isBusy } ?: return null
-        return tab.takeUnless { "${session.id}:$it" in pipHidden }
+        return pipTabs[session.id] ?: pipUsed[session.id]
     }
+}
+
+/**
+ * Opens the picture-in-picture of chats whose running turn has used the browser, unless the owner closed it
+ * (the app was not running when the turn's `browser` event came, or it reconnected).
+ */
+private fun UiState.withBrowserUse(updated: List<SessionInfo>): UiState {
+    val open = updated.filter { s ->
+        val tab = s.browserTab?.id
+        s.browserInTurn && tab != null && s.id !in pipUsed && "${s.id}:$tab" !in pipHidden
+    }
+    if (open.isEmpty()) return this
+    return copy(pipUsed = pipUsed + open.associate { it.id to it.browserTab!!.id })
 }
 
 const val NEW_DRAFT = "new"
@@ -381,7 +398,7 @@ class KrewdViewModel(private val app: Application) {
                         routines = routines,
                         restarting = if (wasRestarting) false else it.restarting,
                         message = if (wasRestarting) "Krewd is back" else it.message,
-                    )
+                    ).withBrowserUse(sessions)
                 }
                 if (wasRestarting) sawDown = false
                 syncLive(sessions)
@@ -430,7 +447,7 @@ class KrewdViewModel(private val app: Application) {
         when (event.kind) {
             "session" -> {
                 val session = SessionInfo.from(event.payload)
-                _state.update { s -> s.copy(sessions = upsert(s.sessions, session)) }
+                _state.update { s -> s.copy(sessions = upsert(s.sessions, session)).withBrowserUse(listOf(session)) }
                 if (session.isBusy) liveTask(session).also { it.title = session.title } else live.remove(sid)
                 pushLive()
             }
@@ -456,7 +473,14 @@ class KrewdViewModel(private val app: Application) {
                 val next = if (thought) "Thinking" else "Writing the reply"
                 if (it.activity != next && !it.waiting) { it.activity = next; it.kind = if (thought) "think" else "write"; pushLive() }
             }
-            "browser" -> live[sid].also { if (_state.value.navTab == NavTab.BROWSER) refreshTabs() }?.let {
+            "browser" -> live[sid].also {
+                if (_state.value.navTab == NavTab.BROWSER) refreshTabs()
+                // A turn used the browser: open its picture-in-picture, even one the owner closed in an earlier turn.
+                val tabId = event.payload.optString("id")
+                if (tabId.isNotEmpty()) _state.update { s ->
+                    s.copy(pipUsed = s.pipUsed + (sid to tabId), pipHidden = s.pipHidden.filterNot { it.startsWith("$sid:") }.toSet())
+                }
+            }?.let {
                 val host = event.payload.optString("url").substringAfter("://").substringBefore('/').removePrefix("www.")
                 it.activity = "Browsing $host"
                 it.kind = "read"
@@ -1641,7 +1665,7 @@ class KrewdViewModel(private val app: Application) {
 
     /** Hides a chat's picture-in-picture. The task keeps running. */
     fun hidePip(sessionId: String, tabId: String) =
-        _state.update { s -> s.copy(pipHidden = s.pipHidden + "$sessionId:$tabId", pipTabs = s.pipTabs - sessionId) }
+        _state.update { s -> s.copy(pipHidden = s.pipHidden + "$sessionId:$tabId", pipTabs = s.pipTabs - sessionId, pipUsed = s.pipUsed - sessionId) }
 
     /** Streams [tabId] live into [frame], for whichever screen shows it. One stream at a time. */
     fun watchTab(tabId: String) {

@@ -20,6 +20,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.SegmentedButton
@@ -260,12 +261,13 @@ fun ListChoice(choices: List<ConfigChoice>, selected: String?, enabled: Boolean,
     }
 }
 
-/** An ordered scale (effort): a stepped slider with the choice names under it. */
+/** An ordered scale (effort): a stepped slider with the choice names under it, in [LocalContentColor]. */
 @Composable
-private fun StepChoice(option: ConfigOption, selected: String?, enabled: Boolean, onPick: (String) -> Unit) {
+fun StepChoice(option: ConfigOption, selected: String?, enabled: Boolean, onPick: (String) -> Unit) {
     val n = option.choices.size
     val index = option.choices.indexOfFirst { it.value == selected }.coerceAtLeast(0)
     var drag by remember(index) { mutableFloatStateOf(index.toFloat()) }
+    val ink = LocalContentColor.current
     Column(Modifier.padding(horizontal = 4.dp)) {
         Slider(
             value = drag,
@@ -285,7 +287,7 @@ private fun StepChoice(option: ConfigOption, selected: String?, enabled: Boolean
                     c.name,
                     style = MaterialTheme.typography.labelMedium,
                     fontWeight = if (i == drag.roundToInt()) FontWeight.Bold else FontWeight.Normal,
-                    color = if (i == drag.roundToInt()) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = if (i == drag.roundToInt()) ink else ink.copy(alpha = 0.7f),
                     textAlign = when (i) { 0 -> TextAlign.Start; n - 1 -> TextAlign.End; else -> TextAlign.Center },
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -294,7 +296,7 @@ private fun StepChoice(option: ConfigOption, selected: String?, enabled: Boolean
             }
         }
         option.choices.getOrNull(drag.roundToInt())?.description?.takeIf { it.isNotBlank() }?.let {
-            Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 6.dp))
+            Text(it, style = MaterialTheme.typography.bodySmall, color = ink.copy(alpha = 0.7f), modifier = Modifier.padding(top = 6.dp))
         }
     }
 }

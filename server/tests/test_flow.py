@@ -344,6 +344,35 @@ async def test_stop_drops_queued_messages(hub):
     assert [e["kind"] for e in events].count("turn_start") == 1
 
 
+async def test_each_turn_announces_its_first_browser_use_once(hub):
+    """The app shows the picture-in-picture on a `browser` event: once per turn that uses the browser, even
+    for the tab the chat had before, and not again for the same tab in the same turn."""
+    session = await hub.create_session("slow")
+    sid = uuid.UUID(session["id"])
+    await wait_for(hub, sid, "turn_start")
+    tab = {"id": "T9", "url": "https://example.com/a", "title": "A"}
+    for _ in range(3):
+        assert await hub.browser_activity(dict(tab)) == sid
+
+    async def count() -> int:
+        return [e["kind"] for e in await hub.events(0, sid)].count("browser")
+
+    await asyncio.sleep(0.2)
+    assert await count() == 1
+    assert (await hub.get_session(sid))["browser_in_turn"] is True
+    await hub.cancel(sid)
+    await wait_for(hub, sid, "turn_end")
+    assert (await hub.get_session(sid))["browser_in_turn"] is False
+    await hub.send(sid, "slow")
+    deadline = asyncio.get_running_loop().time() + 5
+    while not hub._busy(sid) and asyncio.get_running_loop().time() < deadline:
+        await asyncio.sleep(0.05)
+    assert await hub.browser_activity(dict(tab)) == sid
+    await asyncio.sleep(0.2)
+    assert await count() == 2
+    await hub.cancel(sid)
+
+
 async def test_tabs_reach_the_agent_and_browser_activity_links_the_session(hub):
     session = await hub.create_session("slow", tabs=[{"id": "T1", "title": "Flights", "url": "https://example.com/f"}])
     sid = uuid.UUID(session["id"])

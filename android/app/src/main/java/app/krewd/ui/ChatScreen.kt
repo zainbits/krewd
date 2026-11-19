@@ -1,5 +1,16 @@
 package app.krewd.ui
 
+import androidx.compose.material3.FilledTonalButton
+import io.github.zainbits.cohesion.GlassStyle
+import androidx.compose.ui.graphics.luminance
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.ui.draw.rotate
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.Spring
+import androidx.activity.compose.BackHandler
 import androidx.compose.material3.LocalContentColor
 import io.github.zainbits.cohesion.GlassBackdrop
 import io.github.zainbits.vitreous.GlassGroup
@@ -167,6 +178,9 @@ fun ChatScreen(state: UiState, viewModel: KrewdViewModel) {
 
     val bars = WindowInsets.statusBars.union(WindowInsets.displayCutout).asPaddingValues()
     var settingsOpen by rememberSaveable(state.openSessionId) { mutableStateOf(false) }
+    // The title opened into its quick panel (models, effort); back, or a tap on the chat, folds it.
+    var titleOpen by rememberSaveable(state.openSessionId) { mutableStateOf(false) }
+    BackHandler(enabled = titleOpen) { titleOpen = false }
     // This chat's sign-in requests, at the bottom of the chat (also under Needs you on the Krewd tab).
     val signIns = state.secrets.filter { it.pending && it.sessionId == session?.id }
     var filling by remember(state.openSessionId) { mutableStateOf<String?>(null) }
@@ -219,6 +233,10 @@ fun ChatScreen(state: UiState, viewModel: KrewdViewModel) {
     // Liquid glass (Vitreous): the chat list is what the title bar and composer show through.
     val backdrop = rememberGlassBackdrop()
     val glassOn = LocalKrewdGlass.current.on
+    // The list scrolls in code too (following a reply); tell the glass, so its text colour keeps up.
+    LaunchedEffect(listState, glassOn) {
+        if (glassOn) snapshotFlow { listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset }.collect { backdrop.notifyChanged() }
+    }
     Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surface)) {
         // Rows that open and close keep their top edge in place (KeepInPlace.kt).
         val holdRow = remember(listState) { { key: Any -> listState.holdRow(key) } }
@@ -288,8 +306,21 @@ fun ChatScreen(state: UiState, viewModel: KrewdViewModel) {
         }
 
         signIns.firstOrNull { it.id == filling }?.let { ask -> SecretSheet(ask = ask, viewModel = viewModel, onDismiss = { filling = null }) }
+        if (titleOpen) {
+            // A tap anywhere on the chat folds the title's panel (and does nothing else).
+            Box(
+                Modifier.fillMaxSize().clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) {
+                    titleOpen = false
+                },
+            )
+        }
         Column(Modifier.align(Alignment.TopCenter).fillMaxWidth()) {
-            ChatTopBar(state, viewModel, backdrop, onSettings = { settingsOpen = true })
+            ChatTopBar(
+                state, viewModel, backdrop,
+                expanded = titleOpen,
+                onToggle = { titleOpen = !titleOpen },
+                onSettings = { titleOpen = false; settingsOpen = true },
+            )
             if (session != null) {
                 LinkedChatsStrip(
                     state, session, onOpen = viewModel::openSession,
@@ -362,6 +393,8 @@ fun ChatScreen(state: UiState, viewModel: KrewdViewModel) {
                     onSteps = { scope.launch { listState.animateScrollToItem(0) } },
                     contextUsed = session.contextUsed,
                     contextSize = session.contextSize,
+                    onCompact = if (state.connection is Connection.Online) ({ viewModel.compact(session.id) }) else null,
+                    compactNative = session.compact == "native",
                     steering = state.engine(session.engine)?.steering == true,
                     commands = commands,
                     files = files,
@@ -383,12 +416,20 @@ fun ChatScreen(state: UiState, viewModel: KrewdViewModel) {
 }
 
 /**
- * Back, and the title with the agent and its settings under it; tap the title for the chat's settings.
- * Both are liquid glass in one pass (Vitreous): the chat scrolls visibly behind them, and either can be
- * pulled like liquid; pulled together they merge.
+ * Back, and the title with the agent and its settings under it. Tapping the title opens it into the quick
+ * panel (models, effort, all settings; [ChatQuickPanel]) and tapping it again folds it. On liquid glass
+ * (Vitreous) both pieces draw in one pass, can be pulled like liquid, merge when pulled together, and
+ * their text turns dark over bright content.
  */
 @Composable
-private fun ChatTopBar(state: UiState, viewModel: KrewdViewModel, backdrop: GlassBackdrop, onSettings: () -> Unit) {
+private fun ChatTopBar(
+    state: UiState,
+    viewModel: KrewdViewModel,
+    backdrop: GlassBackdrop,
+    expanded: Boolean,
+    onToggle: () -> Unit,
+    onSettings: () -> Unit,
+) {
     val session = state.openSession
     val barModifier = Modifier
         .fillMaxWidth()
@@ -398,42 +439,57 @@ private fun ChatTopBar(state: UiState, viewModel: KrewdViewModel, backdrop: Glas
         )
         .padding(horizontal = ShellDimensions.TITLE_PILL_START_MARGIN)
         .padding(top = ShellDimensions.TITLE_PILL_TOP_GAP)
+    val titleBody: @Composable () -> Unit = {
+        Column(Modifier.animateContentSize(spring(dampingRatio = 0.86f, stiffness = Spring.StiffnessMediumLow))) {
+            ChatTitle(state, expanded)
+            if (expanded && session != null) ChatQuickPanel(state, viewModel, session, onAllSettings = onSettings)
+        }
+    }
     if (!LocalKrewdGlass.current.on) {
         // Glass off (Settings, battery saver or heat): the plain pills, no stretch.
-        Row(barModifier, horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(barModifier, horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.Top) {
             FloatingPill {
                 IconButton(onClick = viewModel::closeSession) {
                     Icon(painterResource(R.drawable.ic_chevron_left_24), contentDescription = "Back")
                 }
             }
             Surface(
-                onClick = onSettings,
+                onClick = onToggle,
                 enabled = session != null,
                 shape = RoundedCornerShape(26.dp),
                 color = MaterialTheme.colorScheme.surfaceContainerHigh,
                 border = androidx.compose.foundation.BorderStroke(ShellDimensions.PILL_BORDER_WIDTH, MaterialTheme.colorScheme.outlineVariant),
                 shadowElevation = 2.dp,
                 modifier = Modifier.weight(1f),
-            ) { ChatTitle(state) }
+            ) { titleBody() }
         }
         return
     }
-    CompositionLocalProvider(LocalContentColor provides MaterialTheme.colorScheme.onSurface) {
+    // Open, the panel is tinted more, so its controls read over a busy chat.
+    val clarity by animateFloatAsState(
+        if (expanded) maxOf(state.glassClarity, 0.75f) else state.glassClarity,
+        animationSpec = tween(260),
+        label = "panelClarity",
+    )
+    val darkGlass = MaterialTheme.colorScheme.surface.luminance() < 0.5f
+    val style = remember(clarity, darkGlass) { GlassStyle.forClarity(clarity, darkGlass) }
     GlassGroup(
         backdrop = backdrop,
         modifier = barModifier,
+        style = style,
         merge = 10.dp,
     ) { glassRow ->
     Row(
         modifier = glassRow,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
-        verticalAlignment = Alignment.CenterVertically,
+        verticalAlignment = Alignment.Top,
     ) {
         GlassIconButton(
             onClick = viewModel::closeSession,
             backdrop = backdrop,
             contentDescription = "Back",
             size = ShellDimensions.TITLE_PILL_HEIGHT,
+            style = style,
         ) {
             Icon(painterResource(R.drawable.ic_chevron_left_24), contentDescription = null)
         }
@@ -441,39 +497,52 @@ private fun ChatTopBar(state: UiState, viewModel: KrewdViewModel, backdrop: Glas
             backdrop = backdrop,
             modifier = Modifier.weight(1f),
             shape = GlassShape.rounded(26.dp),
+            style = style,
             elastic = true,
-            onClick = onSettings,
+            onClick = onToggle,
             enabled = session != null,
-        ) { ChatTitle(state) }
-    }
+        ) { titleBody() }
     }
     }
 }
 
-/** The chat's title, with the agent and its settings under it. */
+/** The chat's title, with the agent and its settings under it, and the caret that turns down when open. */
 @Composable
-private fun ChatTitle(state: UiState) {
+private fun ChatTitle(state: UiState, expanded: Boolean) {
     val session = state.openSession
-    Column(Modifier.padding(start = 16.dp, end = 12.dp, top = 6.dp, bottom = 7.dp)) {
-        Text(
-            session?.title ?: "Task",
-            style = MaterialTheme.typography.titleMedium,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
-        if (session != null) {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                Box(Modifier.size(8.dp).background(lookFor(session.engine, state.engines).color, CircleShape))
-                Text(
-                    chatSubtitle(state, session),
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f, fill = false),
-                )
-                Icon(painterResource(R.drawable.ic_chevron_right_24), contentDescription = "Chat settings", tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(16.dp))
+    val ink = LocalContentColor.current
+    val turn by animateFloatAsState(if (expanded) 90f else 0f, animationSpec = tween(240), label = "caret")
+    Row(
+        Modifier.heightIn(min = ShellDimensions.TITLE_PILL_HEIGHT).padding(start = 16.dp, end = 10.dp, top = 6.dp, bottom = 7.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(
+                session?.title ?: "Task",
+                style = MaterialTheme.typography.titleMedium,
+                maxLines = if (expanded) 2 else 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (session != null) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Box(Modifier.size(8.dp).background(lookFor(session.engine, state.engines).color, CircleShape))
+                    Text(
+                        chatSubtitle(state, session),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = ink.copy(alpha = 0.7f),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
             }
+        }
+        if (session != null) {
+            Icon(
+                painterResource(R.drawable.ic_chevron_right_24),
+                contentDescription = if (expanded) "Close chat options" else "Chat options",
+                tint = ink.copy(alpha = 0.75f),
+                modifier = Modifier.padding(start = 6.dp).size(24.dp).rotate(turn),
+            )
         }
     }
 }
@@ -502,6 +571,8 @@ private fun Composer(
     onSteps: () -> Unit,
     contextUsed: Long?,
     contextSize: Long?,
+    onCompact: (() -> Unit)?,
+    compactNative: Boolean,
     steering: Boolean,
     commands: List<AgentCommand>,
     files: List<PendingFile>,
@@ -540,7 +611,10 @@ private fun Composer(
     val hasDraft = text.isNotBlank() || files.isNotEmpty() || hasTabs
     val colors = MaterialTheme.colorScheme
     ComposerShell(backdrop, modifier.fillMaxWidth()) {
-        CompositionLocalProvider(LocalContentColor provides colors.onSurface) {
+        // On glass the text follows what is behind it (Vitreous: dark over bright content).
+        val textColor = if (LocalKrewdGlass.current.on) LocalContentColor.current else colors.onSurface
+        val hintColor = if (LocalKrewdGlass.current.on) textColor.copy(alpha = 0.62f) else colors.onSurfaceVariant
+        CompositionLocalProvider(LocalContentColor provides textColor) {
         Column(Modifier.animateContentSize().padding(start = 6.dp, end = 6.dp, top = 4.dp, bottom = 6.dp)) {
             // Attached files fill the composer's top, so it grows instead of stacking chips above it.
             AttachmentTray(files, onRemove = onRemoveFile, modifier = Modifier.padding(top = 6.dp, bottom = 2.dp))
@@ -557,7 +631,7 @@ private fun Composer(
                 onValueChange = ::edit,
                 visualTransformation = highlight,
                 onTextLayout = { layout = it },
-                textStyle = MaterialTheme.typography.bodyLarge.copy(color = colors.onSurface),
+                textStyle = MaterialTheme.typography.bodyLarge.copy(color = textColor),
                 cursorBrush = SolidColor(colors.primary),
                 maxLines = 8,
                 modifier = Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 12.dp, bottom = 8.dp),
@@ -567,7 +641,7 @@ private fun Composer(
                             Text(
                                 if (busy) "Steer the agent…" else "Reply to Krewd · @ adds a chat",
                                 style = MaterialTheme.typography.bodyLarge,
-                                color = colors.onSurfaceVariant,
+                                color = hintColor,
                             )
                         }
                         Box(Modifier.commandPills(layout, ranges, ink.copy(alpha = 0.16f))) { field() }
@@ -633,7 +707,7 @@ private fun Composer(
                     Spacer(Modifier.width(6.dp))
                 }
                 if (contextUsed != null && contextSize != null && contextSize > 0) {
-                    ContextRing(contextUsed, contextSize)
+                    ContextRing(contextUsed, contextSize, onCompact, compactNative)
                     Spacer(Modifier.width(6.dp))
                 }
                 val stop = busy && !hasDraft
@@ -691,7 +765,7 @@ private fun ComposerShell(backdrop: GlassBackdrop, modifier: Modifier, content: 
 
 /** How full the agent's context window is: a small ring with the percentage; tap for the exact tokens. */
 @Composable
-private fun ContextRing(used: Long, size: Long) {
+private fun ContextRing(used: Long, size: Long, onCompact: (() -> Unit)?, compactNative: Boolean) {
     var open by remember { mutableStateOf(false) }
     val fraction = (used.toFloat() / size).coerceIn(0f, 1f)
     val percent = (fraction * 100).toInt()
@@ -745,6 +819,21 @@ private fun ContextRing(used: Long, size: Long) {
                 TokenLine("Remaining", (size - used).coerceAtLeast(0))
                 HorizontalDivider(color = colors.outlineVariant)
                 TokenLine("Window", size)
+                if (onCompact != null) {
+                    FilledTonalButton(
+                        onClick = { open = false; onCompact() },
+                        modifier = Modifier.fillMaxWidth().padding(top = 2.dp),
+                    ) {
+                        Icon(painterResource(R.drawable.ic_compress_24), contentDescription = null, modifier = Modifier.size(18.dp))
+                        Text("Compact now", modifier = Modifier.padding(start = 8.dp))
+                    }
+                    Text(
+                        if (compactNative) "The agent summarises the chat with its own /compact. Runs after the current turn."
+                        else "The agent writes a handover and a fresh session continues from it. Runs after the current turn.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = colors.onSurfaceVariant,
+                    )
+                }
             }
         }
     }

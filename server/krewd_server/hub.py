@@ -95,6 +95,7 @@ class Runtime:
     running: bool = False
     cancel_requested: bool = False  # Stop came before the agent session was ready
     browser_tab: dict[str, Any] | None = None
+    turn_tabs: set[str] = field(default_factory=set)  # tabs the running turn already announced (`browser` event)
     worker: asyncio.Task | None = None
     text: dict[str, Any] | None = None
     flush_task: asyncio.Task | None = None
@@ -793,7 +794,13 @@ class Hub:
                 order by pinned desc, updated_at desc""",
             archived,
         )
-        return [db.session_json(r, r["pending"]) for r in rows]
+        return [self._with_runtime(db.session_json(r, r["pending"])) for r in rows]
+
+    def _with_runtime(self, session: dict[str, Any]) -> dict[str, Any]:
+        """Adds what only the running process knows: whether the running turn has used the browser."""
+        rt = self.runtimes.get(uuid.UUID(session["id"]))
+        session["browser_in_turn"] = bool(rt and rt.running and rt.turn_tabs)
+        return session
 
     async def get_session(self, session_id: uuid.UUID) -> dict[str, Any]:
         row = await self.pool.fetchrow(
@@ -804,7 +811,7 @@ class Hub:
         )
         if row is None:
             raise NotFound("session not found")
-        return db.session_json(row, row["pending"])
+        return self._with_runtime(db.session_json(row, row["pending"]))
 
     async def create_session(
         self,
@@ -1476,7 +1483,15 @@ class Hub:
         if tab is None:
             return
         info = {"id": tab_id, "url": tab.get("url", ""), "title": tab.get("title") or tab.get("url", "")}
+        # The first use of a tab in a turn is announced even when it is the tab the chat had before: the app
+        # shows the picture-in-picture for browser use, not for a tab linked in some earlier turn.
+        first_in_turn = rt.running and tab_id not in rt.turn_tabs
+        if rt.running:
+            rt.turn_tabs.add(tab_id)
         if rt.browser_tab and rt.browser_tab["id"] == info["id"] and rt.browser_tab["url"] == info["url"]:
+            if first_in_turn:
+                await self.emit(rt.id, "browser", info)
+                await self.emit_session(rt.id)
             return
         rt.browser_tab = info
         await self.pool.execute("update sessions set browser_tab = $2 where id = $1", rt.id, info)
@@ -1839,6 +1854,7 @@ class Hub:
     ) -> None:
         rt.assistant_run, rt.assistant_text = None, ""
         rt.running, rt.cancel_requested = True, False
+        rt.turn_tabs = set()
         await self._set_status(rt, "running")
         await self.emit(rt.id, "turn_start", {"message_id": str(message_id) if message_id else None})
         if message_id and purpose == "routine":

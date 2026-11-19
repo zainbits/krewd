@@ -137,6 +137,8 @@ data class SessionInfo(
     val modelUsed: String?,
     /** The browser tab the agent last used, seen from the browser side. */
     val browserTab: BrowserTab? = null,
+    /** The running turn has used the browser (so the picture-in-picture belongs on screen). */
+    val browserInTurn: Boolean = false,
     /** Set when this chat is a routine's own chat (every run of the routine comes here). */
     val routineId: String? = null,
     /** How Compact works here: "native" (the agent's own /compact) or "handover" (a fresh agent session). */
@@ -191,6 +193,7 @@ data class SessionInfo(
                 browserTab = o.optJSONObject("browser_tab")?.let {
                     BrowserTab(it.optString("id"), it.optString("title"), it.optString("url"))
                 },
+                browserInTurn = o.optBoolean("browser_in_turn"),
                 routineId = o.optStringOrNull("routine_id"),
                 compact = o.optString("compact", "handover"),
                 commands = AgentCommand.list(o.optJSONArray("commands")),
