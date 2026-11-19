@@ -200,12 +200,13 @@ class Prefs(context: Context) {
         synced("glass_tint", v)
     }
 
-    /** How far away the glass's corner lights are: 0 = close (highlights on the corners), 1 = far (even all round). */
-    fun glassLightDistance(): Float = prefs.getFloat("glass_light_distance", DEFAULT_GLASS_LIGHT_DISTANCE)
+    /** How bright the glass's light border is (0 to 1); null = the default for the clarity. */
+    fun glassEdgeLight(): Float? = prefs.getFloat("glass_edge_light", -1f).takeIf { it >= 0f }
 
-    fun setGlassLightDistance(value: Float) {
-        prefs.edit().putFloat("glass_light_distance", value).apply()
-        synced("glass_light_distance", value)
+    fun setGlassEdgeLight(value: Float?) {
+        val v = value ?: -1f
+        prefs.edit().putFloat("glass_edge_light", v).apply()
+        synced("glass_edge_light", v)
     }
 
     /** Code blocks open wrapped or scrolling sideways: the last pick of their Wrap button. */
@@ -261,11 +262,10 @@ class Prefs(context: Context) {
     companion object {
         private val SYNCED = setOf(
             "last_engine", "pip_wide_width", "pip_tall_height", "browser_high_quality", "browser_cursor", "swipe_to_note", "code_wrap",
-            "glass_clarity", "glass_enabled", "glass_tint", "glass_light_distance",
+            "glass_clarity", "glass_enabled", "glass_tint", "glass_edge_light",
         )
-        private val FLOATS = setOf("pip_wide_width", "pip_tall_height", "glass_clarity", "glass_tint", "glass_light_distance")
+        private val FLOATS = setOf("pip_wide_width", "pip_tall_height", "glass_clarity", "glass_tint", "glass_edge_light")
         const val DEFAULT_GLASS_CLARITY = 0.35f
-        const val DEFAULT_GLASS_LIGHT_DISTANCE = io.github.zainbits.cohesion.GlassStyle.DEFAULT_LIGHT_DISTANCE
         private val BOOLEANS = setOf("browser_high_quality", "browser_cursor", "swipe_to_note", "code_wrap", "glass_enabled")
     }
 }

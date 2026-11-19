@@ -219,17 +219,13 @@ fun SettingsScreen(state: UiState, viewModel: KrewdViewModel, padding: PaddingVa
                     onReset = if (state.glassTint != null) ({ viewModel.setGlassTint(null, save = true) }) else null,
                 )
                 GlassSlider(
-                    title = "Light distance",
-                    start = "Close",
-                    end = "Far",
-                    value = state.glassLightDistance,
+                    title = "Edge light",
+                    start = "Off",
+                    end = "Bright",
+                    value = state.glassEdgeLight ?: GlassStyle.forClarity(state.glassClarity, darkTheme).rim.coerceIn(0f, 1f),
                     enabled = glass.on,
-                    onValue = { v, save -> viewModel.setGlassLightDistance(v, save) },
-                    onReset = if (state.glassLightDistance != GlassStyle.DEFAULT_LIGHT_DISTANCE) {
-                        { viewModel.setGlassLightDistance(GlassStyle.DEFAULT_LIGHT_DISTANCE, save = true) }
-                    } else {
-                        null
-                    },
+                    onValue = { v, save -> viewModel.setGlassEdgeLight(v, save) },
+                    onReset = if (state.glassEdgeLight != null) ({ viewModel.setGlassEdgeLight(null, save = true) }) else null,
                 )
             }
         }
