@@ -1,7 +1,6 @@
 package app.krewd.ui
 
 import androidx.compose.material3.FilledTonalButton
-import io.github.zainbits.cohesion.GlassStyle
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.heightIn
@@ -465,18 +464,9 @@ private fun ChatTopBar(
         }
         return
     }
-    // Open, the panel is tinted more, so its controls read over a busy chat.
-    val clarity by animateFloatAsState(
-        if (expanded) maxOf(state.glassClarity, 0.75f) else state.glassClarity,
-        animationSpec = tween(260),
-        label = "panelClarity",
-    )
-    val darkGlass = MaterialTheme.colorScheme.surface.luminance() < 0.5f
-    val style = remember(clarity, darkGlass) { GlassStyle.forClarity(clarity, darkGlass) }
     GlassGroup(
         backdrop = backdrop,
         modifier = barModifier,
-        style = style,
         merge = 10.dp,
     ) { glassRow ->
     Row(
@@ -489,7 +479,6 @@ private fun ChatTopBar(
             backdrop = backdrop,
             contentDescription = "Back",
             size = ShellDimensions.TITLE_PILL_HEIGHT,
-            style = style,
         ) {
             Icon(painterResource(R.drawable.ic_chevron_left_24), contentDescription = null)
         }
@@ -497,7 +486,6 @@ private fun ChatTopBar(
             backdrop = backdrop,
             modifier = Modifier.weight(1f),
             shape = GlassShape.rounded(26.dp),
-            style = style,
             elastic = true,
             onClick = onToggle,
             enabled = session != null,

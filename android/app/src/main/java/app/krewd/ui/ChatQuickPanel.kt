@@ -1,8 +1,6 @@
 package app.krewd.ui
 
 import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -35,6 +33,7 @@ import app.krewd.R
 import app.krewd.UiState
 import app.krewd.data.SessionInfo
 import io.github.zainbits.cohesion.glassPullExempt
+import io.github.zainbits.cohesion.glassPullNoTap
 import io.github.zainbits.vitreous.LocalGlassPull
 
 /**
@@ -48,13 +47,13 @@ fun ChatQuickPanel(state: UiState, viewModel: KrewdViewModel, session: SessionIn
     val ink = LocalContentColor.current
     val model = session.config.firstOrNull { it.category == "model" }
     val effort = session.config.firstOrNull { it.category == "thought_level" }?.takeIf { it.choices.size in 2..7 }
-    // Touches on the panel belong to its controls: they neither bounce the glass nor fold the panel.
-    // Only the title row above pulls the glass and folds it.
+    // The panel's empty parts pull and bounce the glass like the rest of it, but a tap there does not fold
+    // it (only the title row does). The controls keep their touches: no bounce while you use them.
+    val pull = LocalGlassPull.current
     Column(
         Modifier
             .fillMaxWidth()
-            .glassPullExempt(LocalGlassPull.current)
-            .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) {}
+            .glassPullNoTap(pull)
             .padding(bottom = 10.dp),
     ) {
         if (model != null) {
@@ -63,6 +62,7 @@ fun ChatQuickPanel(state: UiState, viewModel: KrewdViewModel, session: SessionIn
             val list = rememberLazyListState(initialFirstVisibleItemIndex = (picked - 1).coerceAtLeast(0))
             LazyRow(
                 state = list,
+                modifier = Modifier.glassPullExempt(pull),
                 contentPadding = PaddingValues(horizontal = 12.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
@@ -102,7 +102,7 @@ fun ChatQuickPanel(state: UiState, viewModel: KrewdViewModel, session: SessionIn
         }
         if (effort != null) {
             PanelLabel("Effort")
-            Column(Modifier.padding(horizontal = 12.dp)) {
+            Column(Modifier.padding(horizontal = 12.dp).glassPullExempt(pull)) {
                 StepChoice(effort, effort.current, online) { viewModel.setConfig(session.id, effort.id, it) }
             }
         }
@@ -119,7 +119,7 @@ fun ChatQuickPanel(state: UiState, viewModel: KrewdViewModel, session: SessionIn
             shape = RoundedCornerShape(16.dp),
             color = ink.copy(alpha = 0.06f),
             contentColor = ink,
-            modifier = Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 14.dp),
+            modifier = Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 14.dp).glassPullExempt(pull),
         ) {
             Row(Modifier.padding(horizontal = 14.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
                 Icon(painterResource(R.drawable.ic_tune_24), contentDescription = null, modifier = Modifier.size(18.dp))
