@@ -682,6 +682,11 @@ class KrewdViewModel(private val app: Application) {
         _state.update { it.copy(sessions = upsert(it.sessions, session)) }
     }
 
+    fun rename(id: String, title: String) = act { client ->
+        val session = client.updateSession(id, JSONObject().put("title", title.trim()))
+        _state.update { it.copy(sessions = upsert(it.sessions, session)) }
+    }
+
     fun switchEngine(id: String, engine: String) = act { client ->
         client.switchEngine(id, engine)
         val name = _state.value.engine(engine)?.name ?: engine

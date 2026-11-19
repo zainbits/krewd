@@ -16,6 +16,7 @@ import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.heightIn
@@ -32,7 +33,16 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.ui.unit.dp
 import app.krewd.Connection
 import app.krewd.KrewdViewModel
@@ -61,12 +71,19 @@ fun ChatSettingsSheet(state: UiState, viewModel: KrewdViewModel, session: Sessio
     val close: () -> Unit = { scope.launch { sheet.hide() }.invokeOnCompletion { onDismiss() } }
     var switchTo by remember { mutableStateOf<String?>(null) }
     var confirmCompact by remember { mutableStateOf(false) }
+    var renaming by remember { mutableStateOf(false) }
     val online = state.connection is Connection.Online
 
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheet, containerColor = MaterialTheme.colorScheme.surfaceContainer) {
         Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(start = 18.dp, end = 18.dp, bottom = 24.dp)) {
             Text("Chat settings", style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(start = 4.dp))
-            Text(session.title, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(start = 4.dp, top = 2.dp))
+            Row(
+                Modifier.fillMaxWidth().clickable(enabled = online, onClickLabel = "Rename") { renaming = true }.padding(start = 4.dp, top = 2.dp, bottom = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(session.title, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+                if (online) Icon(painterResource(R.drawable.ic_edit_24), contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(start = 6.dp).size(16.dp))
+            }
 
             if (state.engines.size > 1) {
                 SheetLabel("Agent")
@@ -137,6 +154,7 @@ fun ChatSettingsSheet(state: UiState, viewModel: KrewdViewModel, session: Sessio
                 }
                 ActionButton(R.drawable.ic_add_24, "New side session") { onSideSession() }
                 ActionButton(R.drawable.ic_compress_24, "Compact") { confirmCompact = true }
+                ActionButton(R.drawable.ic_edit_24, "Rename") { renaming = true }
                 ActionButton(R.drawable.ic_pin_24, if (session.pinned) "Unpin" else "Pin") { viewModel.setPinned(session.id, !session.pinned) }
                 ActionButton(R.drawable.ic_web_24, "Watch the browser") { close(); viewModel.openBrowserAt(session.browserTab?.id) }
                 session.routineId?.let { routineId ->
@@ -164,6 +182,7 @@ fun ChatSettingsSheet(state: UiState, viewModel: KrewdViewModel, session: Sessio
             dismissButton = { TextButton(onClick = { switchTo = null }) { Text("Cancel") } },
         )
     }
+    if (renaming) RenameDialog(session.title, onDismiss = { renaming = false }) { renaming = false; viewModel.rename(session.id, it) }
     if (confirmCompact) {
         AlertDialog(
             onDismissRequest = { confirmCompact = false },
@@ -179,6 +198,35 @@ fun ChatSettingsSheet(state: UiState, viewModel: KrewdViewModel, session: Sessio
             dismissButton = { TextButton(onClick = { confirmCompact = false }) { Text("Cancel") } },
         )
     }
+}
+
+/** The chat's title, typed by the owner. Once renamed, the agent no longer retitles the chat. */
+@Composable
+private fun RenameDialog(current: String, onDismiss: () -> Unit, onSave: (String) -> Unit) {
+    var value by remember { mutableStateOf(TextFieldValue(current, TextRange(0, current.length))) }
+    val focus = remember { FocusRequester() }
+    val title = value.text.trim()
+    val ok = title.isNotEmpty() && title.length <= 200
+    val save = { if (ok) onSave(title) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Rename chat") },
+        text = {
+            OutlinedTextField(
+                value = value,
+                onValueChange = { value = it.copy(text = it.text.replace('\n', ' ')) },
+                singleLine = true,
+                label = { Text("Title") },
+                isError = title.length > 200,
+                keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences, imeAction = ImeAction.Done),
+                keyboardActions = KeyboardActions(onDone = { save() }),
+                modifier = Modifier.fillMaxWidth().focusRequester(focus),
+            )
+        },
+        confirmButton = { TextButton(onClick = save, enabled = ok && title != current) { Text("Save") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+    LaunchedEffect(Unit) { focus.requestFocus() }
 }
 
 @Composable

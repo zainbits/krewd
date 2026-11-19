@@ -14,7 +14,7 @@ from typing import Any, Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Path, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from . import __version__, tls
 from .secrets_store import SecretRequest, Secrets, origin as url_origin, parse_fields
@@ -108,6 +108,17 @@ class SessionChanges(BaseModel):
     mode: str | None = None
     config: dict[str, str] | None = None
     returns: bool | None = None  # a side session: send its finished replies back to the parent (sub-agent) or not
+
+    @field_validator("title")
+    @classmethod
+    def _title(cls, value: str | None) -> str | None:
+        # A title the owner typed: one line, trimmed, never blank. It stays; the agent no longer renames the chat.
+        if value is None:
+            return None
+        value = " ".join(value.split())
+        if not value:
+            raise ValueError("title is blank")
+        return value
 
 
 class TriggerFields(BaseModel):

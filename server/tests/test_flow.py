@@ -90,6 +90,27 @@ async def test_turn_streams_text_and_updates_session(hub):
     assert final["usage"] == {"used": 10, "size": 100}
 
 
+async def test_owner_renames_a_chat_and_the_agent_no_longer_does(hub):
+    app = create_app(hub, TOKEN, lifespan_hub=False)
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        session = await hub.create_session("Say hello")
+        sid = uuid.UUID(session["id"])
+        await wait_for(hub, sid, "turn_end")
+        assert (await hub.get_session(sid))["title"] == "Fake title"
+        assert (await client.patch(f"/api/sessions/{sid}", headers=headers, json={"title": "  \n "})).status_code == 422
+        renamed = await client.patch(f"/api/sessions/{sid}", headers=headers, json={"title": "  Trip\n plans  "})
+        assert renamed.status_code == 200 and renamed.json()["title"] == "Trip plans"
+        await hub.send(sid, "Again")
+        for _ in range(200):
+            if sum(e["kind"] == "turn_end" for e in await hub.events(0, sid)) == 2:
+                break
+            await asyncio.sleep(0.05)
+        else:
+            raise AssertionError("no second turn_end")
+        assert (await hub.get_session(sid))["title"] == "Trip plans"
+
+
 async def test_permission_waits_for_the_user(hub):
     session = await hub.create_session("perm please")
     sid = uuid.UUID(session["id"])
