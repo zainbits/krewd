@@ -8,7 +8,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.withFrameNanos
+import kotlinx.coroutines.flow.first
 
 /**
  * The reply that is streaming in right now, and what to call just before it grows on screen. Provided by the
@@ -43,6 +45,11 @@ fun rememberSmoothText(key: Any, text: String, live: Boolean, onGrow: () -> Unit
         var lastFrame = 0L
         var lastShow = 0L
         while (true) {
+            if (shown >= target.length) {
+                // Caught up: sleep until the next chunk instead of waking every frame (battery).
+                snapshotFlow { target.length }.first { it > shown }
+                lastFrame = 0L
+            }
             withFrameNanos { now ->
                 val text = target
                 if (text.length != seenLength) {

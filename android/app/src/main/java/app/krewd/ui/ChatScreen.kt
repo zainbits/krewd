@@ -153,7 +153,7 @@ fun ChatScreen(state: UiState, viewModel: KrewdViewModel) {
     }
     // The reply streaming in now. While you read above the bottom, the text you are reading stays put as it grows.
     val liveKey = (items.lastOrNull() as? TextItem)?.takeIf { busy && !it.isThought }?.key
-    val liveReply = remember(listState, liveKey) { LiveReply(liveKey) { key -> if (!follow) listState.holdRow(key) } }
+    val liveReply = remember(listState, liveKey) { LiveReply(liveKey) { key -> if (!follow && !listState.isScrollInProgress) listState.holdRow(key) } }
 
     val bars = WindowInsets.statusBars.union(WindowInsets.displayCutout).asPaddingValues()
     var settingsOpen by rememberSaveable(state.openSessionId) { mutableStateOf(false) }
@@ -239,6 +239,21 @@ fun ChatScreen(state: UiState, viewModel: KrewdViewModel) {
                 item(key = "loading") { CircularProgressIndicator(Modifier.padding(24.dp)) }
             }
         }
+        }
+
+        // Scrolled up from the bottom: one tap goes back down and follows the reply again.
+        androidx.compose.animation.AnimatedVisibility(
+            visible = !follow && rowCount > 0,
+            enter = androidx.compose.animation.fadeIn() + androidx.compose.animation.scaleIn(initialScale = 0.8f),
+            exit = androidx.compose.animation.fadeOut() + androidx.compose.animation.scaleOut(targetScale = 0.8f),
+            modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = bottomStack + 12.dp),
+        ) {
+            androidx.compose.material3.SmallFloatingActionButton(
+                onClick = { follow = true; scope.launch { listState.scrollToItem(0) } },
+                containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+            ) {
+                Icon(painterResource(R.drawable.ic_arrow_down_24), contentDescription = "Go to latest")
+            }
         }
 
         val pipTab = state.pipTab(session)
@@ -785,14 +800,16 @@ private fun UserRow(
 private fun ReplyText(item: TextItem) {
     val hooks = LocalNoteHooks.current
     val live = LocalLiveReply.current
-    val text = rememberSmoothText(item.key, item.text, live = live.key == item.key, onGrow = { live.hold(item.key) })
+    val streaming = live.key == item.key
+    val text = rememberSmoothText(item.key, item.text, live = streaming, onGrow = { live.hold(item.key) })
+    val body: @Composable () -> Unit = { if (streaming) LiveMarkdown(text) else Markdown(text) }
     if (hooks == null || item.role != "assistant") {
-        SelectionContainer { Markdown(text) }
+        SelectionContainer { body() }
         return
     }
     CompositionLocalProvider(LocalNoteItem provides item.key) {
         Box(Modifier.noteSelectionMenu { quote -> hooks.onSelectionNote(item.key, item.text, quote) }) {
-            SelectionContainer { Markdown(text) }
+            SelectionContainer { body() }
         }
     }
 }

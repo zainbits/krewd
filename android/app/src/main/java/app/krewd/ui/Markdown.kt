@@ -117,7 +117,7 @@ private data class MdStyle(val codeBackground: Color, val links: TextLinkStyles,
 
 /** Renders [text] as Markdown. Wrap in a SelectionContainer to make it selectable. */
 @Composable
-fun Markdown(text: String, modifier: Modifier = Modifier) {
+fun Markdown(text: String, modifier: Modifier = Modifier, notes: Boolean = true) {
     val document = remember(text) { parser.parse(text) }
     val colors = MaterialTheme.colorScheme
     val uriHandler = LocalUriHandler.current
@@ -128,7 +128,43 @@ fun Markdown(text: String, modifier: Modifier = Modifier) {
             uriHandler = uriHandler,
         )
     }
-    Box(modifier) { Blocks(document, style, depth = 0, targets = true) }
+    Box(modifier) { Blocks(document, style, depth = 0, targets = notes) }
+}
+
+/**
+ * A reply that is still streaming in: everything up to its last finished paragraph is drawn once and left alone,
+ * and only the paragraph being written is parsed and laid out again as it grows. Drawing the whole reply again for
+ * every few words made long replies stutter. The part being written takes no margin notes until it is done.
+ */
+@Composable
+fun LiveMarkdown(text: String, modifier: Modifier = Modifier) {
+    val cut = stableEnd(text)
+    if (cut <= 0) {
+        Markdown(text, modifier, notes = false)
+        return
+    }
+    Column(modifier, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Markdown(text.substring(0, cut))
+        Markdown(text.substring(cut), notes = false)
+    }
+}
+
+/** Where the last blank line outside a code fence ends: text before it is finished blocks. */
+private fun stableEnd(text: String): Int {
+    var fence = false
+    var lineStart = 0
+    var cut = 0
+    var blankAfter = false
+    while (lineStart < text.length) {
+        val nl = text.indexOf('\n', lineStart).let { if (it < 0) text.length else it }
+        val line = text.substring(lineStart, nl)
+        if (line.trimStart().startsWith("```")) fence = !fence
+        if (!fence && line.isBlank() && nl < text.length && blankAfter) cut = nl + 1
+        blankAfter = !line.isBlank()
+        lineStart = nl + 1
+    }
+    // Only a cut with real text after it; otherwise the whole reply is the part being written.
+    return if (cut in 1 until text.length && text.substring(cut).isNotBlank()) cut else 0
 }
 
 /**
