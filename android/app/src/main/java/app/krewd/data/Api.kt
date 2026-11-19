@@ -94,7 +94,7 @@ class Prefs(context: Context) {
                 key == "saved_prompts" && v is org.json.JSONArray -> edit.putString(key, v.toString())
                 key == "last_engine" && v is String -> edit.putString(key, v)
                 key in BOOLEANS && v is Boolean -> edit.putBoolean(key, v)
-                (key == "pip_wide_width" || key == "pip_tall_height") && v is Number -> edit.putFloat(key, v.toFloat())
+                (key == "pip_wide_width" || key == "pip_tall_height" || key == "glass_clarity") && v is Number -> edit.putFloat(key, v.toFloat())
             }
         }
         edit.apply()
@@ -175,6 +175,22 @@ class Prefs(context: Context) {
         synced("swipe_to_note", on)
     }
 
+    /** Liquid glass and its stretch on the title bar, composer and nav bar (off: plain panels). */
+    fun glassEnabled(): Boolean = prefs.getBoolean("glass_enabled", true)
+
+    fun setGlassEnabled(on: Boolean) {
+        prefs.edit().putBoolean("glass_enabled", on).apply()
+        synced("glass_enabled", on)
+    }
+
+    /** How see-through the chat's liquid glass is: 0 = ultra-clear, 1 = fully tinted. */
+    fun glassClarity(): Float = prefs.getFloat("glass_clarity", DEFAULT_GLASS_CLARITY)
+
+    fun setGlassClarity(value: Float) {
+        prefs.edit().putFloat("glass_clarity", value).apply()
+        synced("glass_clarity", value)
+    }
+
     /** Code blocks open wrapped or scrolling sideways: the last pick of their Wrap button. */
     fun codeWrap(): Boolean = prefs.getBoolean("code_wrap", false)
 
@@ -228,8 +244,10 @@ class Prefs(context: Context) {
     companion object {
         private val SYNCED = setOf(
             "last_engine", "pip_wide_width", "pip_tall_height", "browser_high_quality", "browser_cursor", "swipe_to_note", "code_wrap",
+            "glass_clarity", "glass_enabled",
         )
-        private val BOOLEANS = setOf("browser_high_quality", "browser_cursor", "swipe_to_note", "code_wrap")
+        const val DEFAULT_GLASS_CLARITY = 0.35f
+        private val BOOLEANS = setOf("browser_high_quality", "browser_cursor", "swipe_to_note", "code_wrap", "glass_enabled")
     }
 }
 

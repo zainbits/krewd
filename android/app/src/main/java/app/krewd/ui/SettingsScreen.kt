@@ -173,6 +173,40 @@ fun SettingsScreen(state: UiState, viewModel: KrewdViewModel, padding: PaddingVa
                     }
                     Switch(checked = state.swipeToNote, onCheckedChange = viewModel::setSwipeToNote)
                 }
+                val glass = LocalKrewdGlass.current
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Liquid glass", style = MaterialTheme.typography.bodyLarge)
+                        Text(
+                            if (glass.throttled) {
+                                "Off while battery saver is on (or the phone is hot), to save power."
+                            } else {
+                                "See-through title bar, composer and nav bar that stretch when pulled. Off: plain panels. Battery saver turns it off by itself."
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(
+                        checked = glass.on,
+                        onCheckedChange = viewModel::setGlassEnabled,
+                        enabled = !glass.throttled,
+                    )
+                }
+                Column {
+                    Text("Glass clarity", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurface.copy(alpha = if (glass.on) 1f else 0.38f))
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("Clear", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        androidx.compose.material3.Slider(
+                            value = state.glassClarity,
+                            onValueChange = { viewModel.setGlassClarity(it, save = false) },
+                            onValueChangeFinished = { viewModel.setGlassClarity(viewModel.state.value.glassClarity, save = true) },
+                            enabled = glass.on,
+                            modifier = Modifier.weight(1f),
+                        )
+                        Text("Tinted", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
             }
         }
         item {

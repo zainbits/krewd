@@ -1,5 +1,13 @@
 package app.krewd.ui
 
+import androidx.compose.material3.LocalContentColor
+import io.github.zainbits.cohesion.GlassBackdrop
+import io.github.zainbits.vitreous.GlassGroup
+import io.github.zainbits.vitreous.GlassIconButton
+import io.github.zainbits.vitreous.GlassShape
+import io.github.zainbits.vitreous.GlassSurface
+import io.github.zainbits.cohesion.glassSource
+import io.github.zainbits.cohesion.rememberGlassBackdrop
 import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -208,9 +216,14 @@ fun ChatScreen(state: UiState, viewModel: KrewdViewModel) {
             addNote(if (block != null) "$itemKey#$block" else itemKey, quote)
         },
     )
+    // Liquid glass (Vitreous): the chat list is what the title bar and composer show through.
+    val backdrop = rememberGlassBackdrop()
+    val glassOn = LocalKrewdGlass.current.on
     Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surface)) {
         // Rows that open and close keep their top edge in place (KeepInPlace.kt).
         val holdRow = remember(listState) { { key: Any -> listState.holdRow(key) } }
+        // Everything the glass shows through: the chat and the browser picture-in-picture.
+        Box(Modifier.fillMaxSize().then(if (glassOn) Modifier.glassSource(backdrop) else Modifier).background(MaterialTheme.colorScheme.surface)) {
         CompositionLocalProvider(LocalHoldRow provides holdRow, LocalNoteHooks provides noteHooks, LocalLiveReply provides liveReply) {
         LazyColumn(
             state = listState,
@@ -242,6 +255,22 @@ fun ChatScreen(state: UiState, viewModel: KrewdViewModel) {
             }
         }
         }
+        val pipTab = state.pipTab(session)
+        if (session != null && pipTab != null) {
+            val tab = state.browser?.tabs?.firstOrNull { it.id == pipTab } ?: session.browserTab?.takeIf { it.id == pipTab }
+            BrowserPip(
+                tabId = pipTab,
+                label = listOfNotNull(state.engine(session.engine)?.name, tab?.host?.ifBlank { null }).joinToString(" · "),
+                viewModel = viewModel,
+                top = bars.calculateTopPadding() + ShellDimensions.TITLE_PILL_TOP_GAP + ShellDimensions.TITLE_PILL_HEIGHT +
+                    (if (hasStrip) stripHeight else 0.dp),
+                bottom = bottomStack,
+                onClose = { viewModel.hidePip(session.id, pipTab) },
+                onOpen = { viewModel.openBrowserAt(pipTab) },
+            )
+        }
+
+        }
 
         // Scrolled up from the bottom: one tap goes back down and follows the reply again.
         androidx.compose.animation.AnimatedVisibility(
@@ -258,24 +287,9 @@ fun ChatScreen(state: UiState, viewModel: KrewdViewModel) {
             }
         }
 
-        val pipTab = state.pipTab(session)
-        if (session != null && pipTab != null) {
-            val tab = state.browser?.tabs?.firstOrNull { it.id == pipTab } ?: session.browserTab?.takeIf { it.id == pipTab }
-            BrowserPip(
-                tabId = pipTab,
-                label = listOfNotNull(state.engine(session.engine)?.name, tab?.host?.ifBlank { null }).joinToString(" · "),
-                viewModel = viewModel,
-                top = bars.calculateTopPadding() + ShellDimensions.TITLE_PILL_TOP_GAP + ShellDimensions.TITLE_PILL_HEIGHT +
-                    (if (hasStrip) stripHeight else 0.dp),
-                bottom = bottomStack,
-                onClose = { viewModel.hidePip(session.id, pipTab) },
-                onOpen = { viewModel.openBrowserAt(pipTab) },
-            )
-        }
-
         signIns.firstOrNull { it.id == filling }?.let { ask -> SecretSheet(ask = ask, viewModel = viewModel, onDismiss = { filling = null }) }
         Column(Modifier.align(Alignment.TopCenter).fillMaxWidth()) {
-            ChatTopBar(state, viewModel, onSettings = { settingsOpen = true })
+            ChatTopBar(state, viewModel, backdrop, onSettings = { settingsOpen = true })
             if (session != null) {
                 LinkedChatsStrip(
                     state, session, onOpen = viewModel::openSession,
@@ -339,6 +353,7 @@ fun ChatScreen(state: UiState, viewModel: KrewdViewModel) {
                 val pick = rememberFilePicker { viewModel.attach(session.id, it) }
                 val live = state.live[session.id]
                 Composer(
+                    backdrop = backdrop,
                     sessionId = session.id,
                     initialText = remember(session.id) { viewModel.messageDraft(session.id) },
                     onDraft = { viewModel.setMessageDraft(session.id, it) },
@@ -367,57 +382,97 @@ fun ChatScreen(state: UiState, viewModel: KrewdViewModel) {
     }
 }
 
-/** Back, and the title with the agent and its settings under it; tap the title for the chat's settings. */
+/**
+ * Back, and the title with the agent and its settings under it; tap the title for the chat's settings.
+ * Both are liquid glass in one pass (Vitreous): the chat scrolls visibly behind them, and either can be
+ * pulled like liquid; pulled together they merge.
+ */
 @Composable
-private fun ChatTopBar(state: UiState, viewModel: KrewdViewModel, onSettings: () -> Unit) {
+private fun ChatTopBar(state: UiState, viewModel: KrewdViewModel, backdrop: GlassBackdrop, onSettings: () -> Unit) {
     val session = state.openSession
+    val barModifier = Modifier
+        .fillMaxWidth()
+        .windowInsetsPadding(
+            WindowInsets.statusBars.union(WindowInsets.displayCutout)
+                .only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal),
+        )
+        .padding(horizontal = ShellDimensions.TITLE_PILL_START_MARGIN)
+        .padding(top = ShellDimensions.TITLE_PILL_TOP_GAP)
+    if (!LocalKrewdGlass.current.on) {
+        // Glass off (Settings, battery saver or heat): the plain pills, no stretch.
+        Row(barModifier, horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            FloatingPill {
+                IconButton(onClick = viewModel::closeSession) {
+                    Icon(painterResource(R.drawable.ic_chevron_left_24), contentDescription = "Back")
+                }
+            }
+            Surface(
+                onClick = onSettings,
+                enabled = session != null,
+                shape = RoundedCornerShape(26.dp),
+                color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                border = androidx.compose.foundation.BorderStroke(ShellDimensions.PILL_BORDER_WIDTH, MaterialTheme.colorScheme.outlineVariant),
+                shadowElevation = 2.dp,
+                modifier = Modifier.weight(1f),
+            ) { ChatTitle(state) }
+        }
+        return
+    }
+    CompositionLocalProvider(LocalContentColor provides MaterialTheme.colorScheme.onSurface) {
+    GlassGroup(
+        backdrop = backdrop,
+        modifier = barModifier,
+        merge = 10.dp,
+    ) { glassRow ->
     Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .windowInsetsPadding(
-                WindowInsets.statusBars.union(WindowInsets.displayCutout)
-                    .only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal),
-            )
-            .padding(horizontal = ShellDimensions.TITLE_PILL_START_MARGIN)
-            .padding(top = ShellDimensions.TITLE_PILL_TOP_GAP),
+        modifier = glassRow,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        FloatingPill {
-            IconButton(onClick = viewModel::closeSession) {
-                Icon(painterResource(R.drawable.ic_chevron_left_24), contentDescription = "Back")
-            }
+        GlassIconButton(
+            onClick = viewModel::closeSession,
+            backdrop = backdrop,
+            contentDescription = "Back",
+            size = ShellDimensions.TITLE_PILL_HEIGHT,
+        ) {
+            Icon(painterResource(R.drawable.ic_chevron_left_24), contentDescription = null)
         }
-        Surface(
+        GlassSurface(
+            backdrop = backdrop,
+            modifier = Modifier.weight(1f),
+            shape = GlassShape.rounded(26.dp),
+            elastic = true,
             onClick = onSettings,
             enabled = session != null,
-            shape = RoundedCornerShape(26.dp),
-            color = MaterialTheme.colorScheme.surfaceContainerHigh,
-            border = androidx.compose.foundation.BorderStroke(ShellDimensions.PILL_BORDER_WIDTH, MaterialTheme.colorScheme.outlineVariant),
-            shadowElevation = 2.dp,
-            modifier = Modifier.weight(1f),
-        ) {
-            Column(Modifier.padding(start = 16.dp, end = 12.dp, top = 6.dp, bottom = 7.dp)) {
+        ) { ChatTitle(state) }
+    }
+    }
+    }
+}
+
+/** The chat's title, with the agent and its settings under it. */
+@Composable
+private fun ChatTitle(state: UiState) {
+    val session = state.openSession
+    Column(Modifier.padding(start = 16.dp, end = 12.dp, top = 6.dp, bottom = 7.dp)) {
+        Text(
+            session?.title ?: "Task",
+            style = MaterialTheme.typography.titleMedium,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        if (session != null) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                Box(Modifier.size(8.dp).background(lookFor(session.engine, state.engines).color, CircleShape))
                 Text(
-                    session?.title ?: "Task",
-                    style = MaterialTheme.typography.titleMedium,
+                    chatSubtitle(state, session),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false),
                 )
-                if (session != null) {
-                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Box(Modifier.size(8.dp).background(lookFor(session.engine, state.engines).color, CircleShape))
-                        Text(
-                            chatSubtitle(state, session),
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.weight(1f, fill = false),
-                        )
-                        Icon(painterResource(R.drawable.ic_chevron_right_24), contentDescription = "Chat settings", tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(16.dp))
-                    }
-                }
+                Icon(painterResource(R.drawable.ic_chevron_right_24), contentDescription = "Chat settings", tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(16.dp))
             }
         }
     }
@@ -438,6 +493,7 @@ private enum class Delivery(val id: String, val label: String, val hint: String)
  */
 @Composable
 private fun Composer(
+    backdrop: GlassBackdrop,
     sessionId: String,
     initialText: String,
     onDraft: (String) -> Unit,
@@ -483,13 +539,8 @@ private fun Composer(
     val ready = files.any { it.uploadId != null } || hasTabs
     val hasDraft = text.isNotBlank() || files.isNotEmpty() || hasTabs
     val colors = MaterialTheme.colorScheme
-    Surface(
-        modifier = modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(26.dp),
-        color = colors.surfaceContainerHigh,
-        border = androidx.compose.foundation.BorderStroke(ShellDimensions.PILL_BORDER_WIDTH, colors.outlineVariant),
-        shadowElevation = 2.dp,
-    ) {
+    ComposerShell(backdrop, modifier.fillMaxWidth()) {
+        CompositionLocalProvider(LocalContentColor provides colors.onSurface) {
         Column(Modifier.animateContentSize().padding(start = 6.dp, end = 6.dp, top = 4.dp, bottom = 6.dp)) {
             // Attached files fill the composer's top, so it grows instead of stacking chips above it.
             AttachmentTray(files, onRemove = onRemoveFile, modifier = Modifier.padding(top = 6.dp, bottom = 2.dp))
@@ -600,7 +651,8 @@ private fun Composer(
                     shape = CircleShape,
                     color = if (enabled) colors.primary else colors.surfaceContainerHighest,
                     contentColor = if (enabled) colors.onPrimary else colors.onSurfaceVariant.copy(alpha = 0.6f),
-                    modifier = Modifier.size(40.dp),
+                    // 10 dp from the right edge, like the bottom (6 dp padding + the row's 4 dp).
+                    modifier = Modifier.padding(end = 4.dp).size(40.dp),
                 ) {
                     Box(contentAlignment = Alignment.Center) {
                         Icon(
@@ -612,6 +664,28 @@ private fun Composer(
                 }
             }
         }
+        }
+    }
+}
+
+/**
+ * The composer's panel: liquid glass (Vitreous; the chat shows through, blurred and bent at the edge), or
+ * the plain panel while glass is off. 30 dp corners, so the 40 dp send button 10 dp in from the corner
+ * sits on a concentric curve.
+ */
+@Composable
+private fun ComposerShell(backdrop: GlassBackdrop, modifier: Modifier, content: @Composable () -> Unit) {
+    if (LocalKrewdGlass.current.on) {
+        GlassSurface(backdrop = backdrop, modifier = modifier, shape = GlassShape.rounded(30.dp)) { content() }
+    } else {
+        Surface(
+            modifier = modifier,
+            shape = RoundedCornerShape(30.dp),
+            color = MaterialTheme.colorScheme.surfaceContainerHigh,
+            border = androidx.compose.foundation.BorderStroke(ShellDimensions.PILL_BORDER_WIDTH, MaterialTheme.colorScheme.outlineVariant),
+            shadowElevation = 2.dp,
+            content = content,
+        )
     }
 }
 

@@ -40,11 +40,13 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -54,6 +56,12 @@ import app.krewd.KrewdViewModel
 import app.krewd.NavTab
 import app.krewd.R
 import app.krewd.constants.ShellDimensions
+import io.github.zainbits.cohesion.GlassMode
+import io.github.zainbits.cohesion.ProvideGlass
+import io.github.zainbits.cohesion.glassSource
+import io.github.zainbits.cohesion.rememberGlassBackdrop
+import io.github.zainbits.cohesion.rememberGlassThrottled
+import io.github.zainbits.meniscus.MeniscusGlass
 import io.github.zainbits.meniscus.MeniscusNavBar
 import io.github.zainbits.meniscus.MeniscusNavBarDefaults
 import io.github.zainbits.meniscus.MeniscusNavItem
@@ -109,7 +117,15 @@ fun KrewdApp(viewModel: KrewdViewModel) {
         state.openRoutineId != null -> 1
         else -> 0
     }
-    CompositionLocalProvider(LocalCodeWrap provides CodeWrap(state.codeWrap, viewModel::setCodeWrap)) {
+    // Liquid glass: the Settings switch, off by itself in battery saver or heat (then Settings shows it off).
+    val glassThrottled = rememberGlassThrottled()
+    val glass = KrewdGlass(on = state.glassEnabled && !glassThrottled, throttled = glassThrottled)
+    val darkGlass = MaterialTheme.colorScheme.surface.luminance() < 0.5f
+    // The tab screens are what the nav bar's glass (Meniscus) shows through.
+    val tabsBackdrop = rememberGlassBackdrop()
+    val navGlass = remember(tabsBackdrop, glass.on) { if (glass.on) MeniscusGlass(tabsBackdrop) else null }
+    CompositionLocalProvider(LocalCodeWrap provides CodeWrap(state.codeWrap, viewModel::setCodeWrap), LocalKrewdGlass provides glass) {
+    ProvideGlass(clarity = state.glassClarity, dark = darkGlass, mode = GlassMode.Full) {
     Box(Modifier.fillMaxSize()) {
     AnimatedContent(
         targetState = depth,
@@ -131,11 +147,13 @@ fun KrewdApp(viewModel: KrewdViewModel) {
             Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surface)) {
                 // The Krewd tab has its own header (no title pill) and the Ask Krewd bar above the nav bar.
                 val padding = if (tab == Tab.Tasks) shellContentPadding(titlePill = false, extraBottom = ASK_BAR_HEIGHT + ASK_BAR_GAP) else shellContentPadding()
-                when (tab) {
-                    Tab.Tasks -> TasksScreen(state, viewModel, padding, tasksList, onOpenSettings = { viewModel.navigate(NavTab.SETTINGS) })
-                    Tab.Routines -> RoutinesScreen(state, viewModel, padding, routinesList)
-                    Tab.Browser -> BrowserScreen(state, viewModel, landscape)
-                    Tab.Settings -> SettingsScreen(state, viewModel, padding, settingsList)
+                Box(Modifier.fillMaxSize().then(if (glass.on) Modifier.glassSource(tabsBackdrop) else Modifier).background(MaterialTheme.colorScheme.surface)) {
+                    when (tab) {
+                        Tab.Tasks -> TasksScreen(state, viewModel, padding, tasksList, onOpenSettings = { viewModel.navigate(NavTab.SETTINGS) })
+                        Tab.Routines -> RoutinesScreen(state, viewModel, padding, routinesList)
+                        Tab.Browser -> BrowserScreen(state, viewModel, landscape)
+                        Tab.Settings -> SettingsScreen(state, viewModel, padding, settingsList)
+                    }
                 }
                 if (tab != Tab.Browser && tab != Tab.Tasks) TitlePill(
                     title = tab.title,
@@ -152,6 +170,7 @@ fun KrewdApp(viewModel: KrewdViewModel) {
                     items = navItems,
                     selectedIndex = tabIndex,
                     onSelect = { viewModel.navigate(it) },
+                    glass = navGlass,
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
                         .windowInsetsPadding(
@@ -189,6 +208,7 @@ fun KrewdApp(viewModel: KrewdViewModel) {
                 .windowInsetsPadding(WindowInsets.statusBars)
                 .padding(top = ShellDimensions.TITLE_PILL_TOP_GAP + ShellDimensions.TITLE_PILL_HEIGHT + 8.dp),
         )
+    }
     }
     }
     }

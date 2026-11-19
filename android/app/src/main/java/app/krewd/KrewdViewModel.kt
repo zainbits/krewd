@@ -142,6 +142,10 @@ data class UiState(
     val swipeToNote: Boolean = true,
     /** Code blocks open wrapped: the last pick of their Wrap button. */
     val codeWrap: Boolean = false,
+    /** How see-through the chat's liquid glass is (Settings > Chat): 0 = ultra-clear, 1 = fully tinted. */
+    val glassClarity: Float = Prefs.DEFAULT_GLASS_CLARITY,
+    /** Liquid glass and its stretch are on (Settings > Chat); battery saver turns them off regardless. */
+    val glassEnabled: Boolean = true,
     /** Side sessions, sub-agents and messages to other chats that agents drafted, waiting for the owner. */
     val proposals: List<Proposal> = emptyList(),
     /** Archived chats, loaded when @ needs them (null: not loaded). */
@@ -227,7 +231,7 @@ class KrewdViewModel(private val app: Application) {
             newTaskText = prefs.textDraft(NEW_DRAFT),
             draftChats = prefs.chatDraftKeys().associateWith { prefs.chatDraft(it) }.filterValues { it.isNotEmpty() },
             draftNotes = prefs.noteDraftKeys().associateWith { prefs.noteDraft(it) }.filterValues { it.isNotEmpty() },
-            swipeToNote = prefs.swipeToNote(), codeWrap = prefs.codeWrap(),
+            swipeToNote = prefs.swipeToNote(), codeWrap = prefs.codeWrap(), glassClarity = prefs.glassClarity(), glassEnabled = prefs.glassEnabled(),
         ),
     )
     val state: StateFlow<UiState> = _state.asStateFlow()
@@ -814,6 +818,17 @@ class KrewdViewModel(private val app: Application) {
     fun setSwipeToNote(on: Boolean) {
         prefs.setSwipeToNote(on)
         _state.update { it.copy(swipeToNote = on) }
+    }
+
+    /** Moves the glass slider; [save] when the finger lifts, so dragging does not send every step to the server. */
+    fun setGlassClarity(value: Float, save: Boolean) {
+        _state.update { it.copy(glassClarity = value) }
+        if (save) prefs.setGlassClarity(value)
+    }
+
+    fun setGlassEnabled(on: Boolean) {
+        prefs.setGlassEnabled(on)
+        _state.update { it.copy(glassEnabled = on) }
     }
 
     fun setCodeWrap(on: Boolean) {
@@ -1970,7 +1985,7 @@ class KrewdViewModel(private val app: Application) {
             _state.update {
                 it.copy(
                     highQuality = prefs.highQuality(), savedPrompts = prefs.savedPrompts(),
-                    swipeToNote = prefs.swipeToNote(), codeWrap = prefs.codeWrap(),
+                    swipeToNote = prefs.swipeToNote(), codeWrap = prefs.codeWrap(), glassClarity = prefs.glassClarity(), glassEnabled = prefs.glassEnabled(),
                 )
             }
         }
