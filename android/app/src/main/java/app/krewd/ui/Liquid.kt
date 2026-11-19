@@ -2,6 +2,8 @@ package app.krewd.ui
 
 import androidx.annotation.DrawableRes
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
@@ -85,6 +87,7 @@ private fun PlainPill(
     color: Color,
     contentColor: Color,
     shadow: Dp,
+    onLongClick: (() -> Unit)? = null,
     content: @Composable () -> Unit,
 ) {
     val fill = if (color.isSpecified) color else MaterialTheme.colorScheme.surfaceContainerHigh
@@ -92,7 +95,12 @@ private fun PlainPill(
     // The default floating pill has its hairline and shadow; a coloured button (Send) has neither.
     val border = if (color.isSpecified) null else BorderStroke(ShellDimensions.PILL_BORDER_WIDTH, MaterialTheme.colorScheme.outlineVariant)
     val lift = if (color.isSpecified) 0.dp else shadow
-    if (onClick != null) {
+    if (onLongClick != null) {
+        // The Surface clips its content, so the press ripple follows the capsule.
+        Surface(modifier = modifier, shape = CircleShape, color = fill, contentColor = ink, border = border, shadowElevation = lift) {
+            Box(Modifier.combinedClickable(enabled = enabled, onLongClick = onLongClick, onClick = onClick ?: {}), propagateMinConstraints = true) { content() }
+        }
+    } else if (onClick != null) {
         Surface(onClick = onClick, enabled = enabled, modifier = modifier, shape = CircleShape, color = fill, contentColor = ink, border = border, shadowElevation = lift, content = content)
     } else {
         Surface(modifier = modifier, shape = CircleShape, color = fill, contentColor = ink, border = border, shadowElevation = lift, content = content)
@@ -132,8 +140,10 @@ fun LiquidRow(
 }
 
 /**
- * A floating capsule (a page title, a status chip, a URL bar). It stretches under the finger in glass and flat;
- * with [onClick] a press released over it is a click. Content colour: adaptive on glass, the theme's otherwise.
+ * A floating capsule (a page title, a status chip, a URL bar, a browser tab). It stretches under the finger in
+ * glass and flat; with [onClick] a press released over it is a click, with [onLongClick] a press held still.
+ * In a scrolling row give its [scrollAxis], so a drag along the row scrolls it. Content colour: adaptive on
+ * glass, the theme's otherwise.
  */
 @Composable
 fun KrewdPill(
@@ -145,10 +155,12 @@ fun KrewdPill(
     color: Color = Color.Unspecified,
     contentColor: Color = Color.Unspecified,
     contentAlignment: Alignment = Alignment.CenterStart,
+    onLongClick: (() -> Unit)? = null,
+    scrollAxis: Orientation? = null,
     content: @Composable BoxScope.() -> Unit,
 ) {
     when (val look = look(glass)) {
-        Look.Plain -> PlainPill(modifier.height(height), onClick, enabled, color, contentColor, if (height < 44.dp) 1.dp else 2.dp) {
+        Look.Plain -> PlainPill(modifier.height(height), onClick, enabled, color, contentColor, if (height < 44.dp) 1.dp else 2.dp, onLongClick) {
             Box(contentAlignment = contentAlignment, content = content)
         }
         else -> {
@@ -164,6 +176,8 @@ fun KrewdPill(
                     onClick = onClick,
                     enabled = enabled,
                     adaptiveContent = look == Look.Glass,
+                    onLongClick = onLongClick,
+                    scrollAxis = scrollAxis,
                     content = content,
                 )
             }

@@ -247,9 +247,10 @@ class NewTab(BaseModel):
 
 class TabView(BaseModel):
     mode: Literal["vertical", "horizontal"]
-    width: int = 0  # CSS pixels of the phone's view, for vertical
+    width: int = 0  # CSS pixels of the phone's view, for vertical (none: the phone's last size)
     height: int = 0
     scale: float = 0
+    by_agent: bool = False  # an agent switching the tab it works in (`krewd browser view`)
 
 
 PREF_KEY = r"^[a-z0-9][a-z0-9_.-]{0,79}$"
@@ -883,9 +884,7 @@ def create_app(hub: Hub, token: str, lifespan_hub: bool = True) -> FastAPI:
             claimed = await hub.claim_tab(body.agent_session, body.tab_id, tab)
         except TabTaken as exc:
             raise HTTPException(409, str(exc)) from None
-        if tab and tab.get("view") == "vertical":  # agents work in the horizontal view
-            with suppress(Exception):
-                await browser.set_view(body.tab_id, "horizontal")
+        # The tab keeps its view; the agent switches it with `krewd browser view` when it needs the other one.
         return claimed
 
     def not_while_agent(tab_id: str) -> None:
@@ -905,7 +904,7 @@ def create_app(hub: Hub, token: str, lifespan_hub: bool = True) -> FastAPI:
 
     @app.post("/api/browser/tabs/{tab_id}/view", dependencies=auth)
     async def browser_view(tab_id: str, body: TabView) -> dict[str, Any]:
-        if body.mode == "vertical":
+        if body.mode == "vertical" and not body.by_agent:
             not_while_agent(tab_id)
         try:
             await browser.set_view(tab_id, body.mode, body.width, body.height, body.scale)

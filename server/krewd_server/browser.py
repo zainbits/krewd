@@ -5,8 +5,9 @@ streamed with `Page.startScreencast` (JPEG frames of the visible viewport). Inpu
 `Input.dispatchMouseEvent`, `Input.dispatchKeyEvent` and `Input.insertText`.
 
 The "vertical" view sizes the page to the phone with `Emulation.setDeviceMetricsOverride`. That
-override belongs to Krewd's DevTools connection, so it ends by itself when nobody watches the tab,
-and Krewd clears it as soon as an agent starts using the tab: agents always get the normal layout.
+override belongs to Krewd's DevTools connection, which Krewd keeps open while a tab is vertical (also
+when nobody watches it), so the tab keeps the last view it was given: an agent that starts using it
+gets that layout, and switches it itself (`krewd browser view`) when it needs the other one.
 
 Typed text goes straight to the page. It is never logged, stored or shown to the agent as text, so
 passwords and one-time codes can be entered from the phone without passing through the chat.
@@ -41,6 +42,8 @@ SCREENCAST = {
 MAX_FPS = {"standard": 30, "high": 60}
 KEEPALIVE_SECONDS = 10  # resend the last frame so idle streams stay open and dead ones are noticed
 IDLE_CLOSE_SECONDS = 30
+# The vertical view before the phone has asked for one (a common phone screen in CSS pixels).
+DEFAULT_PHONE_VIEW = {"width": 412, "height": 915, "scale": 2.625}
 OWNER_GRACE_SECONDS = 4  # a tab the owner just used is not taken for an agent's
 # The Krewd location extension (deploy/fixed-location). Its manifest carries a fixed public key, so its id is the
 # same on every machine. Its set.html page reads or changes the location it answers pages with.
@@ -218,9 +221,11 @@ class Browser:
         self.links: dict[str, TabLink] = {}
         self.lock = asyncio.Lock()
         self.touched: dict[str, float] = {}  # tab id -> when the owner last sent it input
-        # The owner's vertical view per tab ({width, height, scale}). Kept across reconnects, so it comes
-        # back when the phone watches again; an agent using the tab drops it (agents work in horizontal).
+        # The vertical view per tab ({width, height, scale}), set from the phone or by an agent. Kept until
+        # someone switches the tab back to horizontal (or it closes), and across reconnects.
         self.views: dict[str, dict[str, float]] = {}
+        # The phone's screen from its last vertical request: what an agent's "vertical" uses.
+        self.phone_view: dict[str, float] = dict(DEFAULT_PHONE_VIEW)
         self.location_lock = asyncio.Lock()
         self.tasks: set[asyncio.Task] = set()
 
@@ -254,11 +259,17 @@ class Browser:
         await asyncio.to_thread(self._http, f"/json/close/{target_id}")
 
     async def set_view(self, target_id: str, mode: str, width: int = 0, height: int = 0, scale: float = 0) -> None:
-        """"vertical": lay the page out for the phone's screen (CSS pixels); "horizontal": the normal window."""
+        """"vertical": lay the page out for the phone's screen (CSS pixels; none given: the phone's last size);
+        "horizontal": the normal window."""
         if mode == "vertical":
-            if not (200 <= width <= 1500 and 200 <= height <= 3000 and 0.5 <= scale <= 5):
+            if not (width or height or scale):
+                view = dict(self.phone_view)
+            elif 200 <= width <= 1500 and 200 <= height <= 3000 and 0.5 <= scale <= 5:
+                view = {"width": int(width), "height": int(height), "scale": scale}
+                self.phone_view = dict(view)
+            else:
                 raise ValueError("vertical needs width 200..1500, height 200..3000 and scale 0.5..5")
-            self.views[target_id] = {"width": int(width), "height": int(height), "scale": scale}
+            self.views[target_id] = view
             await self._emulate(await self.link(target_id))
         elif mode == "horizontal":
             self.views.pop(target_id, None)
@@ -281,8 +292,8 @@ class Browser:
     async def watch(self, on_activity, on_connect=None, on_closed=None) -> None:
         """Follow the browser's tabs; report a tab that opens or navigates while the owner is not using it.
 
-        `on_activity({id, url, title})` returns the session it was linked to, or None. A linked tab that is
-        in the vertical view goes back to horizontal, since an agent is now driving it. `on_connect()` runs
+        `on_activity({id, url, title})` returns the session it was linked to, or None. The tab keeps its view
+        (the agent switches it when it needs to). `on_connect()` runs
         each time the browser is reached (at start and after Brave restarts), without holding up the watch.
         `on_closed(tab_id)` runs when a tab closes.
         """
@@ -319,15 +330,7 @@ class Browser:
                         known[tab_id] = url
                         if time.monotonic() - self.touched.get(tab_id, 0) < OWNER_GRACE_SECONDS:
                             continue
-                        owner = await on_activity({"id": tab_id, "url": url, "title": info.get("title") or url})
-                        link = self.links.get(tab_id)
-                        if owner:
-                            self.views.pop(tab_id, None)
-                        if owner and link and link.emulated and not link.closed:
-                            try:
-                                await self._emulate(link)
-                            except Exception:
-                                pass
+                        await on_activity({"id": tab_id, "url": url, "title": info.get("title") or url})
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -470,6 +473,9 @@ class Browser:
         except Exception:
             pass
         link.casting = None
+        # A vertical tab keeps its connection: the view is this connection's override and would end with it.
+        if self.views.get(link.target_id) and link.emulated:
+            return
         await link.ws.close()
 
     async def input(self, target_id: str, event: dict[str, Any]) -> dict[str, Any]:

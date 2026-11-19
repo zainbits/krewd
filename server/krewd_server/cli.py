@@ -13,6 +13,8 @@
     krewd chat history CHAT [--last N] [--after SEQ]     a chat's messages (owner, agents), e.g. after a switch
     krewd secret request [--field KIND[:LABEL[:SELECTOR]]]... [--submit enter|none|SELECTOR] --reason TEXT [--tab ID]
     krewd security status | revoke PHONE | remove-key ID | reset   the owner's phones and keys (this machine only)
+    krewd browser tabs                       the agents' Brave tabs with their view (vertical or horizontal)
+    krewd browser view TAB vertical|horizontal   lay a tab out for the phone or the normal window
 
 A routine has one or more named triggers (cron schedules), e.g. check-in "55 9 * * 1-5" and check-out
 "0 19 * * 1-5". Every run gets its own new chat and is told which trigger fired; the next run deletes the
@@ -20,6 +22,11 @@ last one's chat, unless that run failed or waits for the owner (`krewd routines 
 more than one attempt (--attempts check-out 3): a run that cannot finish yet asks for a follow-up with
 `krewd routines later`, and the next attempt continues in the same chat; Krewd refuses past the limit.
 Notes are kept between runs and shown to each run: only lasting lessons go there, never what a run did.
+
+A tab keeps the last view it was given (vertical: the page laid out for the owner's phone; horizontal: the
+normal 1080p window), also when an agent starts using it. Switch it with `krewd browser view` when the work
+needs the other layout. TAB is the tab's DevTools target id (browser-harness `current_tab()`) or its first
+characters.
 
 A sign-in request (`krewd secret request`) asks the owner for a password, a one-time code or another secret on
 the phone. The agent never sees it: the owner types it there, Krewd types it into the page's fields and submits
@@ -346,6 +353,24 @@ def _secret(args: argparse.Namespace) -> int:
     return 1
 
 
+def _browser(args: argparse.Namespace) -> int:
+    state = call("GET", "/api/browser/tabs")
+    if not state.get("available"):
+        raise CliError(state.get("reason") or "the agents' browser is not running")
+    tabs = state["tabs"]
+    if args.browser_action == "tabs":
+        for t in tabs:
+            print(f"{t['id']}  {t['view']:<10}  {t['title'][:60]}  {t['url'][:80]}")
+        return 0
+    ids = [t["id"] for t in tabs if t["id"].lower().startswith(args.tab.lower())]
+    if len(ids) != 1:
+        raise CliError(f"{args.tab!r} matches {len(ids)} tabs (krewd browser tabs)")
+    call("POST", f"/api/browser/tabs/{ids[0]}/view", {"mode": args.mode, "by_agent": True})
+    print(f"Tab {ids[0]} is now {args.mode}"
+          + (" (laid out for the owner's phone)." if args.mode == "vertical" else " (the normal window)."))
+    return 0
+
+
 def _security(args: argparse.Namespace) -> int:
     state = call("GET", "/api/security")
     if args.security_action == "status":
@@ -427,6 +452,14 @@ def main(argv: list[str] | None = None) -> int:
         "key", help="the key's id (krewd security status)")
     secsub.add_parser("reset", help="lost phone and keys: remove every owner key and phone, make a new setup token")
 
+    br = sub.add_parser("browser", help="the agents' Brave tabs and their view (vertical for the phone, horizontal)")
+    brsub = br.add_subparsers(dest="browser_action", required=True)
+    brsub.add_parser("tabs", help="the tabs with their view")
+    view = brsub.add_parser("view", help="lay a tab out for the owner's phone (vertical) or the normal window (horizontal); "
+                            "it keeps that view until someone changes it")
+    view.add_argument("tab", help="the tab's DevTools target id (browser-harness current_tab()) or its first characters")
+    view.add_argument("mode", choices=["vertical", "horizontal"])
+
     sched = sub.add_parser("schedule", help="check a 5-field cron schedule and show its next runs")
     sched.add_argument("cron")
     sched.add_argument("--timezone")
@@ -501,6 +534,8 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.cmd == "secret":
             return _secret(args)
+        if args.cmd == "browser":
+            return _browser(args)
         if args.cmd == "security":
             return _security(args)
         if args.cmd == "schedule":

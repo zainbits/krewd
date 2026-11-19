@@ -758,7 +758,7 @@ private fun Composer(
 private fun ComposerShell(backdrop: GlassBackdrop, modifier: Modifier, content: @Composable () -> Unit) {
     if (LocalKrewdGlass.current.on) {
         // The composer keeps its own colours (no light/dark switching while you type).
-        GlassSurface(backdrop = backdrop, modifier = modifier, shape = GlassShape.rounded(30.dp), adaptiveContent = false) { content() }
+        GlassSurface(backdrop = backdrop, modifier = modifier, shape = GlassShape.rounded(30.dp), adaptiveContent = false, clipContent = false) { content() }
     } else {
         Surface(
             modifier = modifier,

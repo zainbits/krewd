@@ -76,6 +76,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.ui.zIndex
 import androidx.compose.ui.focus.FocusRequester
@@ -359,16 +360,23 @@ private fun Favicon(tab: BrowserTab, size: androidx.compose.ui.unit.Dp = 22.dp) 
 private fun TabPill(tab: BrowserTab, selected: Boolean, actions: TabActions) {
     var menu by remember { mutableStateOf(false) }
     Box {
-        SmallPill(
-            Modifier.widthIn(max = 160.dp).combinedClickable(onClick = { actions.onSelect(tab) }, onLongClick = { menu = true }),
-            color = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerHigh,
+        // A flat liquid pill (it is part of the strip the New tab and count glass shows): it stretches under the
+        // finger, a drag along the strip scrolls it, a long press opens the tab's menu.
+        KrewdPill(
+            Modifier.widthIn(max = 160.dp),
+            onClick = { actions.onSelect(tab) },
+            onLongClick = { menu = true },
+            scrollAxis = Orientation.Horizontal,
+            glass = false,
+            height = SMALL_PILL,
+            color = if (selected) MaterialTheme.colorScheme.primaryContainer else Color.Unspecified,
+            contentColor = if (selected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface,
         ) {
             Row(Modifier.padding(start = 6.dp, end = 12.dp), horizontalArrangement = Arrangement.spacedBy(7.dp), verticalAlignment = Alignment.CenterVertically) {
                 Favicon(tab)
                 Text(
                     tab.title.ifBlank { tab.host.ifBlank { "New tab" } },
                     style = MaterialTheme.typography.labelLarge,
-                    color = if (selected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f, fill = false),
@@ -580,7 +588,8 @@ private fun ControlsRow(
                 }
             }
         }
-        KrewdPill(Modifier.weight(1f).padding(start = gap), height = SMALL_PILL) {
+        // The pill's own tap starts editing, so the bar stretches like the rest (no square highlight of its own).
+        KrewdPill(Modifier.weight(1f).padding(start = gap), height = SMALL_PILL, onClick = if (editing || viewOnly) null else ({ onEditing(true) })) {
             UrlField(tab, editing && !viewOnly, { if (!viewOnly) onEditing(it) }, onGo, onCopy)
         }
         Box(Modifier.padding(start = gap)) {
@@ -633,7 +642,7 @@ private fun UrlField(tab: BrowserTab?, editing: Boolean, onEditing: (Boolean) ->
             modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp).focusRequester(focus),
         )
     } else {
-        Row(Modifier.fillMaxSize().clickable { onEditing(true) }.padding(start = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.fillMaxSize().padding(start = 14.dp), verticalAlignment = Alignment.CenterVertically) {
             Text(
                 tab?.url?.removePrefix("https://")?.removePrefix("http://")?.removePrefix("www.")?.ifBlank { null } ?: "Search or type a URL",
                 style = MaterialTheme.typography.bodyMedium,
