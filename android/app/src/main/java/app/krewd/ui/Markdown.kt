@@ -102,6 +102,9 @@ import org.commonmark.node.SoftLineBreak
 import org.commonmark.node.StrongEmphasis
 import org.commonmark.node.ThematicBreak
 import org.commonmark.parser.Parser
+import org.commonmark.node.ListItem
+import androidx.compose.runtime.compositionLocalOf
+import androidx.compose.runtime.CompositionLocalProvider
 import org.commonmark.node.Image as MdImage
 import org.commonmark.node.Text as MdText
 
@@ -117,8 +120,52 @@ private data class MdStyle(val codeBackground: Color, val links: TextLinkStyles,
 
 /** Renders [text] as Markdown. Wrap in a SelectionContainer to make it selectable. */
 @Composable
-fun Markdown(text: String, modifier: Modifier = Modifier, notes: Boolean = true) {
+fun Markdown(text: String, modifier: Modifier = Modifier, notes: Boolean = true, fade: ((Int) -> Float)? = null) {
     val document = remember(text) { parser.parse(text) }
+    if (fade != null) {
+        // The paragraph or heading being written fades its newest characters in (StreamText.kt).
+        val last = remember(document) {
+            var n: Node? = document.lastChild
+            while (n is ListBlock || n is ListItem || n is BlockQuote) n = n.lastChild
+            n?.takeIf { it is Paragraph || it is Heading }
+        }
+        if (last != null) {
+            CompositionLocalProvider(LocalFade provides (last to fade)) { Markdown(document, modifier, notes) }
+            return
+        }
+    }
+    Markdown(document, modifier, notes)
+}
+
+/** The block being written and how faded its last characters are, while a reply streams in. */
+private val LocalFade = compositionLocalOf<Pair<Node, (Int) -> Float>?> { null }
+
+/** [base] with its newest characters see-through, as [fade] says (by distance from the end). */
+private fun faded(base: AnnotatedString, fade: (Int) -> Float, color: Color): AnnotatedString {
+    var i = base.length - 1
+    var runEnd = -1
+    var runAlpha = 1f
+    val spans = ArrayList<Triple<Int, Int, Float>>()
+    while (i >= 0) {
+        // Ten steps of opacity are smooth to the eye and keep the spans few.
+        val a = (fade(base.length - 1 - i) * 10).toInt() / 10f
+        if (a >= 1f) break
+        if (runEnd < 0 || a != runAlpha) {
+            if (runEnd >= 0) spans += Triple(i + 1, runEnd, runAlpha)
+            runEnd = i + 1
+            runAlpha = a
+        }
+        i--
+    }
+    if (runEnd >= 0) spans += Triple(i + 1, runEnd, runAlpha)
+    if (spans.isEmpty()) return base
+    return AnnotatedString.Builder(base).apply {
+        spans.forEach { (from, to, a) -> addStyle(SpanStyle(color = color.copy(alpha = color.alpha * a)), from, to) }
+    }.toAnnotatedString()
+}
+
+@Composable
+private fun Markdown(document: Node, modifier: Modifier, notes: Boolean) {
     val colors = MaterialTheme.colorScheme
     val uriHandler = LocalUriHandler.current
     val style = remember(colors, uriHandler) {
@@ -137,15 +184,15 @@ fun Markdown(text: String, modifier: Modifier = Modifier, notes: Boolean = true)
  * every few words made long replies stutter. The part being written takes no margin notes until it is done.
  */
 @Composable
-fun LiveMarkdown(text: String, modifier: Modifier = Modifier) {
+fun LiveMarkdown(text: String, fade: ((Int) -> Float)?, modifier: Modifier = Modifier) {
     val cut = stableEnd(text)
     if (cut <= 0) {
-        Markdown(text, modifier, notes = false)
+        Markdown(text, modifier, notes = false, fade = fade)
         return
     }
     Column(modifier, verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Markdown(text.substring(0, cut))
-        Markdown(text.substring(cut), notes = false)
+        Markdown(remember(text.substring(0, cut)) { text.substring(0, cut) })
+        Markdown(text.substring(cut), notes = false, fade = fade)
     }
 }
 
@@ -247,12 +294,19 @@ private fun Blocks(parent: Node, style: MdStyle, depth: Int, gap: Dp = 8.dp, tar
 }
 
 @Composable
+private fun fadedText(node: Node, style: MdStyle, color: Color): AnnotatedString {
+    val base = remember(node, style) { inlineText(node, style) }
+    val fade = LocalFade.current
+    return if (fade != null && fade.first === node) faded(base, fade.second, color) else base
+}
+
+@Composable
 private fun Block(node: Node, style: MdStyle, depth: Int) {
     val body = MaterialTheme.typography.bodyLarge
     val onSurface = MaterialTheme.colorScheme.onSurface
     when (node) {
-        is Heading -> Text(remember(node, style) { inlineText(node, style) }, style = headingStyle(node.level), color = onSurface)
-        is Paragraph -> Text(remember(node, style) { inlineText(node, style) }, style = body, color = onSurface)
+        is Heading -> Text(fadedText(node, style, onSurface), style = headingStyle(node.level), color = onSurface)
+        is Paragraph -> Text(fadedText(node, style, onSurface), style = body, color = onSurface)
         is ListBlock -> ListView(node, style, depth)
         is BlockQuote -> Quote(node, style, depth)
         is ThematicBreak -> HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)

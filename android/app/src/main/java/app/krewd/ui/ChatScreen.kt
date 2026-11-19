@@ -54,6 +54,8 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -153,7 +155,11 @@ fun ChatScreen(state: UiState, viewModel: KrewdViewModel) {
     }
     // The reply streaming in now. While you read above the bottom, the text you are reading stays put as it grows.
     val liveKey = (items.lastOrNull() as? TextItem)?.takeIf { busy && !it.isThought }?.key
-    val liveReply = remember(listState, liveKey) { LiveReply(liveKey) { key -> if (!follow && !listState.isScrollInProgress) listState.holdRow(key) } }
+    val liveReply = remember(listState, liveKey) { LiveReply(liveKey) { key, px ->
+        // The list keeps its bottom edge still, so a reply growing at its bottom pushes what you read upward.
+        // Scroll the same distance the other way, before the frame is drawn, while that reply is the lowest row.
+        if (!follow && listState.layoutInfo.visibleItemsInfo.firstOrNull()?.key == key) listState.dispatchRawDelta(px.toFloat())
+    } }
 
     val bars = WindowInsets.statusBars.union(WindowInsets.displayCutout).asPaddingValues()
     var settingsOpen by rememberSaveable(state.openSessionId) { mutableStateOf(false) }
@@ -801,8 +807,16 @@ private fun ReplyText(item: TextItem) {
     val hooks = LocalNoteHooks.current
     val live = LocalLiveReply.current
     val streaming = live.key == item.key
-    val text = rememberSmoothText(item.key, item.text, live = streaming, onGrow = { live.hold(item.key) })
-    val body: @Composable () -> Unit = { if (streaming) LiveMarkdown(text) else Markdown(text) }
+    val smooth = rememberSmoothText(item.key, item.text, live = streaming)
+    var height by remember(item.key) { mutableIntStateOf(-1) }
+    val measured = Modifier.onGloballyPositioned { c ->
+        val h = c.size.height
+        if (height >= 0 && h > height) live.grew(item.key, h - height)
+        height = h
+    }
+    val body: @Composable () -> Unit = {
+        Box(measured) { if (streaming) LiveMarkdown(smooth.text, smooth.fade) else Markdown(smooth.text) }
+    }
     if (hooks == null || item.role != "assistant") {
         SelectionContainer { body() }
         return
