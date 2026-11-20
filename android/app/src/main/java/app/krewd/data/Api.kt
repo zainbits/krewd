@@ -622,10 +622,18 @@ class KrewdApi(
 
     /**
      * Streams a file an agent handed back (GET /api/files) into [out], telling [progress] the bytes so far and the
-     * total (the response's length, else [size]; 0 when neither is known).
+     * total (the response's length, else [size]; 0 when neither is known). [onConnect] gets the connection before
+     * anything is read, so the caller can disconnect it to stop a download that is waiting on the network.
      */
-    fun downloadFile(path: String, out: java.io.OutputStream, size: Long? = null, progress: (Long, Long) -> Unit = { _, _ -> }) {
+    fun downloadFile(
+        path: String,
+        out: java.io.OutputStream,
+        size: Long? = null,
+        onConnect: (HttpURLConnection) -> Unit = {},
+        progress: (Long, Long) -> Unit = { _, _ -> },
+    ) {
         val conn = open("$baseUrl/api/files?path=" + java.net.URLEncoder.encode(path, "UTF-8").replace("+", "%20"))
+        onConnect(conn)
         try {
             conn.connectTimeout = Timing.CONNECT_TIMEOUT_MS
             conn.readTimeout = 120_000

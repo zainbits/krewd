@@ -188,25 +188,27 @@ fun SentFiles(files: List<Attachment>, color: Color) {
     }
 }
 
-/** Files the agent handed back: tap one to save it to Downloads/Krewd and open it. */
+/** Files the agent handed back: tap one to save it to Downloads/Krewd and open it; tap it again to cancel. */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-fun HandedFiles(files: List<Attachment>, downloading: Map<String, Float>, onOpen: (Attachment) -> Unit) {
+fun HandedFiles(files: List<Attachment>, downloading: Map<String, Float>, onOpen: (Attachment) -> Unit, onCancel: (Attachment) -> Unit) {
     FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        files.forEach { f -> HandedFile(f, downloading[f.path], onOpen = { onOpen(f) }) }
+        files.forEach { f -> HandedFile(f, downloading[f.path], onOpen = { onOpen(f) }, onCancel = { onCancel(f) }) }
     }
 }
 
-/** One handed-back file. While it downloads, a shade fills the chip from the left as the bytes arrive. */
+/**
+ * One handed-back file. While it downloads, a shade fills the chip from the left as the bytes arrive and the
+ * download icon turns into a cancel icon: a tap then stops the download and deletes the partial file.
+ */
 @Composable
-private fun HandedFile(file: Attachment, progress: Float?, onOpen: () -> Unit) {
+private fun HandedFile(file: Attachment, progress: Float?, onOpen: () -> Unit, onCancel: () -> Unit) {
     val colors = MaterialTheme.colorScheme
     val shown by androidx.compose.animation.core.animateFloatAsState(progress ?: 0f, label = "download")
     val shade = colors.primary.copy(alpha = 0.28f)
     val shape = RoundedCornerShape(8.dp)
     Surface(
-        onClick = onOpen,
-        enabled = progress == null,
+        onClick = if (progress != null) onCancel else onOpen,
         shape = shape,
         color = Color.Transparent,
         border = androidx.compose.foundation.BorderStroke(1.dp, if (progress != null) colors.primary.copy(alpha = 0.6f) else colors.outline),
@@ -220,8 +222,8 @@ private fun HandedFile(file: Attachment, progress: Float?, onOpen: () -> Unit) {
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Icon(
-                painterResource(R.drawable.ic_download_24),
-                contentDescription = if (progress != null) "Downloading" else "Download",
+                painterResource(if (progress != null) R.drawable.ic_close_24 else R.drawable.ic_download_24),
+                contentDescription = if (progress != null) "Cancel download" else "Download",
                 tint = colors.primary,
                 modifier = Modifier.size(SuggestionChipDefaults.IconSize),
             )

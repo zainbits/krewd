@@ -55,6 +55,7 @@ import app.krewd.data.closeBrowserTab
 import app.krewd.data.newTab
 import app.krewd.data.setTabView
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -1478,6 +1479,8 @@ class KrewdViewModel(private val app: Application) {
     val downloading: StateFlow<Map<String, Float>> = _downloading.asStateFlow()
     private val APK_MIME = "application/vnd.android.package-archive"
     private val saved = HashMap<String, Uri>() // "path|size" -> its copy in Downloads
+    private val downloadJobs = HashMap<String, Job>() // path -> its running download
+    private val downloadConns = HashMap<Job, AtomicReference<java.net.HttpURLConnection?>>() // its connection, to close on cancel
 
     /** Saves a file the agent handed back to Downloads/Krewd (once), then opens it. */
     fun openSharedFile(file: Attachment) {
@@ -1486,22 +1489,43 @@ class KrewdViewModel(private val app: Application) {
         val key = "${file.path}|${file.size}"
         saved[key]?.takeIf { exists(it) }?.let { if (view(it, file.mime)) return }
         _downloading.update { it + (file.path to 0f) }
-        scope.launch {
+        val conn = AtomicReference<java.net.HttpURLConnection?>()
+        val job = scope.launch(start = kotlinx.coroutines.CoroutineStart.LAZY) {
             try {
-                val uri = withContext(Dispatchers.IO) { saveToDownloads(client, file) }
+                val uri = withContext(Dispatchers.IO) { saveToDownloads(client, file, conn) }
                 saved[key] = uri
                 if (!view(uri, file.mime)) toast("Saved ${file.name} to Downloads/Krewd")
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                toast(e.message ?: "Download failed")
+                // A cancelled download ends with the closed connection's error: not a failure to report.
+                if (currentCoroutineContext()[Job]?.isActive != false) toast(e.message ?: "Download failed")
             } finally {
-                _downloading.update { it - file.path }
+                val me = currentCoroutineContext()[Job]
+                downloadConns.remove(me)
+                // Only this download's own entry: after a cancel the same file may already be downloading again.
+                if (downloadJobs[file.path] === me) {
+                    downloadJobs.remove(file.path)
+                    _downloading.update { it - file.path }
+                }
             }
         }
+        downloadJobs[file.path] = job
+        downloadConns[job] = conn
+        job.start()
     }
 
-    private fun saveToDownloads(client: KrewdApi, file: Attachment): Uri {
+    /** Stops [file]'s download; the half-written copy in Downloads is deleted ([saveToDownloads]). */
+    fun cancelSharedFile(file: Attachment) {
+        val job = downloadJobs.remove(file.path) ?: return
+        job.cancel()
+        // Closing the connection ends a read that is waiting on the network straight away.
+        downloadConns[job]?.get()?.let { c -> Thread { runCatching { c.disconnect() } }.start() }
+        _downloading.update { it - file.path }
+    }
+
+    private suspend fun saveToDownloads(client: KrewdApi, file: Attachment, conn: AtomicReference<java.net.HttpURLConnection?>): Uri {
+        val job = currentCoroutineContext()[Job]
         val resolver = app.contentResolver
         val values = ContentValues().apply {
             put(MediaStore.MediaColumns.DISPLAY_NAME, file.name)
@@ -1513,7 +1537,8 @@ class KrewdViewModel(private val app: Application) {
         try {
             var shown = -1
             resolver.openOutputStream(uri)!!.use { out ->
-                client.downloadFile(file.path, out, file.size) { done, total ->
+                client.downloadFile(file.path, out, file.size, onConnect = { conn.set(it); if (job?.isActive == false) it.disconnect() }) { done, total ->
+                    if (job?.isActive == false) throw CancellationException("Download cancelled")
                     // Every whole percent, so the chip's shade moves smoothly without flooding the UI.
                     val percent = if (total > 0) (done * 100 / total).toInt().coerceIn(0, 100) else 0
                     if (percent != shown) {
@@ -1522,10 +1547,12 @@ class KrewdViewModel(private val app: Application) {
                     }
                 }
             }
+            if (job?.isActive == false) throw CancellationException("Download cancelled")
             resolver.update(uri, ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }, null, null)
             return uri
         } catch (e: Exception) {
-            resolver.delete(uri, null, null)
+            // Failed or cancelled: remove the partial file, so nothing half-downloaded is left in Downloads.
+            runCatching { resolver.delete(uri, null, null) }
             throw e
         }
     }

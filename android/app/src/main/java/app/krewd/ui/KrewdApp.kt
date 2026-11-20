@@ -28,6 +28,7 @@ import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -126,6 +127,8 @@ fun KrewdApp(viewModel: KrewdViewModel) {
     val homeAsk = rememberHomeAsk()
     val navGlass = remember(tabsBackdrop, glass.on) { if (glass.on) MeniscusGlass(tabsBackdrop) else null }
     CompositionLocalProvider(
+        // The theme's text colour everywhere, glass included (white on dark, near-black on light).
+        LocalContentColor provides MaterialTheme.colorScheme.onSurface,
         LocalCodeWrap provides CodeWrap(state.codeWrap, viewModel::setCodeWrap),
         LocalKrewdGlass provides glass,
         LocalKrewdBackdrop provides if (glass.on) tabsBackdrop else null,
