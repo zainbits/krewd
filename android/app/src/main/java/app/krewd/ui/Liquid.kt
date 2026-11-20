@@ -142,8 +142,8 @@ fun LiquidRow(
 /**
  * A floating capsule (a page title, a status chip, a URL bar, a browser tab). It stretches under the finger in
  * glass and flat; with [onClick] a press released over it is a click, with [onLongClick] a press held still.
- * In a scrolling row give its [scrollAxis], so a drag along the row scrolls it. Content colour: adaptive on
- * glass, the theme's otherwise.
+ * In a scrolling row give its [scrollAxis], so a drag along the row scrolls it. Content colour: the theme's
+ * (the glass tint keeps it readable over anything).
  */
 @Composable
 fun KrewdPill(
@@ -175,7 +175,6 @@ fun KrewdPill(
                     elastic = true,
                     onClick = onClick,
                     enabled = enabled,
-                    adaptiveContent = look == Look.Glass,
                     onLongClick = onLongClick,
                     scrollAxis = scrollAxis,
                     content = content,
@@ -220,7 +219,6 @@ fun KrewdIconPill(
                     size = size,
                     enabled = enabled,
                     style = if (look == Look.Glass) LocalGlassStyle.current else flatStyle(color),
-                    adaptiveContent = look == Look.Glass,
                     icon = iconContent,
                 )
             }

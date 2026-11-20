@@ -234,10 +234,6 @@ fun ChatScreen(state: UiState, viewModel: KrewdViewModel) {
     // Liquid glass (Vitreous): the chat list is what the title bar and composer show through.
     val backdrop = rememberGlassBackdrop()
     val glassOn = LocalKrewdGlass.current.on
-    // The list scrolls in code too (following a reply); tell the glass, so its text colour keeps up.
-    LaunchedEffect(listState, glassOn) {
-        if (glassOn) snapshotFlow { listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset }.collect { backdrop.notifyChanged() }
-    }
     Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surface)) {
         // Rows that open and close keep their top edge in place (KeepInPlace.kt).
         val holdRow = remember(listState) { { key: Any -> listState.holdRow(key) } }
@@ -758,7 +754,7 @@ private fun Composer(
 private fun ComposerShell(backdrop: GlassBackdrop, modifier: Modifier, content: @Composable () -> Unit) {
     if (LocalKrewdGlass.current.on) {
         // The composer keeps its own colours (no light/dark switching while you type).
-        GlassSurface(backdrop = backdrop, modifier = modifier, shape = GlassShape.rounded(30.dp), adaptiveContent = false, clipContent = false) { content() }
+        GlassSurface(backdrop = backdrop, modifier = modifier, shape = GlassShape.rounded(30.dp), clipContent = false) { content() }
     } else {
         Surface(
             modifier = modifier,
