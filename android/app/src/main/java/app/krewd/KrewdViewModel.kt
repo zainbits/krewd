@@ -1476,6 +1476,7 @@ class KrewdViewModel(private val app: Application) {
     private val _downloading = MutableStateFlow<Map<String, Float>>(emptyMap())
     /** Handed-back files being downloaded right now: path to how much has arrived, 0 to 1. */
     val downloading: StateFlow<Map<String, Float>> = _downloading.asStateFlow()
+    private val APK_MIME = "application/vnd.android.package-archive"
     private val saved = HashMap<String, Uri>() // "path|size" -> its copy in Downloads
 
     /** Saves a file the agent handed back to Downloads/Krewd (once), then opens it. */
@@ -1531,6 +1532,13 @@ class KrewdViewModel(private val app: Application) {
 
     /** Opens a saved file in an app that can show it; false when no app can. */
     private fun view(uri: Uri, mime: String): Boolean {
+        // An APK needs this app to be allowed to install apps; without it the installer opens and does nothing.
+        if (mime == APK_MIME && !app.packageManager.canRequestPackageInstalls()) {
+            toast("Allow Krewd to install apps, then tap the file again")
+            val settings = Intent(android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:${app.packageName}"))
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            return runCatching { app.startActivity(settings) }.isSuccess
+        }
         val intent = Intent(Intent.ACTION_VIEW).setDataAndType(uri, mime)
             .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
         return runCatching { app.startActivity(intent) }.isSuccess

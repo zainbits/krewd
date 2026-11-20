@@ -527,7 +527,7 @@ private fun ChatTitle(state: UiState, expanded: Boolean) {
     val ink = LocalContentColor.current
     val turn by animateFloatAsState(if (expanded) 90f else 0f, animationSpec = tween(240), label = "caret")
     Row(
-        Modifier.heightIn(min = ShellDimensions.TITLE_PILL_HEIGHT).padding(start = 16.dp, end = 10.dp, top = 6.dp, bottom = 7.dp),
+        Modifier.heightIn(min = ShellDimensions.TITLE_PILL_HEIGHT).padding(start = 16.dp, end = 10.dp, top = if (expanded) 6.dp else 0.dp, bottom = if (expanded) 6.dp else 0.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Column(Modifier.weight(1f)) {
