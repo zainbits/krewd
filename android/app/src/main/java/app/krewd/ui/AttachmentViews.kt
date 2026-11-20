@@ -69,11 +69,9 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import io.github.zainbits.cohesion.GlassBackdrop
-import io.github.zainbits.cohesion.LocalGlassStyle
-import io.github.zainbits.cohesion.glassPullExempt
 import io.github.zainbits.vitreous.GlassShape
 import io.github.zainbits.vitreous.GlassSurface
-import io.github.zainbits.vitreous.LocalGlassPull
+import io.github.zainbits.cohesion.LocalGlassStyle
 
 /** Opens the system file picker (any type, several files); call the returned function to show it. */
 @Composable
@@ -239,7 +237,7 @@ fun HandedFiles(
 }
 
 /**
- * One handed-back file: a glass pill (flat glass: the chat it sits in cannot be seen through itself) with the
+ * One handed-back file: a plain pill (no glass or stretch: it sits inside the chat the glass shows) with the
  * name, shortened in the middle so the extension stays, and the size, which always shows. While it downloads a
  * shade fills it from the left, with pause and cancel buttons; paused, a resume button. Saved: a green tick (a
  * tap opens it). Broken off: a red stop sign (a tap resumes it, the cross discards it).
@@ -259,9 +257,7 @@ private fun HandedFile(file: Attachment, load: FileLoad?, onOpen: () -> Unit, on
     // Downloading: the chip itself does nothing (its buttons pause and cancel). Otherwise download, resume or open.
     val tap: (() -> Unit)? = if (load is FileLoad.Running) null else onOpen
     val longTap: (() -> Unit)? = peek?.let { show -> { show(file, bounds) } }
-    val glassOn = LocalKrewdGlass.current.on
     val body: @Composable () -> Unit = {
-        val exempt = Modifier.glassPullExempt(LocalGlassPull.current)
         Row(
             Modifier
                 .drawBehind { if (progress != null) drawRect(shade, size = size.copy(width = size.width * shown)) }
@@ -270,8 +266,8 @@ private fun HandedFile(file: Attachment, load: FileLoad?, onOpen: () -> Unit, on
             verticalAlignment = Alignment.CenterVertically,
         ) {
             when (load) {
-                is FileLoad.Running -> ChipButton(R.drawable.ic_pause_24, "Pause download", colors.primary, onPause, exempt)
-                is FileLoad.Paused -> ChipButton(R.drawable.ic_play_24, "Resume download", colors.primary, onOpen, exempt)
+                is FileLoad.Running -> ChipButton(R.drawable.ic_pause_24, "Pause download", colors.primary, onPause)
+                is FileLoad.Paused -> ChipButton(R.drawable.ic_play_24, "Resume download", colors.primary, onOpen)
                 else -> Icon(
                     painterResource(
                         when (load) {
@@ -312,7 +308,7 @@ private fun HandedFile(file: Attachment, load: FileLoad?, onOpen: () -> Unit, on
                 ChipButton(
                     R.drawable.ic_close_24,
                     if (load == FileLoad.Failed) "Discard the partial download" else "Cancel download",
-                    colors.onSurfaceVariant, onCancel, exempt,
+                    colors.onSurfaceVariant, onCancel,
                 )
             }
         }
@@ -320,35 +316,21 @@ private fun HandedFile(file: Attachment, load: FileLoad?, onOpen: () -> Unit, on
     val chip = Modifier
         .widthIn(max = 300.dp)
         .onGloballyPositioned { bounds = it.boundsInWindow() }
-    if (glassOn) {
-        val style = LocalGlassStyle.current
-        val glass = remember(style, colors.surfaceContainerHigh) { style.copy(solidColor = colors.surfaceContainerHigh) }
-        GlassSurface(
-            backdrop = null,
-            modifier = chip,
-            shape = GlassShape.Capsule,
-            style = glass,
-            elastic = true,
-            onClick = tap,
-            onLongClick = longTap,
-        ) { body() }
-    } else {
-        Surface(
-            shape = CircleShape,
-            color = colors.surfaceContainerHigh,
-            border = androidx.compose.foundation.BorderStroke(1.dp, colors.outlineVariant),
-            modifier = chip,
-        ) {
-            Box(Modifier.combinedClickable(enabled = tap != null || longTap != null, onLongClick = longTap, onClick = tap ?: {})) { body() }
-        }
+    Surface(
+        shape = CircleShape,
+        color = colors.surfaceContainerHigh,
+        border = androidx.compose.foundation.BorderStroke(1.dp, colors.outlineVariant),
+        modifier = chip,
+    ) {
+        Box(Modifier.combinedClickable(enabled = tap != null || longTap != null, onLongClick = longTap, onClick = tap ?: {})) { body() }
     }
 }
 
 /** A small round button inside a file chip (pause, resume, cancel), with a full-size touch target. */
 @Composable
-private fun ChipButton(@androidx.annotation.DrawableRes icon: Int, label: String, tint: Color, onClick: () -> Unit, modifier: Modifier) {
+private fun ChipButton(@androidx.annotation.DrawableRes icon: Int, label: String, tint: Color, onClick: () -> Unit) {
     Box(
-        modifier
+        Modifier
             .size(36.dp)
             .clip(CircleShape)
             .clickable(onClickLabel = label, role = androidx.compose.ui.semantics.Role.Button, onClick = onClick)
@@ -395,7 +377,10 @@ fun FilePeekCard(file: Attachment, chip: Rect, backdrop: GlassBackdrop?, onClose
             }
         }
         if (backdrop != null) {
-            GlassSurface(backdrop = backdrop, modifier = place, shape = GlassShape.rounded(16.dp)) { body() }
+            // A touch more tint than the rest of the glass (+10, at most fully tinted), so the name reads over anything.
+            val global = LocalGlassStyle.current
+            val style = remember(global) { global.copy(tintAlpha = (global.tintAlpha + 0.10f).coerceAtMost(1f)) }
+            GlassSurface(backdrop = backdrop, modifier = place, shape = GlassShape.rounded(16.dp), style = style) { body() }
         } else {
             Surface(modifier = place, shape = RoundedCornerShape(16.dp), color = MaterialTheme.colorScheme.surfaceContainerHighest, shadowElevation = 3.dp) { body() }
         }
