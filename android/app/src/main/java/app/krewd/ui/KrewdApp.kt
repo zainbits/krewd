@@ -120,8 +120,8 @@ fun KrewdApp(viewModel: KrewdViewModel) {
     }
     // Liquid glass: the Settings switch, off by itself in battery saver or heat (then Settings shows it off).
     val glassThrottled = rememberGlassThrottled()
-    val glass = KrewdGlass(on = state.glassEnabled && !glassThrottled, throttled = glassThrottled)
     val darkGlass = MaterialTheme.colorScheme.surface.luminance() < 0.5f
+    val glass = KrewdGlass(on = state.glassEnabled && !glassThrottled, throttled = glassThrottled, clarity = state.glassClarity, dark = darkGlass)
     // The tab screens are what the nav bar's glass (Meniscus) shows through.
     val tabsBackdrop = rememberGlassBackdrop()
     val homeAsk = rememberHomeAsk()

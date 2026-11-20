@@ -71,7 +71,9 @@ import androidx.compose.ui.semantics.semantics
 import io.github.zainbits.cohesion.GlassBackdrop
 import io.github.zainbits.vitreous.GlassShape
 import io.github.zainbits.vitreous.GlassSurface
-import io.github.zainbits.cohesion.LocalGlassStyle
+import io.github.zainbits.cohesion.GlassStyle
+import io.github.zainbits.cohesion.glassPullExempt
+import io.github.zainbits.vitreous.LocalGlassPull
 
 /** Opens the system file picker (any type, several files); call the returned function to show it. */
 @Composable
@@ -237,8 +239,8 @@ fun HandedFiles(
 }
 
 /**
- * One handed-back file: a plain pill (no glass or stretch: it sits inside the chat the glass shows) with the
- * name, shortened in the middle so the extension stays, and the size, which always shows. While it downloads a
+ * One handed-back file: a solid pill that stretches under the finger like the glass pieces, with no glass of its
+ * own (it sits inside the chat the glass shows), with the name, shortened in the middle so the extension stays, and the size, which always shows. While it downloads a
  * shade fills it from the left, with pause and cancel buttons; paused, a resume button. Saved: a green tick (a
  * tap opens it). Broken off: a red stop sign (a tap resumes it, the cross discards it).
  */
@@ -257,7 +259,9 @@ private fun HandedFile(file: Attachment, load: FileLoad?, onOpen: () -> Unit, on
     // Downloading: the chip itself does nothing (its buttons pause and cancel). Otherwise download, resume or open.
     val tap: (() -> Unit)? = if (load is FileLoad.Running) null else onOpen
     val longTap: (() -> Unit)? = peek?.let { show -> { show(file, bounds) } }
+    val glassOn = LocalKrewdGlass.current.on
     val body: @Composable () -> Unit = {
+        val exempt = Modifier.glassPullExempt(LocalGlassPull.current)
         Row(
             Modifier
                 .drawBehind { if (progress != null) drawRect(shade, size = size.copy(width = size.width * shown)) }
@@ -266,8 +270,8 @@ private fun HandedFile(file: Attachment, load: FileLoad?, onOpen: () -> Unit, on
             verticalAlignment = Alignment.CenterVertically,
         ) {
             when (load) {
-                is FileLoad.Running -> ChipButton(R.drawable.ic_pause_24, "Pause download", colors.primary, onPause)
-                is FileLoad.Paused -> ChipButton(R.drawable.ic_play_24, "Resume download", colors.primary, onOpen)
+                is FileLoad.Running -> ChipButton(R.drawable.ic_pause_24, "Pause download", colors.primary, onPause, exempt)
+                is FileLoad.Paused -> ChipButton(R.drawable.ic_play_24, "Resume download", colors.primary, onOpen, exempt)
                 else -> Icon(
                     painterResource(
                         when (load) {
@@ -308,7 +312,7 @@ private fun HandedFile(file: Attachment, load: FileLoad?, onOpen: () -> Unit, on
                 ChipButton(
                     R.drawable.ic_close_24,
                     if (load == FileLoad.Failed) "Discard the partial download" else "Cancel download",
-                    colors.onSurfaceVariant, onCancel,
+                    colors.onSurfaceVariant, onCancel, exempt,
                 )
             }
         }
@@ -316,21 +320,37 @@ private fun HandedFile(file: Attachment, load: FileLoad?, onOpen: () -> Unit, on
     val chip = Modifier
         .widthIn(max = 300.dp)
         .onGloballyPositioned { bounds = it.boundsInWindow() }
-    Surface(
-        shape = CircleShape,
-        color = colors.surfaceContainerHigh,
-        border = androidx.compose.foundation.BorderStroke(1.dp, colors.outlineVariant),
-        modifier = chip,
-    ) {
-        Box(Modifier.combinedClickable(enabled = tap != null || longTap != null, onLongClick = longTap, onClick = tap ?: {})) { body() }
+    if (glassOn) {
+        // Stretch without glass: a flat fill (no backdrop, no edge light), like Krewd's solid buttons.
+        val fill = colors.surfaceContainerHigh
+        val flat = remember(fill) { GlassStyle(solidColor = fill) }
+        GlassSurface(
+            backdrop = null,
+            modifier = chip,
+            shape = GlassShape.Capsule,
+            style = flat,
+            elastic = true,
+            onClick = tap,
+            onLongClick = longTap,
+        ) { body() }
+    } else {
+        // Glass off (Settings, battery saver or heat): the plain pill, no stretch.
+        Surface(
+            shape = CircleShape,
+            color = colors.surfaceContainerHigh,
+            border = androidx.compose.foundation.BorderStroke(1.dp, colors.outlineVariant),
+            modifier = chip,
+        ) {
+            Box(Modifier.combinedClickable(enabled = tap != null || longTap != null, onLongClick = longTap, onClick = tap ?: {})) { body() }
+        }
     }
 }
 
 /** A small round button inside a file chip (pause, resume, cancel), with a full-size touch target. */
 @Composable
-private fun ChipButton(@androidx.annotation.DrawableRes icon: Int, label: String, tint: Color, onClick: () -> Unit) {
+private fun ChipButton(@androidx.annotation.DrawableRes icon: Int, label: String, tint: Color, onClick: () -> Unit, modifier: Modifier) {
     Box(
-        Modifier
+        modifier
             .size(36.dp)
             .clip(CircleShape)
             .clickable(onClickLabel = label, role = androidx.compose.ui.semantics.Role.Button, onClick = onClick)
@@ -377,9 +397,9 @@ fun FilePeekCard(file: Attachment, chip: Rect, backdrop: GlassBackdrop?, onClose
             }
         }
         if (backdrop != null) {
-            // A touch more tint than the rest of the glass (+10, at most fully tinted), so the name reads over anything.
-            val global = LocalGlassStyle.current
-            val style = remember(global) { global.copy(tintAlpha = (global.tintAlpha + 0.10f).coerceAtMost(1f)) }
+            // The Glass clarity setting plus 10 (at most 100), so the name reads over anything.
+            val g = LocalKrewdGlass.current
+            val style = remember(g.clarity, g.dark) { GlassStyle.forClarity((g.clarity + 0.10f).coerceAtMost(1f), g.dark) }
             GlassSurface(backdrop = backdrop, modifier = place, shape = GlassShape.rounded(16.dp), style = style) { body() }
         } else {
             Surface(modifier = place, shape = RoundedCornerShape(16.dp), color = MaterialTheme.colorScheme.surfaceContainerHighest, shadowElevation = 3.dp) { body() }
