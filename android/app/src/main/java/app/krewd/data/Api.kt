@@ -66,6 +66,18 @@ class Prefs(context: Context) {
     /** Unsent composer text, per chat and for the new-task sheet. Phone only, never synced to the server. */
     private val drafts = context.getSharedPreferences("krewd_drafts", Context.MODE_PRIVATE)
 
+    /**
+     * Handed-back files saved on this phone: download key to "done|uri" (finished) or "part|uri" (broke off,
+     * resumable). Phone only, never synced to the server.
+     */
+    private val downloads = context.getSharedPreferences("krewd_downloads", Context.MODE_PRIVATE)
+
+    fun downloads(): Map<String, String> = downloads.all.mapNotNull { (k, v) -> (v as? String)?.let { k to it } }.toMap()
+
+    fun setDownload(key: String, value: String?) {
+        downloads.edit().apply { if (value == null) remove(key) else putString(key, value) }.apply()
+    }
+
     /** Called with (server key, value) whenever a synced setting changes here, to keep it on the server too. */
     @Volatile var onChange: ((String, Any?) -> Unit)? = null
 
@@ -621,15 +633,18 @@ class KrewdApi(
     }
 
     /**
-     * Streams a file an agent handed back (GET /api/files) into [out], telling [progress] the bytes so far and the
-     * total (the response's length, else [size]; 0 when neither is known). [onConnect] gets the connection before
-     * anything is read, so the caller can disconnect it to stop a download that is waiting on the network.
+     * Streams a file an agent handed back (GET /api/files), telling [progress] the bytes so far and the total (the
+     * response's length, else [size]; 0 when neither is known). With [from] > 0 it asks for the rest only (a Range
+     * request) and [output] is told whether the server sent just the rest (append) or the whole file (start over).
+     * [onConnect] gets the connection before anything is read, so the caller can disconnect it to stop a download
+     * that is waiting on the network.
      */
     fun downloadFile(
         path: String,
-        out: java.io.OutputStream,
         size: Long? = null,
+        from: Long = 0,
         onConnect: (HttpURLConnection) -> Unit = {},
+        output: (resumed: Boolean) -> java.io.OutputStream,
         progress: (Long, Long) -> Unit = { _, _ -> },
     ) {
         val conn = open("$baseUrl/api/files?path=" + java.net.URLEncoder.encode(path, "UTF-8").replace("+", "%20"))
@@ -638,21 +653,31 @@ class KrewdApi(
             conn.connectTimeout = Timing.CONNECT_TIMEOUT_MS
             conn.readTimeout = 120_000
             conn.setRequestProperty("Authorization", "Bearer ${bearer()}")
+            if (from > 0) conn.setRequestProperty("Range", "bytes=$from-")
             val code = conn.responseCode
+            // What was saved already is no part of the file now (it is the whole file, or the file shrank): start over.
+            if (code == 416 && from > 0) {
+                conn.disconnect()
+                return downloadFile(path, size, 0, onConnect, output, progress)
+            }
             if (code !in 200..299) {
                 throw ApiException(code, if (code == 404) "The file is no longer there" else "Download failed (HTTP $code)")
             }
-            val total = conn.contentLengthLong.takeIf { it > 0 } ?: size ?: 0L
-            conn.inputStream.use { input ->
-                val buffer = ByteArray(64 * 1024)
-                var done = 0L
-                progress(0, total)
-                while (true) {
-                    val n = input.read(buffer)
-                    if (n < 0) break
-                    out.write(buffer, 0, n)
-                    done += n
+            val resumed = code == 206 && from > 0
+            val start = if (resumed) from else 0L
+            val total = conn.contentLengthLong.takeIf { it > 0 }?.plus(start) ?: size ?: 0L
+            output(resumed).use { out ->
+                conn.inputStream.use { input ->
+                    val buffer = ByteArray(64 * 1024)
+                    var done = start
                     progress(done, total)
+                    while (true) {
+                        val n = input.read(buffer)
+                        if (n < 0) break
+                        out.write(buffer, 0, n)
+                        done += n
+                        progress(done, total)
+                    }
                 }
             }
         } finally {

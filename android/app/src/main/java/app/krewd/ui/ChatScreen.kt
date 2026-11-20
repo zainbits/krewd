@@ -920,8 +920,8 @@ private fun ChatRow(
         }
         is ApprovalItem -> ApprovalCard(item.approval, taskTitle = null, onDecide = { viewModel.decide(item.approval, it) })
         is FilesItem -> {
-            val downloading by viewModel.downloading.collectAsStateWithLifecycle()
-            HandedFiles(item.files, downloading, viewModel::openSharedFile, viewModel::cancelSharedFile)
+            val loads by viewModel.files.collectAsStateWithLifecycle()
+            HandedFiles(item.files, loads, viewModel::openSharedFile, viewModel::cancelSharedFile)
         }
         is SwitchItem -> SwitchRow(item)
         is NoticeItem -> Text(

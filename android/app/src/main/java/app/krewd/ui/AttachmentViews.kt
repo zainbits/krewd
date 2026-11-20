@@ -44,7 +44,9 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import app.krewd.R
+import app.krewd.LocalKrewdColors
 import app.krewd.data.Attachment
+import app.krewd.data.FileLoad
 import app.krewd.data.ImageRef
 import app.krewd.data.PendingFile
 import app.krewd.data.humanSize
@@ -191,18 +193,20 @@ fun SentFiles(files: List<Attachment>, color: Color) {
 /** Files the agent handed back: tap one to save it to Downloads/Krewd and open it; tap it again to cancel. */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-fun HandedFiles(files: List<Attachment>, downloading: Map<String, Float>, onOpen: (Attachment) -> Unit, onCancel: (Attachment) -> Unit) {
+fun HandedFiles(files: List<Attachment>, loads: Map<String, FileLoad>, onOpen: (Attachment) -> Unit, onCancel: (Attachment) -> Unit) {
     FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        files.forEach { f -> HandedFile(f, downloading[f.path], onOpen = { onOpen(f) }, onCancel = { onCancel(f) }) }
+        files.forEach { f -> HandedFile(f, loads[f.downloadKey], onOpen = { onOpen(f) }, onCancel = { onCancel(f) }) }
     }
 }
 
 /**
  * One handed-back file. While it downloads, a shade fills the chip from the left as the bytes arrive and the
- * download icon turns into a cancel icon: a tap then stops the download and deletes the partial file.
+ * download icon turns into a cancel icon: a tap then stops the download and deletes the partial file. Saved:
+ * a green tick (a tap opens it). Broken off: a red stop sign (a tap resumes it).
  */
 @Composable
-private fun HandedFile(file: Attachment, progress: Float?, onOpen: () -> Unit, onCancel: () -> Unit) {
+private fun HandedFile(file: Attachment, load: FileLoad?, onOpen: () -> Unit, onCancel: () -> Unit) {
+    val progress = (load as? FileLoad.Running)?.progress
     val colors = MaterialTheme.colorScheme
     val shown by androidx.compose.animation.core.animateFloatAsState(progress ?: 0f, label = "download")
     val shade = colors.primary.copy(alpha = 0.28f)
@@ -222,9 +226,25 @@ private fun HandedFile(file: Attachment, progress: Float?, onOpen: () -> Unit, o
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Icon(
-                painterResource(if (progress != null) R.drawable.ic_close_24 else R.drawable.ic_download_24),
-                contentDescription = if (progress != null) "Cancel download" else "Download",
-                tint = colors.primary,
+                painterResource(
+                    when (load) {
+                        is FileLoad.Running -> R.drawable.ic_close_24
+                        FileLoad.Done -> R.drawable.ic_check_24
+                        FileLoad.Failed -> R.drawable.ic_report_24
+                        null -> R.drawable.ic_download_24
+                    },
+                ),
+                contentDescription = when (load) {
+                    is FileLoad.Running -> "Cancel download"
+                    FileLoad.Done -> "Downloaded"
+                    FileLoad.Failed -> "Download failed, tap to resume"
+                    null -> "Download"
+                },
+                tint = when (load) {
+                    FileLoad.Done -> LocalKrewdColors.current.ok
+                    FileLoad.Failed -> colors.error
+                    else -> colors.primary
+                },
                 modifier = Modifier.size(SuggestionChipDefaults.IconSize),
             )
             Text(

@@ -453,6 +453,9 @@ async def test_files_the_agent_names_are_handed_back(hub):
         got = await client.get("/api/files", params={"path": f"{shared}/report.pdf"}, headers=headers)
         assert got.status_code == 200 and got.content == b"%PDF-1.4 test"
         assert "report.pdf" in got.headers["content-disposition"]
+        # The app resumes a broken-off download with a Range request for the rest.
+        rest = await client.get("/api/files", params={"path": f"{shared}/report.pdf"}, headers={**headers, "Range": "bytes=4-"})
+        assert rest.status_code == 206 and rest.content == b"-1.4 test"
         for outside in (f"{shared}/escape.txt", f"{hub.settings.workdir}/secret.txt", f"{shared}/../secret.txt", "secret.txt"):
             assert (await client.get("/api/files", params={"path": outside}, headers=headers)).status_code == 404
 

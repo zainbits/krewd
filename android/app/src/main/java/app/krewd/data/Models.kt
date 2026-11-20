@@ -9,6 +9,9 @@ data class ModeInfo(val id: String, val name: String, val description: String)
 data class Attachment(val name: String, val path: String, val size: Long, val mime: String) {
     val isImage: Boolean get() = isImageFile(mime, name)
 
+    /** Which download this is on the phone: the same path with a new size is a new file. */
+    val downloadKey: String get() = "$path|$size"
+
     companion object {
         fun list(a: JSONArray?): List<Attachment> = a.objects().map {
             Attachment(it.optString("name"), it.optString("path"), it.optLong("size"), it.optString("mime"))
@@ -624,4 +627,16 @@ data class OwnerKey(val id: String, val kind: String, val name: String, val keyH
         fun from(o: JSONObject) = OwnerKey(o.optString("id"), o.optString("kind"), o.optString("name"),
             o.optStringOrNull("key_handle"), o.optStringOrNull("credential_id"))
     }
+}
+
+/** Where a file the agent handed back stands on this phone. */
+sealed interface FileLoad {
+    /** Downloading: [progress] of it has arrived, 0 to 1. */
+    data class Running(val progress: Float) : FileLoad
+
+    /** Saved in Downloads/Krewd. */
+    data object Done : FileLoad
+
+    /** The download broke off; tapping again resumes it from where it stopped. */
+    data object Failed : FileLoad
 }

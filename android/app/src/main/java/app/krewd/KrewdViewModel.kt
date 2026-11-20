@@ -7,6 +7,7 @@ import android.net.Uri
 import android.provider.MediaStore
 import androidx.compose.ui.graphics.asImageBitmap
 import app.krewd.constants.Timing
+import app.krewd.data.FileLoad
 import app.krewd.data.AgentLogin
 import app.krewd.data.ApiException
 import app.krewd.data.Approval
@@ -1474,85 +1475,135 @@ class KrewdViewModel(private val app: Application) {
         return bounds.outMimeType ?: "image/png"
     }
 
-    private val _downloading = MutableStateFlow<Map<String, Float>>(emptyMap())
-    /** Handed-back files being downloaded right now: path to how much has arrived, 0 to 1. */
-    val downloading: StateFlow<Map<String, Float>> = _downloading.asStateFlow()
+    private val _files = MutableStateFlow<Map<String, FileLoad>>(emptyMap())
+    /** Handed-back files by [Attachment.downloadKey]: downloading (how much has arrived), saved, or broken off. */
+    val files: StateFlow<Map<String, FileLoad>> = _files.asStateFlow()
     private val APK_MIME = "application/vnd.android.package-archive"
-    private val saved = HashMap<String, Uri>() // "path|size" -> its copy in Downloads
-    private val downloadJobs = HashMap<String, Job>() // path -> its running download
+    private val saved = java.util.concurrent.ConcurrentHashMap<String, Uri>() // key -> its finished copy in Downloads
+    private val partial = java.util.concurrent.ConcurrentHashMap<String, Uri>() // key -> the unfinished copy to resume
+    private val downloadJobs = HashMap<String, Job>() // key -> its running download
     private val downloadConns = HashMap<Job, AtomicReference<java.net.HttpURLConnection?>>() // its connection, to close on cancel
 
-    /** Saves a file the agent handed back to Downloads/Krewd (once), then opens it. */
+    init {
+        // Saved and broken-off downloads from earlier runs, while their files are still there.
+        scope.launch {
+            val found = withContext(Dispatchers.IO) {
+                prefs.downloads().mapNotNull { (key, value) ->
+                    val uri = Uri.parse(value.substringAfter('|'))
+                    if (exists(uri)) {
+                        val done = value.startsWith("done|")
+                        if (done) saved[key] = uri else partial[key] = uri
+                        key to (if (done) FileLoad.Done else FileLoad.Failed)
+                    } else {
+                        prefs.setDownload(key, null)
+                        null
+                    }
+                }.toMap()
+            }
+            _files.update { found + it }
+        }
+    }
+
+    /**
+     * Saves a file the agent handed back to Downloads/Krewd (once), then opens it. A download that broke off
+     * resumes where it stopped.
+     */
     fun openSharedFile(file: Attachment) {
+        val key = file.downloadKey
+        if (key in downloadJobs) return
+        saved[key]?.let { uri ->
+            if (exists(uri)) {
+                if (!view(uri, file.mime)) toast("Saved ${file.name} to Downloads/Krewd")
+                return
+            }
+            saved.remove(key)
+            prefs.setDownload(key, null)
+        }
         val client = api ?: run { toast("Not connected to Krewd"); return }
-        if (file.path in _downloading.value) return
-        val key = "${file.path}|${file.size}"
-        saved[key]?.takeIf { exists(it) }?.let { if (view(it, file.mime)) return }
-        _downloading.update { it + (file.path to 0f) }
+        _files.update { it + (key to FileLoad.Running(0f)) }
         val conn = AtomicReference<java.net.HttpURLConnection?>()
         val job = scope.launch(start = kotlinx.coroutines.CoroutineStart.LAZY) {
             try {
                 val uri = withContext(Dispatchers.IO) { saveToDownloads(client, file, conn) }
                 saved[key] = uri
+                prefs.setDownload(key, "done|$uri")
+                _files.update { it + (key to FileLoad.Done) }
                 if (!view(uri, file.mime)) toast("Saved ${file.name} to Downloads/Krewd")
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                // A cancelled download ends with the closed connection's error: not a failure to report.
-                if (currentCoroutineContext()[Job]?.isActive != false) toast(e.message ?: "Download failed")
+                // A cancelled download ends with the closed connection's error: not a failure to show.
+                if (currentCoroutineContext()[Job]?.isActive != false) {
+                    _files.update { it + (key to FileLoad.Failed) }
+                    toast(e.message ?: "Download failed")
+                }
             } finally {
                 val me = currentCoroutineContext()[Job]
                 downloadConns.remove(me)
-                // Only this download's own entry: after a cancel the same file may already be downloading again.
-                if (downloadJobs[file.path] === me) {
-                    downloadJobs.remove(file.path)
-                    _downloading.update { it - file.path }
-                }
+                if (downloadJobs[key] === me) downloadJobs.remove(key)
             }
         }
-        downloadJobs[file.path] = job
+        downloadJobs[key] = job
         downloadConns[job] = conn
         job.start()
     }
 
-    /** Stops [file]'s download; the half-written copy in Downloads is deleted ([saveToDownloads]). */
+    /** Stops [file]'s download and deletes its half-written copy ([saveToDownloads]); the chip is as new again. */
     fun cancelSharedFile(file: Attachment) {
-        val job = downloadJobs.remove(file.path) ?: return
+        val key = file.downloadKey
+        val job = downloadJobs.remove(key) ?: return
         job.cancel()
         // Closing the connection ends a read that is waiting on the network straight away.
         downloadConns[job]?.get()?.let { c -> Thread { runCatching { c.disconnect() } }.start() }
-        _downloading.update { it - file.path }
+        _files.update { it - key }
     }
 
     private suspend fun saveToDownloads(client: KrewdApi, file: Attachment, conn: AtomicReference<java.net.HttpURLConnection?>): Uri {
         val job = currentCoroutineContext()[Job]
+        val key = file.downloadKey
         val resolver = app.contentResolver
-        val values = ContentValues().apply {
-            put(MediaStore.MediaColumns.DISPLAY_NAME, file.name)
-            put(MediaStore.MediaColumns.MIME_TYPE, file.mime)
-            put(MediaStore.MediaColumns.RELATIVE_PATH, "Download/Krewd")
-            put(MediaStore.MediaColumns.IS_PENDING, 1)
+        // A broken-off download goes on in its unfinished copy; otherwise a new, hidden (pending) copy.
+        val old = partial[key]
+        val have = old?.let { uri -> runCatching { resolver.openFileDescriptor(uri, "r")?.use { it.statSize } }.getOrNull() }
+        val uri = if (old != null && have != null && have >= 0) old else {
+            val values = ContentValues().apply {
+                put(MediaStore.MediaColumns.DISPLAY_NAME, file.name)
+                put(MediaStore.MediaColumns.MIME_TYPE, file.mime)
+                put(MediaStore.MediaColumns.RELATIVE_PATH, "Download/Krewd")
+                put(MediaStore.MediaColumns.IS_PENDING, 1)
+            }
+            (resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: error("Could not save to Downloads")).also {
+                partial[key] = it
+                prefs.setDownload(key, "part|$it")
+            }
         }
-        val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: error("Could not save to Downloads")
+        val from = if (uri == old) have ?: 0L else 0L
         try {
             var shown = -1
-            resolver.openOutputStream(uri)!!.use { out ->
-                client.downloadFile(file.path, out, file.size, onConnect = { conn.set(it); if (job?.isActive == false) it.disconnect() }) { done, total ->
-                    if (job?.isActive == false) throw CancellationException("Download cancelled")
-                    // Every whole percent, so the chip's shade moves smoothly without flooding the UI.
-                    val percent = if (total > 0) (done * 100 / total).toInt().coerceIn(0, 100) else 0
-                    if (percent != shown) {
-                        shown = percent
-                        _downloading.update { if (file.path in it) it + (file.path to percent / 100f) else it }
-                    }
+            client.downloadFile(
+                file.path, file.size, from,
+                onConnect = { conn.set(it); if (job?.isActive == false) it.disconnect() },
+                output = { resumed -> resolver.openOutputStream(uri, if (resumed) "wa" else "wt") ?: error("Could not write to Downloads") },
+            ) { done, total ->
+                if (job?.isActive == false) throw CancellationException("Download cancelled")
+                // Every whole percent, so the chip's shade moves smoothly without flooding the UI.
+                val percent = if (total > 0) (done * 100 / total).toInt().coerceIn(0, 100) else 0
+                if (percent != shown) {
+                    shown = percent
+                    _files.update { if (it[key] is FileLoad.Running) it + (key to FileLoad.Running(percent / 100f)) else it }
                 }
             }
             if (job?.isActive == false) throw CancellationException("Download cancelled")
             resolver.update(uri, ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }, null, null)
+            partial.remove(key)
             return uri
         } catch (e: Exception) {
-            // Failed or cancelled: remove the partial file, so nothing half-downloaded is left in Downloads.
-            runCatching { resolver.delete(uri, null, null) }
+            // Cancelled: nothing half-downloaded is left behind. Failed: the copy stays, to resume next time.
+            if (job?.isActive == false) {
+                runCatching { resolver.delete(uri, null, null) }
+                partial.remove(key)
+                prefs.setDownload(key, null)
+            }
             throw e
         }
     }
