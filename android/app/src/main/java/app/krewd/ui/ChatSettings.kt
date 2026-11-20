@@ -155,7 +155,7 @@ fun ChatSettingsSheet(state: UiState, viewModel: KrewdViewModel, session: Sessio
                 ActionButton(R.drawable.ic_add_24, "New side session") { onSideSession() }
                 ActionButton(R.drawable.ic_compress_24, "Compact") { confirmCompact = true }
                 ActionButton(R.drawable.ic_edit_24, "Rename") { renaming = true }
-                ActionButton(R.drawable.ic_pin_24, if (session.pinned) "Unpin" else "Pin") { viewModel.setPinned(session.id, !session.pinned) }
+                ActionButton(if (session.pinned) R.drawable.ic_unpin_24 else R.drawable.ic_pin_24, if (session.pinned) "Unpin" else "Pin") { viewModel.setPinned(session.id, !session.pinned) }
                 ActionButton(R.drawable.ic_web_24, "Watch the browser") { close(); viewModel.openBrowserAt(session.browserTab?.id) }
                 session.routineId?.let { routineId ->
                     ActionButton(R.drawable.ic_schedule_24, "Routine") {

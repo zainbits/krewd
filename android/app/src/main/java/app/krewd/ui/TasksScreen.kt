@@ -667,7 +667,7 @@ private fun SwipeToPinOrDelete(session: SessionInfo, viewModel: KrewdViewModel, 
         onDelete = { closeReveal ->
             if (working) { closeReveal(); viewModel.stopSession(session.id) } else { close = closeReveal; confirm = true }
         },
-        pinIcon = R.drawable.ic_pin_24,
+        pinIcon = if (session.pinned) R.drawable.ic_unpin_24 else R.drawable.ic_pin_24,
         deleteIcon = if (working) R.drawable.ic_stop_24 else R.drawable.ic_delete_24,
         deleteLabel = if (working) "Stop" else "Delete",
         cardCorner = corner,

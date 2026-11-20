@@ -56,8 +56,6 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -130,6 +128,7 @@ import app.krewd.data.SwitchItem
 import app.krewd.data.TextItem
 import app.krewd.data.ToolItem
 import app.krewd.data.UserItem
+import app.krewd.data.Attachment
 
 @Composable
 fun ChatScreen(state: UiState, viewModel: KrewdViewModel) {
@@ -181,6 +180,13 @@ fun ChatScreen(state: UiState, viewModel: KrewdViewModel) {
     var titleOpen by rememberSaveable(state.openSessionId) { mutableStateOf(false) }
     // The context ring's card above the composer.
     var contextOpen by remember(state.openSessionId) { mutableStateOf(false) }
+    // How a message sent during a turn goes. Steer where the agent supports it, otherwise queue.
+    val steering = session?.let { state.engine(it.engine)?.steering } == true
+    var delivery by rememberSaveable(steering) { mutableStateOf(if (steering) Delivery.Steer else Delivery.Queue) }
+    var deliveryOpen by remember(state.openSessionId) { mutableStateOf(false) }
+    // A handed-back file whose full name shows in a card by its chip (long press).
+    var peek by remember(state.openSessionId) { mutableStateOf<Pair<Attachment, androidx.compose.ui.geometry.Rect>?>(null) }
+    val showPeek = remember { { f: Attachment, r: androidx.compose.ui.geometry.Rect -> peek = f to r } }
     BackHandler(enabled = titleOpen) { titleOpen = false }
     // This chat's sign-in requests, at the bottom of the chat (also under Needs you on the Krewd tab).
     val signIns = state.secrets.filter { it.pending && it.sessionId == session?.id }
@@ -239,7 +245,7 @@ fun ChatScreen(state: UiState, viewModel: KrewdViewModel) {
         val holdRow = remember(listState) { { key: Any -> listState.holdRow(key) } }
         // Everything the glass shows through: the chat.
         Box(Modifier.fillMaxSize().then(if (glassOn) Modifier.glassSource(backdrop) else Modifier).background(MaterialTheme.colorScheme.surface)) {
-        CompositionLocalProvider(LocalHoldRow provides holdRow, LocalNoteHooks provides noteHooks, LocalLiveReply provides liveReply) {
+        CompositionLocalProvider(LocalHoldRow provides holdRow, LocalNoteHooks provides noteHooks, LocalLiveReply provides liveReply, LocalFilePeek provides showPeek) {
         LazyColumn(
             state = listState,
             modifier = Modifier.fillMaxSize(),
@@ -395,7 +401,9 @@ fun ChatScreen(state: UiState, viewModel: KrewdViewModel) {
                     contextUsed = session.contextUsed,
                     contextSize = session.contextSize,
                     onContext = { contextOpen = !contextOpen },
-                    steering = state.engine(session.engine)?.steering == true,
+                    steering = steering,
+                    delivery = delivery,
+                    onDeliveryMenu = { deliveryOpen = !deliveryOpen },
                     commands = commands,
                     files = files,
                     hasTabs = tabs.isNotEmpty() || chats.isNotEmpty() || notes.isNotEmpty(),
@@ -432,6 +440,26 @@ fun ChatScreen(state: UiState, viewModel: KrewdViewModel) {
                     .align(Alignment.BottomEnd)
                     .padding(end = ShellDimensions.COMPOSER_MARGIN + 8.dp, bottom = bottomStack + 8.dp),
             )
+        }
+        if (deliveryOpen && session?.isBusy == true) {
+            BackHandler { deliveryOpen = false }
+            Box(
+                Modifier.fillMaxSize().clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) {
+                    deliveryOpen = false
+                },
+            )
+            DeliveryCard(
+                backdrop = backdrop,
+                selected = delivery,
+                steering = steering,
+                onPick = { delivery = it; deliveryOpen = false },
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(end = ShellDimensions.COMPOSER_MARGIN + 8.dp, bottom = bottomStack + 8.dp),
+            )
+        }
+        peek?.let { (file, chip) ->
+            FilePeekCard(file, chip, backdrop = if (glassOn) backdrop else null, onClose = { peek = null })
         }
     }
 }
@@ -583,6 +611,8 @@ private fun Composer(
     contextSize: Long?,
     onContext: () -> Unit,
     steering: Boolean,
+    delivery: Delivery,
+    onDeliveryMenu: () -> Unit,
     commands: List<AgentCommand>,
     files: List<PendingFile>,
     hasTabs: Boolean,
@@ -612,9 +642,6 @@ private fun Composer(
     val ranges = remember(text, commands) { commandRanges(text, commands) }
     val ink = MaterialTheme.colorScheme.primary
     val highlight = remember(commands, ink) { CommandHighlight(commands, ink) }
-    // Steer where the agent supports it, otherwise queue. Queue and interrupt work with every agent.
-    var delivery by rememberSaveable(steering) { mutableStateOf(if (steering) Delivery.Steer else Delivery.Queue) }
-    var deliveryMenu by remember { mutableStateOf(false) }
     val uploading = files.any { it.uploading }
     val ready = files.any { it.uploadId != null } || hasTabs
     val hasDraft = text.isNotBlank() || files.isNotEmpty() || hasTabs
@@ -677,37 +704,14 @@ private fun Composer(
                 }
                 Spacer(Modifier.weight(1f))
                 if (busy && hasDraft) {
-                    Box {
-                        Surface(onClick = { deliveryMenu = true }, shape = RoundedCornerShape(16.dp), color = colors.secondaryContainer) {
+                    // A glass capsule over the chat (inside the composer); its menu opens as a glass card.
+                    CompositionLocalProvider(LocalKrewdBackdrop provides if (LocalKrewdGlass.current.on) backdrop else null) {
+                        KrewdPill(onClick = onDeliveryMenu, height = 32.dp, contentAlignment = Alignment.Center) {
                             Text(
                                 delivery.label + " ▾",
                                 style = MaterialTheme.typography.labelMedium,
-                                color = colors.onSecondaryContainer,
-                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
+                                modifier = Modifier.padding(horizontal = 12.dp),
                             )
-                        }
-                        DropdownMenu(expanded = deliveryMenu, onDismissRequest = { deliveryMenu = false }) {
-                            Text(
-                                "While the task is running",
-                                style = MaterialTheme.typography.labelMedium,
-                                color = colors.onSurfaceVariant,
-                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
-                            )
-                            Delivery.entries.filter { it != Delivery.Steer || steering }.forEach { option ->
-                                DropdownMenuItem(
-                                    text = {
-                                        Column {
-                                            Text(option.label, fontWeight = if (option == delivery) FontWeight.SemiBold else FontWeight.Normal)
-                                            Text(option.hint, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
-                                        }
-                                    },
-                                    leadingIcon = { Text(if (option == delivery) "✓" else " ", color = colors.primary) },
-                                    onClick = {
-                                        delivery = option
-                                        deliveryMenu = false
-                                    },
-                                )
-                            }
                         }
                     }
                     Spacer(Modifier.width(6.dp))
@@ -768,6 +772,50 @@ private fun ComposerShell(backdrop: GlassBackdrop, modifier: Modifier, content: 
 }
 
 /** How full the agent's context window is: a small ring with the percentage; tap for the card with the tokens. */
+/** Picks how a message sent during a turn goes: a glass card over the chat (plain while the glass is off). */
+@Composable
+private fun DeliveryCard(
+    backdrop: GlassBackdrop,
+    selected: Delivery,
+    steering: Boolean,
+    onPick: (Delivery) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val body: @Composable () -> Unit = {
+        val ink = LocalContentColor.current
+        Column(Modifier.padding(vertical = 8.dp)) {
+            Text(
+                "While the task is running",
+                style = MaterialTheme.typography.labelMedium,
+                color = ink.copy(alpha = 0.7f),
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+            )
+            Delivery.entries.filter { it != Delivery.Steer || steering }.forEach { option ->
+                Row(
+                    Modifier.fillMaxWidth().clickable { onPick(option) }.padding(horizontal = 16.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(if (option == selected) "✓" else "", color = MaterialTheme.colorScheme.primary, modifier = Modifier.width(22.dp))
+                    Column {
+                        Text(option.label, fontWeight = if (option == selected) FontWeight.SemiBold else FontWeight.Normal)
+                        Text(option.hint, style = MaterialTheme.typography.bodySmall, color = ink.copy(alpha = 0.7f))
+                    }
+                }
+            }
+        }
+    }
+    if (LocalKrewdGlass.current.on) {
+        GlassSurface(backdrop = backdrop, modifier = modifier.width(248.dp), shape = GlassShape.rounded(22.dp)) { body() }
+    } else {
+        Surface(
+            modifier = modifier.width(248.dp),
+            shape = RoundedCornerShape(22.dp),
+            color = MaterialTheme.colorScheme.surfaceContainerHighest,
+            shadowElevation = 3.dp,
+        ) { body() }
+    }
+}
+
 @Composable
 private fun ContextRing(used: Long, size: Long, onClick: () -> Unit) {
     val fraction = (used.toFloat() / size).coerceIn(0f, 1f)
@@ -921,7 +969,7 @@ private fun ChatRow(
         is ApprovalItem -> ApprovalCard(item.approval, taskTitle = null, onDecide = { viewModel.decide(item.approval, it) })
         is FilesItem -> {
             val loads by viewModel.files.collectAsStateWithLifecycle()
-            HandedFiles(item.files, loads, viewModel::openSharedFile, viewModel::cancelSharedFile)
+            HandedFiles(item.files, loads, viewModel::openSharedFile, viewModel::pauseSharedFile, viewModel::cancelSharedFile)
         }
         is SwitchItem -> SwitchRow(item)
         is NoticeItem -> Text(

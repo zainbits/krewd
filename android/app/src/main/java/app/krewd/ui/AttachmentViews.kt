@@ -50,6 +50,30 @@ import app.krewd.data.FileLoad
 import app.krewd.data.ImageRef
 import app.krewd.data.PendingFile
 import app.krewd.data.humanSize
+import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.material3.LocalContentColor
+import androidx.compose.runtime.compositionLocalOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.layout
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInWindow
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import io.github.zainbits.cohesion.GlassBackdrop
+import io.github.zainbits.cohesion.LocalGlassStyle
+import io.github.zainbits.cohesion.glassPullExempt
+import io.github.zainbits.vitreous.GlassShape
+import io.github.zainbits.vitreous.GlassSurface
+import io.github.zainbits.vitreous.LocalGlassPull
 
 /** Opens the system file picker (any type, several files); call the returned function to show it. */
 @Composable
@@ -190,70 +214,190 @@ fun SentFiles(files: List<Attachment>, color: Color) {
     }
 }
 
-/** Files the agent handed back: tap one to save it to Downloads/Krewd and open it; tap it again to cancel. */
+/**
+ * Shows a handed-back file's full name in a small card by the chip (its bounds in the window). The chat screen
+ * provides it, so the card can be glass over the chat.
+ */
+val LocalFilePeek = compositionLocalOf<((Attachment, Rect) -> Unit)?> { null }
+
+/**
+ * Files the agent handed back: tap one to save it to Downloads/Krewd and open it. While it downloads it can be
+ * paused (resumed later from where it stopped) or cancelled; a long press shows the full name.
+ */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-fun HandedFiles(files: List<Attachment>, loads: Map<String, FileLoad>, onOpen: (Attachment) -> Unit, onCancel: (Attachment) -> Unit) {
+fun HandedFiles(
+    files: List<Attachment>,
+    loads: Map<String, FileLoad>,
+    onOpen: (Attachment) -> Unit,
+    onPause: (Attachment) -> Unit,
+    onCancel: (Attachment) -> Unit,
+) {
     FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        files.forEach { f -> HandedFile(f, loads[f.downloadKey], onOpen = { onOpen(f) }, onCancel = { onCancel(f) }) }
+        files.forEach { f -> HandedFile(f, loads[f.downloadKey], onOpen = { onOpen(f) }, onPause = { onPause(f) }, onCancel = { onCancel(f) }) }
     }
 }
 
 /**
- * One handed-back file. While it downloads, a shade fills the chip from the left as the bytes arrive and the
- * download icon turns into a cancel icon: a tap then stops the download and deletes the partial file. Saved:
- * a green tick (a tap opens it). Broken off: a red stop sign (a tap resumes it).
+ * One handed-back file: a glass pill (flat glass: the chat it sits in cannot be seen through itself) with the
+ * name, shortened in the middle so the extension stays, and the size, which always shows. While it downloads a
+ * shade fills it from the left, with pause and cancel buttons; paused, a resume button. Saved: a green tick (a
+ * tap opens it). Broken off: a red stop sign (a tap resumes it, the cross discards it).
  */
 @Composable
-private fun HandedFile(file: Attachment, load: FileLoad?, onOpen: () -> Unit, onCancel: () -> Unit) {
-    val progress = (load as? FileLoad.Running)?.progress
+private fun HandedFile(file: Attachment, load: FileLoad?, onOpen: () -> Unit, onPause: () -> Unit, onCancel: () -> Unit) {
     val colors = MaterialTheme.colorScheme
+    val progress = when (load) {
+        is FileLoad.Running -> load.progress
+        is FileLoad.Paused -> load.progress
+        else -> null
+    }
     val shown by androidx.compose.animation.core.animateFloatAsState(progress ?: 0f, label = "download")
-    val shade = colors.primary.copy(alpha = 0.28f)
-    val shape = RoundedCornerShape(8.dp)
-    Surface(
-        onClick = if (progress != null) onCancel else onOpen,
-        shape = shape,
-        color = Color.Transparent,
-        border = androidx.compose.foundation.BorderStroke(1.dp, if (progress != null) colors.primary.copy(alpha = 0.6f) else colors.outline),
-    ) {
+    val shade = colors.primary.copy(alpha = if (load is FileLoad.Paused) 0.14f else 0.24f)
+    val peek = LocalFilePeek.current
+    var bounds by remember { mutableStateOf(Rect.Zero) }
+    // Downloading: the chip itself does nothing (its buttons pause and cancel). Otherwise download, resume or open.
+    val tap: (() -> Unit)? = if (load is FileLoad.Running) null else onOpen
+    val longTap: (() -> Unit)? = peek?.let { show -> { show(file, bounds) } }
+    val glassOn = LocalKrewdGlass.current.on
+    val body: @Composable () -> Unit = {
+        val exempt = Modifier.glassPullExempt(LocalGlassPull.current)
         Row(
             Modifier
                 .drawBehind { if (progress != null) drawRect(shade, size = size.copy(width = size.width * shown)) }
-                .heightIn(min = 32.dp)
-                .padding(start = 8.dp, end = 12.dp),
+                .heightIn(min = 36.dp)
+                .padding(start = 2.dp, end = if (load == null || load == FileLoad.Done) 14.dp else 2.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Icon(
-                painterResource(
-                    when (load) {
-                        is FileLoad.Running -> R.drawable.ic_close_24
-                        FileLoad.Done -> R.drawable.ic_check_24
-                        FileLoad.Failed -> R.drawable.ic_report_24
-                        null -> R.drawable.ic_download_24
+            when (load) {
+                is FileLoad.Running -> ChipButton(R.drawable.ic_pause_24, "Pause download", colors.primary, onPause, exempt)
+                is FileLoad.Paused -> ChipButton(R.drawable.ic_play_24, "Resume download", colors.primary, onOpen, exempt)
+                else -> Icon(
+                    painterResource(
+                        when (load) {
+                            FileLoad.Done -> R.drawable.ic_check_24
+                            FileLoad.Failed -> R.drawable.ic_report_24
+                            else -> R.drawable.ic_download_24
+                        },
+                    ),
+                    contentDescription = when (load) {
+                        FileLoad.Done -> "Downloaded"
+                        FileLoad.Failed -> "Download failed, tap to resume"
+                        else -> "Download"
                     },
-                ),
-                contentDescription = when (load) {
-                    is FileLoad.Running -> "Cancel download"
-                    FileLoad.Done -> "Downloaded"
-                    FileLoad.Failed -> "Download failed, tap to resume"
-                    null -> "Download"
-                },
-                tint = when (load) {
-                    FileLoad.Done -> LocalKrewdColors.current.ok
-                    FileLoad.Failed -> colors.error
-                    else -> colors.primary
-                },
-                modifier = Modifier.size(SuggestionChipDefaults.IconSize),
-            )
+                    tint = when (load) {
+                        FileLoad.Done -> LocalKrewdColors.current.ok
+                        FileLoad.Failed -> colors.error
+                        else -> colors.primary
+                    },
+                    modifier = Modifier.padding(start = 10.dp, end = 8.dp).size(18.dp),
+                )
+            }
             Text(
-                "${file.name} · ${humanSize(file.size)}",
+                file.name,
                 style = MaterialTheme.typography.labelLarge,
                 color = colors.onSurface,
                 maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
+                overflow = TextOverflow.MiddleEllipsis,
+                modifier = Modifier.weight(1f, fill = false),
             )
+            Text(
+                " · " + humanSize(file.size),
+                style = MaterialTheme.typography.labelLarge,
+                color = colors.onSurfaceVariant,
+                maxLines = 1,
+                softWrap = false,
+            )
+            if (load is FileLoad.Running || load is FileLoad.Paused || load == FileLoad.Failed) {
+                ChipButton(
+                    R.drawable.ic_close_24,
+                    if (load == FileLoad.Failed) "Discard the partial download" else "Cancel download",
+                    colors.onSurfaceVariant, onCancel, exempt,
+                )
+            }
+        }
+    }
+    val chip = Modifier
+        .widthIn(max = 300.dp)
+        .onGloballyPositioned { bounds = it.boundsInWindow() }
+    if (glassOn) {
+        val style = LocalGlassStyle.current
+        val glass = remember(style, colors.surfaceContainerHigh) { style.copy(solidColor = colors.surfaceContainerHigh) }
+        GlassSurface(
+            backdrop = null,
+            modifier = chip,
+            shape = GlassShape.Capsule,
+            style = glass,
+            elastic = true,
+            onClick = tap,
+            onLongClick = longTap,
+        ) { body() }
+    } else {
+        Surface(
+            shape = CircleShape,
+            color = colors.surfaceContainerHigh,
+            border = androidx.compose.foundation.BorderStroke(1.dp, colors.outlineVariant),
+            modifier = chip,
+        ) {
+            Box(Modifier.combinedClickable(enabled = tap != null || longTap != null, onLongClick = longTap, onClick = tap ?: {})) { body() }
+        }
+    }
+}
+
+/** A small round button inside a file chip (pause, resume, cancel), with a full-size touch target. */
+@Composable
+private fun ChipButton(@androidx.annotation.DrawableRes icon: Int, label: String, tint: Color, onClick: () -> Unit, modifier: Modifier) {
+    Box(
+        modifier
+            .size(36.dp)
+            .clip(CircleShape)
+            .clickable(onClickLabel = label, role = androidx.compose.ui.semantics.Role.Button, onClick = onClick)
+            .semantics { contentDescription = label },
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(painterResource(icon), contentDescription = null, tint = tint, modifier = Modifier.size(18.dp))
+    }
+}
+
+/** The full name and size of a handed-back file, in a small card by its chip; tap anywhere to close. */
+@Composable
+fun FilePeekCard(file: Attachment, chip: Rect, backdrop: GlassBackdrop?, onClose: () -> Unit) {
+    BackHandler(onBack = onClose)
+    val density = LocalDensity.current
+    var origin by remember { mutableStateOf(Offset.Zero) }
+    Box(
+        Modifier
+            .fillMaxSize()
+            .onGloballyPositioned { origin = it.positionInWindow() }
+            .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onClose),
+    ) {
+        val body: @Composable () -> Unit = {
+            Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+                Text(file.name, style = MaterialTheme.typography.bodyMedium)
+                Text(
+                    humanSize(file.size) + (file.mime.takeIf { it.isNotBlank() }?.let { " · $it" } ?: ""),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = LocalContentColor.current.copy(alpha = 0.7f),
+                )
+            }
+        }
+        val place = Modifier.layout { measurable, constraints ->
+            val margin = with(density) { 12.dp.roundToPx() }
+            val gap = with(density) { 6.dp.roundToPx() }
+            val p = measurable.measure(
+                constraints.copy(minWidth = 0, minHeight = 0, maxWidth = minOf(constraints.maxWidth - 2 * margin, with(density) { 320.dp.roundToPx() })),
+            )
+            layout(constraints.maxWidth, constraints.maxHeight) {
+                val x = (chip.left - origin.x).toInt().coerceIn(margin, maxOf(margin, constraints.maxWidth - p.width - margin))
+                val above = (chip.top - origin.y).toInt() - gap - p.height
+                val y = if (above >= margin * 6) above else (chip.bottom - origin.y).toInt() + gap
+                p.place(x, y)
+            }
+        }
+        if (backdrop != null) {
+            GlassSurface(backdrop = backdrop, modifier = place, shape = GlassShape.rounded(16.dp)) { body() }
+        } else {
+            Surface(modifier = place, shape = RoundedCornerShape(16.dp), color = MaterialTheme.colorScheme.surfaceContainerHighest, shadowElevation = 3.dp) { body() }
         }
     }
 }

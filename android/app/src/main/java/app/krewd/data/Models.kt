@@ -634,6 +634,9 @@ sealed interface FileLoad {
     /** Downloading: [progress] of it has arrived, 0 to 1. */
     data class Running(val progress: Float) : FileLoad
 
+    /** Paused by the owner at [progress] (0 to 1); resumes where it stopped. */
+    data class Paused(val progress: Float) : FileLoad
+
     /** Saved in Downloads/Krewd. */
     data object Done : FileLoad
 

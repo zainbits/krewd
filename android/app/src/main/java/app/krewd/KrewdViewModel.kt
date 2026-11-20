@@ -1482,6 +1482,8 @@ class KrewdViewModel(private val app: Application) {
     private val saved = java.util.concurrent.ConcurrentHashMap<String, Uri>() // key -> its finished copy in Downloads
     private val partial = java.util.concurrent.ConcurrentHashMap<String, Uri>() // key -> the unfinished copy to resume
     private val downloadJobs = HashMap<String, Job>() // key -> its running download
+    private val stoppingJobs = HashMap<String, Job>() // key -> a paused or cancelled download still winding down
+    private val pausing: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet() // keys paused (keep the copy)
     private val downloadConns = HashMap<Job, AtomicReference<java.net.HttpURLConnection?>>() // its connection, to close on cancel
 
     init {
@@ -1491,9 +1493,19 @@ class KrewdViewModel(private val app: Application) {
                 prefs.downloads().mapNotNull { (key, value) ->
                     val uri = Uri.parse(value.substringAfter('|'))
                     if (exists(uri)) {
-                        val done = value.startsWith("done|")
-                        if (done) saved[key] = uri else partial[key] = uri
-                        key to (if (done) FileLoad.Done else FileLoad.Failed)
+                        val load = when (value.substringBefore('|')) {
+                            "done" -> FileLoad.Done
+                            "pause" -> {
+                                // How much is saved: the copy's length over the file's size (the key's end).
+                                val size = key.substringAfterLast('|').toLongOrNull() ?: 0L
+                                val have = runCatching { app.contentResolver.openFileDescriptor(uri, "r")?.use { it.statSize } }.getOrNull() ?: 0L
+                                FileLoad.Paused(if (size > 0) (have.toFloat() / size).coerceIn(0f, 1f) else 0f)
+                            }
+                            else -> FileLoad.Failed
+                        }
+                        if (load == FileLoad.Done) saved[key] = uri else partial[key] = uri
+                        pausing.apply { if (load is FileLoad.Paused) add(key) }
+                        key to load
                     } else {
                         prefs.setDownload(key, null)
                         null
@@ -1505,8 +1517,8 @@ class KrewdViewModel(private val app: Application) {
     }
 
     /**
-     * Saves a file the agent handed back to Downloads/Krewd (once), then opens it. A download that broke off
-     * resumes where it stopped.
+     * Saves a file the agent handed back to Downloads/Krewd (once), then opens it. A paused download, or one that
+     * broke off, resumes where it stopped.
      */
     fun openSharedFile(file: Attachment) {
         val key = file.downloadKey
@@ -1520,10 +1532,17 @@ class KrewdViewModel(private val app: Application) {
             prefs.setDownload(key, null)
         }
         val client = api ?: run { toast("Not connected to Krewd"); return }
-        _files.update { it + (key to FileLoad.Running(0f)) }
+        pausing.remove(key)
+        val before = when (val now = _files.value[key]) {
+            is FileLoad.Paused -> now.progress
+            else -> 0f
+        }
+        _files.update { it + (key to FileLoad.Running(before)) }
         val conn = AtomicReference<java.net.HttpURLConnection?>()
         val job = scope.launch(start = kotlinx.coroutines.CoroutineStart.LAZY) {
             try {
+                // A pause just before this may still be closing the same copy: let it finish first.
+                stoppingJobs[key]?.join()
                 val uri = withContext(Dispatchers.IO) { saveToDownloads(client, file, conn) }
                 saved[key] = uri
                 prefs.setDownload(key, "done|$uri")
@@ -1534,6 +1553,7 @@ class KrewdViewModel(private val app: Application) {
             } catch (e: Exception) {
                 // A cancelled download ends with the closed connection's error: not a failure to show.
                 if (currentCoroutineContext()[Job]?.isActive != false) {
+                    partial[key]?.let { prefs.setDownload(key, "part|$it") }
                     _files.update { it + (key to FileLoad.Failed) }
                     toast(e.message ?: "Download failed")
                 }
@@ -1541,6 +1561,7 @@ class KrewdViewModel(private val app: Application) {
                 val me = currentCoroutineContext()[Job]
                 downloadConns.remove(me)
                 if (downloadJobs[key] === me) downloadJobs.remove(key)
+                if (stoppingJobs[key] === me) stoppingJobs.remove(key)
             }
         }
         downloadJobs[key] = job
@@ -1548,14 +1569,42 @@ class KrewdViewModel(private val app: Application) {
         job.start()
     }
 
-    /** Stops [file]'s download and deletes its half-written copy ([saveToDownloads]); the chip is as new again. */
-    fun cancelSharedFile(file: Attachment) {
+    /** Pauses [file]'s download: what has arrived stays (hidden in Downloads/Krewd) and resumes from there. */
+    fun pauseSharedFile(file: Attachment) {
         val key = file.downloadKey
         val job = downloadJobs.remove(key) ?: return
+        val progress = (_files.value[key] as? FileLoad.Running)?.progress ?: 0f
+        pausing.add(key)
+        stopDownload(key, job)
+        _files.update { it + (key to FileLoad.Paused(progress)) }
+    }
+
+    /**
+     * Stops [file]'s download (running, paused or broken off) and deletes its half-written copy; the chip is as
+     * new again.
+     */
+    fun cancelSharedFile(file: Attachment) {
+        val key = file.downloadKey
+        pausing.remove(key)
+        val job = downloadJobs.remove(key)
+        if (job != null) {
+            stopDownload(key, job) // saveToDownloads deletes the copy as it stops
+        } else {
+            scope.launch {
+                stoppingJobs[key]?.join()
+                val uri = partial.remove(key) ?: return@launch
+                prefs.setDownload(key, null)
+                withContext(Dispatchers.IO) { runCatching { app.contentResolver.delete(uri, null, null) } }
+            }
+        }
+        _files.update { it - key }
+    }
+
+    private fun stopDownload(key: String, job: Job) {
+        stoppingJobs[key] = job
         job.cancel()
         // Closing the connection ends a read that is waiting on the network straight away.
         downloadConns[job]?.get()?.let { c -> Thread { runCatching { c.disconnect() } }.start() }
-        _files.update { it - key }
     }
 
     private suspend fun saveToDownloads(client: KrewdApi, file: Attachment, conn: AtomicReference<java.net.HttpURLConnection?>): Uri {
@@ -1598,11 +1647,15 @@ class KrewdViewModel(private val app: Application) {
             partial.remove(key)
             return uri
         } catch (e: Exception) {
-            // Cancelled: nothing half-downloaded is left behind. Failed: the copy stays, to resume next time.
+            // Paused or failed: the copy stays, to resume from. Cancelled: nothing half-downloaded is left behind.
             if (job?.isActive == false) {
-                runCatching { resolver.delete(uri, null, null) }
-                partial.remove(key)
-                prefs.setDownload(key, null)
+                if (key in pausing) {
+                    prefs.setDownload(key, "pause|$uri")
+                } else {
+                    runCatching { resolver.delete(uri, null, null) }
+                    partial.remove(key)
+                    prefs.setDownload(key, null)
+                }
             }
             throw e
         }
