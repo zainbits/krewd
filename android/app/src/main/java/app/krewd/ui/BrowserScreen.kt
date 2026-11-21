@@ -127,6 +127,10 @@ private const val DOUBLE_TAP_MS = 300L
 private const val LONG_PRESS_MS = 500L
 private const val MAX_ZOOM = 3f
 private val SMALL_PILL = 36.dp
+/** The controls bar: its buttons and their 6 dp above and below. */
+private val CONTROLS_HEIGHT = SMALL_PILL + 12.dp
+/** The tab strip: its pills, 8 dp above and 2 dp below. */
+private val STRIP_HEIGHT = SMALL_PILL + 10.dp
 private val FAVICON_COLORS = listOf(
     Color(0xFFFF8A3D), Color(0xFF5B9BFF), Color(0xFF3DBE7A), Color(0xFFF2C744),
     Color(0xFFB57BFF), Color(0xFFFF6B6B), Color(0xFF34C3D6),
@@ -187,56 +191,72 @@ fun BrowserScreen(state: UiState, viewModel: KrewdViewModel, landscape: Boolean)
             .background(MaterialTheme.colorScheme.surface)
             .windowInsetsPadding(WindowInsets.statusBars.union(WindowInsets.displayCutout).only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal)),
     ) {
-        if (!landscape) {
-            TabsRow(state, tabActions, onNew = { viewModel.newTab { editingUrl = true } }, onAll = { allTabs = true })
-        }
-        ControlsRow(
-            tab = tab,
-            tabCount = browser?.tabs?.size ?: 0,
-            landscape = landscape,
-            editing = editingUrl,
-            onEditing = { editingUrl = it },
-            vertical = tab?.vertical == true,
-            viewOnly = tab?.agentActive == true,
-            highQuality = state.highQuality,
-            cursor = cursor,
-            onNav = { action -> send("type" to "navigate", "action" to action) },
-            onGo = { url -> send("type" to "navigate", "url" to url) },
-            onCopy = {
-                tab?.let { clipboard.setText(AnnotatedString(it.url)) }
-                viewModel.toast("URL copied")
-            },
-            onVertical = { on -> tab?.let { viewModel.setTabVertical(it.id, on) } },
-            onHighQuality = viewModel::setHighQuality,
-            onCursor = {
-                cursor = it
-                viewModel.setInputCursor(engineId, it)
-            },
-            onKeyboard = { keyboard = true },
-            onLocation = { locationSheet = true },
-            onAll = { allTabs = true },
-        )
-        Box(Modifier.weight(1f).fillMaxWidth().padding(horizontal = 6.dp)) {
-            when {
-                browser == null -> CircularProgressIndicator(Modifier.align(Alignment.Center))
-                !browser.available -> Message(
-                    "The browser is not running",
-                    "It starts when the server's desktop is logged in. On the server: ./master.sh start browser",
-                )
-                tab == null -> Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text("No open tabs", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    TextButton(onClick = { viewModel.newTab { editingUrl = true } }) { Text("Open a new tab") }
+        // Glass: the page is the glass source, and the tabs, the New tab and tab-count buttons and the controls
+        // bar are glass over it (a page zoomed in passes under them). The strip has no background of its own.
+        val glassOn = LocalKrewdGlass.current.on
+        val pageBackdrop = rememberGlassBackdrop()
+        Box(Modifier.weight(1f).fillMaxWidth()) {
+            Column(Modifier.fillMaxSize().then(if (glassOn) Modifier.glassSource(pageBackdrop).background(MaterialTheme.colorScheme.surface) else Modifier)) {
+                if (!landscape) Spacer(Modifier.height(STRIP_HEIGHT))
+                Spacer(Modifier.height(CONTROLS_HEIGHT))
+                Box(Modifier.weight(1f).fillMaxWidth().padding(horizontal = 6.dp)) {
+                    when {
+                        browser == null -> CircularProgressIndicator(Modifier.align(Alignment.Center))
+                        !browser.available -> Message(
+                            "The browser is not running",
+                            "It starts when the server's desktop is logged in. On the server: ./master.sh start browser",
+                        )
+                        tab == null -> Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text("No open tabs", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            TextButton(onClick = { viewModel.newTab { editingUrl = true } }) { Text("Open a new tab") }
+                        }
+                        else -> LiveView(
+                            tab = tab,
+                            viewModel = viewModel,
+                            vertical = tab.vertical,
+                            cursor = cursor,
+                            agentChat = tab.sessionId?.takeIf { tab.agentActive }?.let { id -> state.sessions.firstOrNull { it.id == id } },
+                            onOpenChat = viewModel::openChatOf,
+                            streamError = state.streamError,
+                            onEditable = { editable, _ -> if (editable) keyboard = true },
+                        )
+                    }
                 }
-                else -> LiveView(
-                    tab = tab,
-                    viewModel = viewModel,
-                    vertical = tab.vertical,
-                    cursor = cursor,
-                    agentChat = tab.sessionId?.takeIf { tab.agentActive }?.let { id -> state.sessions.firstOrNull { it.id == id } },
-                    onOpenChat = viewModel::openChatOf,
-                    streamError = state.streamError,
-                    onEditable = { editable, _ -> if (editable) keyboard = true },
-                )
+            }
+            CompositionLocalProvider(LocalKrewdBackdrop provides if (glassOn) pageBackdrop else null) {
+                Column(Modifier.fillMaxWidth()) {
+                    // Above the controls, so a stretched tab or button is drawn over them.
+                    if (!landscape) Box(Modifier.fillMaxWidth().height(STRIP_HEIGHT).zIndex(2f)) {
+                        TabStrip(state, tabActions)
+                        TabButtons(state.browser?.tabs?.size ?: 0, onNew = { viewModel.newTab { editingUrl = true } }, onAll = { allTabs = true })
+                    }
+                    ControlsRow(
+                        tab = tab,
+                        tabCount = browser?.tabs?.size ?: 0,
+                        landscape = landscape,
+                        editing = editingUrl,
+                        onEditing = { editingUrl = it },
+                        vertical = tab?.vertical == true,
+                        viewOnly = tab?.agentActive == true,
+                        highQuality = state.highQuality,
+                        cursor = cursor,
+                        onNav = { action -> send("type" to "navigate", "action" to action) },
+                        onGo = { url -> send("type" to "navigate", "url" to url) },
+                        onCopy = {
+                            tab?.let { clipboard.setText(AnnotatedString(it.url)) }
+                            viewModel.toast("URL copied")
+                        },
+                        onVertical = { on -> tab?.let { viewModel.setTabVertical(it.id, on) } },
+                        onHighQuality = viewModel::setHighQuality,
+                        onCursor = {
+                            cursor = it
+                            viewModel.setInputCursor(engineId, it)
+                        },
+                        onKeyboard = { keyboard = true },
+                        onLocation = { locationSheet = true },
+                        onAll = { allTabs = true },
+                    )
+                }
             }
         }
         // An agent starting on the tab ends typing: the tab is view only while it works.
@@ -286,37 +306,35 @@ private fun Message(title: String, text: String) {
 
 // ---------------------------------------------------------------- tabs
 
+/** The tabs, glass pills scrolling under the New tab and tab-count buttons ([TabButtons]); no background of its own. */
 @Composable
-private fun TabsRow(state: UiState, actions: TabActions, onNew: () -> Unit, onAll: () -> Unit) {
+private fun TabStrip(state: UiState, actions: TabActions, modifier: Modifier = Modifier) {
     val tabs = state.browser?.tabs.orEmpty()
     val listState = rememberLazyListState()
     val selected = tabs.indexOfFirst { it.id == state.browserTabId }
     LaunchedEffect(selected) { if (selected >= 0) listState.animateScrollToItem(selected) }
-    // The tabs scroll under the New tab and tab-count buttons, which are glass over the strip alone: it changes
-    // only when you swipe it or a tab opens or closes, never with the page's video.
-    val glassOn = LocalKrewdGlass.current.on
-    val strip = rememberGlassBackdrop()
-    // Above the controls and the page, so a stretched button is drawn over them.
-    Box(Modifier.fillMaxWidth().zIndex(2f).padding(top = 6.dp)) {
-        LazyRow(
-            state = listState,
-            modifier = Modifier
-                .fillMaxWidth()
-                .then(if (glassOn) Modifier.glassSource(strip).background(MaterialTheme.colorScheme.surface) else Modifier),
+    LazyRow(
+        state = listState,
+        modifier = modifier.fillMaxWidth().padding(top = 6.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        // The last tab can scroll fully clear of the buttons.
+        contentPadding = PaddingValues(start = 10.dp, end = 10.dp + SMALL_PILL * 2 + 12.dp, top = 2.dp, bottom = 2.dp),
+    ) {
+        items(tabs, key = { it.id }) { tab -> TabPill(tab, tab.id == state.browserTabId, actions) }
+    }
+}
+
+/** New tab and the tab count, at the strip's end: glass over the page (tabs scrolling under them hide behind them). */
+@Composable
+private fun TabButtons(count: Int, onNew: () -> Unit, onAll: () -> Unit, modifier: Modifier = Modifier) {
+    // Across the strip; only the buttons take touches, the rest reaches the tabs below.
+    Box(modifier.fillMaxWidth().padding(top = 6.dp + 2.dp, bottom = 2.dp)) {
+        LiquidRow(
+            Modifier.align(Alignment.CenterEnd).padding(end = 10.dp),
             horizontalArrangement = Arrangement.spacedBy(6.dp),
-            // The last tab can scroll fully clear of the buttons.
-            contentPadding = PaddingValues(start = 10.dp, end = 10.dp + SMALL_PILL * 2 + 12.dp, top = 2.dp, bottom = 2.dp),
         ) {
-            items(tabs, key = { it.id }) { tab -> TabPill(tab, tab.id == state.browserTabId, actions) }
-        }
-        CompositionLocalProvider(LocalKrewdBackdrop provides if (glassOn) strip else null) {
-            LiquidRow(
-                Modifier.align(Alignment.CenterEnd).padding(end = 10.dp),
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                KrewdIconPill(onClick = onNew, icon = R.drawable.ic_add_24, contentDescription = "New tab", size = SMALL_PILL)
-                TabCount(tabs.size, onAll)
-            }
+            KrewdIconPill(onClick = onNew, icon = R.drawable.ic_add_24, contentDescription = "New tab", size = SMALL_PILL)
+            TabCount(count, onAll)
         }
     }
 }
@@ -360,16 +378,16 @@ private fun Favicon(tab: BrowserTab, size: androidx.compose.ui.unit.Dp = 22.dp) 
 private fun TabPill(tab: BrowserTab, selected: Boolean, actions: TabActions) {
     var menu by remember { mutableStateOf(false) }
     Box {
-        // A flat liquid pill (it is part of the strip the New tab and count glass shows): it stretches under the
-        // finger, a drag along the strip scrolls it, a long press opens the tab's menu.
+        // A glass pill over the page (the selected one tinted): it stretches under the finger, a drag along the
+        // strip scrolls it, a long press opens the tab's menu.
         KrewdPill(
             Modifier.widthIn(max = 160.dp),
             onClick = { actions.onSelect(tab) },
             onLongClick = { menu = true },
             scrollAxis = Orientation.Horizontal,
-            glass = false,
             height = SMALL_PILL,
             color = if (selected) MaterialTheme.colorScheme.primaryContainer else Color.Unspecified,
+            glassTint = if (selected) MaterialTheme.colorScheme.primaryContainer else Color.Unspecified,
             contentColor = if (selected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface,
         ) {
             Row(Modifier.padding(start = 6.dp, end = 12.dp), horizontalArrangement = Arrangement.spacedBy(7.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -565,9 +583,9 @@ private fun ControlsRow(
     val row: @Composable (@Composable RowScope.() -> Unit) -> Unit = { content ->
         // Above the page (zIndex), so a button stretched toward it is drawn over it, not cut off by it.
         val modifier = Modifier.fillMaxWidth().zIndex(1f).padding(horizontal = 10.dp, vertical = 6.dp)
-        // Glass: one liquid bar over the screen's plain background (the tab glass source, which holds only that
-        // while the browser shows: it never records again). Back, Forward and Reload touch and flow into each
-        // other; the others sit a small gap apart and flow in only when stretched into them.
+        // Glass: one liquid bar over the page (the browser's own glass source, the tab strip and the page).
+        // Back, Forward and Reload touch and flow into each other; the others sit a small gap apart and flow
+        // in only when stretched into them.
         if (glassOn) LiquidRow(modifier, horizontalArrangement = Arrangement.spacedBy(0.dp), content = content)
         else Row(modifier, horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically, content = content)
     }

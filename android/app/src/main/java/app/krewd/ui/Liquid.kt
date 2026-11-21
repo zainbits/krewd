@@ -55,6 +55,9 @@ import io.github.zainbits.vitreous.GlassSurface
  *  - Plain: the switch is off, or battery saver or heat turned it off: the plain Material pill, no stretch.
  */
 
+/** How strongly a [KrewdPill]'s glassTint colours its glass (a selected browser tab). */
+private const val GLASS_TINT_ALPHA = 0.55f
+
 /** The content glass on this screen shows (the tab screens, a routine's page, a picture); null = nothing. */
 val LocalKrewdBackdrop = compositionLocalOf<GlassBackdrop?> { null }
 
@@ -157,6 +160,7 @@ fun KrewdPill(
     contentAlignment: Alignment = Alignment.CenterStart,
     onLongClick: (() -> Unit)? = null,
     scrollAxis: Orientation? = null,
+    glassTint: Color = Color.Unspecified,
     content: @Composable BoxScope.() -> Unit,
 ) {
     when (val look = look(glass)) {
@@ -170,7 +174,9 @@ fun KrewdPill(
                     backdrop = if (look == Look.Glass) LocalKrewdBackdrop.current else null,
                     modifier = modifier.height(height),
                     shape = GlassShape.Capsule,
-                    style = if (look == Look.Glass) LocalGlassStyle.current else flatStyle(color),
+                    style = if (look != Look.Glass) flatStyle(color)
+                    else if (glassTint.isSpecified) LocalGlassStyle.current.let { it.copy(tint = glassTint, tintAlpha = maxOf(it.tintAlpha, GLASS_TINT_ALPHA)) }
+                    else LocalGlassStyle.current,
                     contentAlignment = contentAlignment,
                     elastic = true,
                     onClick = onClick,
