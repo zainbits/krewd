@@ -195,6 +195,7 @@ fun BrowserScreen(state: UiState, viewModel: KrewdViewModel, landscape: Boolean)
         // bar are glass over it (a page zoomed in passes under them). The strip has no background of its own.
         val glassOn = LocalKrewdGlass.current.on
         val pageBackdrop = rememberGlassBackdrop()
+        val stripBackdrop = rememberGlassBackdrop()
         Box(Modifier.weight(1f).fillMaxWidth()) {
             Column(Modifier.fillMaxSize().then(if (glassOn) Modifier.glassSource(pageBackdrop).background(MaterialTheme.colorScheme.surface) else Modifier)) {
                 if (!landscape) Spacer(Modifier.height(STRIP_HEIGHT))
@@ -226,9 +227,14 @@ fun BrowserScreen(state: UiState, viewModel: KrewdViewModel, landscape: Boolean)
             CompositionLocalProvider(LocalKrewdBackdrop provides if (glassOn) pageBackdrop else null) {
                 Column(Modifier.fillMaxWidth()) {
                     // Above the controls, so a stretched tab or button is drawn over them.
+                    // Layers: the tabs are glass over the page, and the strip (the page behind it, then the tabs) is a
+                    // second source, which New tab and the count are glass over, so a tab scrolling under them
+                    // shows through and bends.
                     if (!landscape) Box(Modifier.fillMaxWidth().height(STRIP_HEIGHT).zIndex(2f)) {
-                        TabStrip(state, tabActions)
-                        TabButtons(state.browser?.tabs?.size ?: 0, onNew = { viewModel.newTab { editingUrl = true } }, onAll = { allTabs = true })
+                        TabStrip(state, tabActions, if (glassOn) Modifier.glassSource(stripBackdrop, under = pageBackdrop) else Modifier)
+                        CompositionLocalProvider(LocalKrewdBackdrop provides if (glassOn) stripBackdrop else null) {
+                            TabButtons(state.browser?.tabs?.size ?: 0, onNew = { viewModel.newTab { editingUrl = true } }, onAll = { allTabs = true })
+                        }
                     }
                     ControlsRow(
                         tab = tab,
@@ -324,7 +330,7 @@ private fun TabStrip(state: UiState, actions: TabActions, modifier: Modifier = M
     }
 }
 
-/** New tab and the tab count, at the strip's end: glass over the page (tabs scrolling under them hide behind them). */
+/** New tab and the tab count, at the strip's end: glass over the strip (the tabs and the page behind them). */
 @Composable
 private fun TabButtons(count: Int, onNew: () -> Unit, onAll: () -> Unit, modifier: Modifier = Modifier) {
     // Across the strip; only the buttons take touches, the rest reaches the tabs below.
