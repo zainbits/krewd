@@ -159,6 +159,12 @@ class FollowUp(BaseModel):
     reason: str = Field(default="", max_length=300)
 
 
+class SkipRuns(BaseModel):
+    trigger: str | None = Field(default=None, max_length=40)
+    runs: int | None = Field(default=None, ge=0, le=100)
+    today: bool = False
+
+
 class RunResult(BaseModel):
     result: Literal["failed", "waiting"]
     reason: str = Field(min_length=1, max_length=300)
@@ -777,6 +783,12 @@ def create_app(hub: Hub, token: str, lifespan_hub: bool = True) -> FastAPI:
     async def routine_result(routine_id: uuid.UUID, body: RunResult) -> dict[str, Any]:
         """During a run: it did not do the job (failed) or needs the owner's answer (waiting). Its chat is kept."""
         return await hub.run_result(routine_id, body.result, body.reason)
+
+    @app.post("/api/routines/{routine_id}/skip", dependencies=auth)
+    async def routine_skip(routine_id: uuid.UUID, body: SkipRuns) -> dict[str, Any]:
+        """Skip the next `runs` firings of a trigger (every trigger when none is named; 0 clears), or with `today`
+        every firing left today. Skipped firings are recorded as skipped runs."""
+        return await hub.skip_runs(routine_id, body.trigger, body.runs, body.today)
 
     @app.delete("/api/routines/{routine_id}/later/{trigger_id}", dependencies=auth)
     async def routine_cancel_later(routine_id: uuid.UUID, trigger_id: uuid.UUID) -> dict[str, Any]:

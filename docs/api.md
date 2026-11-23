@@ -121,6 +121,8 @@ Triggers: each has a `name`, a cron `schedule`, `max_attempts` (1 to 10) and `en
 
 Follow-ups: during a run, `POST /api/routines/{id}/later` asks Krewd to fire the same trigger again later as its next attempt (a `once` trigger with `parent`, `attempt` and `reason`). Krewd refuses past the trigger's `max_attempts`, so retries stay bounded; a new follow-up replaces a pending one, the next scheduled firing drops a pending one, and pausing the routine drops them all. While the previous run is still going, a due follow-up waits a minute instead of being skipped.
 
+Skips: each cron trigger has `skip_runs`. While it is above 0, a firing is recorded as a `skipped` run ("Skipped as you asked.") and the count goes down by one, so the routine carries on by itself afterwards (unlike pausing). A routine's `upcoming` marks the firings that will be skipped (`skipped: true`), and `next_live_at` is the next firing that really runs.
+
 The scheduler looks every 15 s. A due trigger is claimed by moving its `next_run_at` first, so it fires once. A run missed while Krewd was down runs once if Krewd is back within 6 hours, else it is recorded as `skipped`. A run while the routine's previous run is still queued or running is `skipped` (scheduled) or refused with 409 (run now). Changing the title, instructions or schedule makes a new version; every version is kept.
 
 | Method and path | Body | Returns |
@@ -133,6 +135,7 @@ The scheduler looks every 15 s. A due trigger is claimed by moving its `next_run
 | `PUT /api/routines/{id}/notes` | `{notes, append?}` | the routine; notes are at most 8000 characters and not versioned |
 | `POST /api/routines/{id}/later` | `{minutes? \| at?, reason}` | the follow-up trigger (201); 409 outside a run or with no attempts left; 1 minute to 12 hours ahead |
 | `DELETE /api/routines/{id}/later/{trigger_id}` | | `{ok}`: cancels a follow-up |
+| `POST /api/routines/{id}/skip` | `{trigger?, runs? \| today}` | the routine: skips the next `runs` firings (0 to 100; 0 clears) of the named trigger, or of every trigger; `today` skips every firing left today in the routine's timezone and drops today's pending follow-ups |
 | `POST /api/routines/{id}/result` | `{result: failed\|waiting, reason}` | the run: during a run, it did not do the job or waits for the owner; it ends with that status and its chat is kept. 409 outside a run |
 | `DELETE /api/routines/{id}` | | `{ok}`; the routine and its runs go, its chat stays as an ordinary task |
 | `POST /api/routines/{id}/run` | `{trigger?}` | the run (202) as that trigger (default: the first), on top of the schedule |

@@ -66,6 +66,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -525,25 +527,107 @@ private const val FOLDED_LINES = 5
 /** A routine's instructions or notes, whole, on their own screen. */
 @Composable
 private fun TextReader(title: String, text: String, onDismiss: () -> Unit, onEdit: () -> Unit) {
+    FullScreenPage(
+        onDismiss = onDismiss,
+        bar = {
+            PageTopBar(
+                icon = R.drawable.ic_chevron_left_24, iconLabel = "Back", onIcon = onDismiss, title = title,
+                action = "Edit", actionIcon = R.drawable.ic_edit_24, onAction = onEdit,
+            )
+        },
+    ) { contentPadding ->
+        SelectionContainer(Modifier.fillMaxSize()) {
+            Text(
+                text,
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.verticalScroll(rememberScrollState()).padding(contentPadding).padding(horizontal = 20.dp),
+            )
+        }
+    }
+}
+
+/**
+ * A full-screen page over the app (a routine's editor, its instructions or notes): the content scrolls under a
+ * floating liquid [bar], like the routine page and the chat. [content] gets the padding that clears the bar at
+ * the top and the gap at the bottom; the keyboard and the navigation bar are kept out already.
+ */
+@Composable
+private fun FullScreenPage(
+    onDismiss: () -> Unit,
+    bar: @Composable () -> Unit,
+    content: @Composable (PaddingValues) -> Unit,
+) {
     Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)) {
-        Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surface) {
-            Column(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.systemBars)) {
-                Row(Modifier.padding(horizontal = 8.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(onClick = onDismiss) { Icon(painterResource(R.drawable.ic_chevron_left_24), contentDescription = "Back") }
-                    Text(title, style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    FilledTonalButton(onClick = onEdit) {
-                        Icon(painterResource(R.drawable.ic_edit_24), contentDescription = null, modifier = Modifier.size(18.dp))
+        val glassOn = LocalKrewdGlass.current.on
+        val backdrop = rememberGlassBackdrop()
+        val top = WindowInsets.statusBars.union(WindowInsets.displayCutout).asPaddingValues().calculateTopPadding()
+        Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surface)) {
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .then(if (glassOn) Modifier.glassSource(backdrop).background(MaterialTheme.colorScheme.surface) else Modifier)
+                    .windowInsetsPadding(
+                        WindowInsets.ime.union(WindowInsets.navigationBars).union(WindowInsets.displayCutout)
+                            .only(WindowInsetsSides.Bottom + WindowInsetsSides.Horizontal),
+                    ),
+            ) {
+                content(
+                    PaddingValues(
+                        top = top + ShellDimensions.TITLE_PILL_TOP_GAP + ShellDimensions.TITLE_PILL_HEIGHT + ShellDimensions.CONTENT_CLEARANCE,
+                        bottom = ShellDimensions.CONTENT_CLEARANCE,
+                    ),
+                )
+            }
+            CompositionLocalProvider(LocalKrewdBackdrop provides if (glassOn) backdrop else null) { bar() }
+        }
+    }
+}
+
+/**
+ * A page's top bar: a round button ([icon]: close or back), the title in a pill and an optional [action] pill
+ * (Save, Edit), all one liquid glass bar like [RoutineTopBar]'s. A disabled action fades its text.
+ */
+@Composable
+private fun PageTopBar(
+    @androidx.annotation.DrawableRes icon: Int,
+    iconLabel: String,
+    onIcon: () -> Unit,
+    title: String,
+    action: String? = null,
+    @androidx.annotation.DrawableRes actionIcon: Int? = null,
+    actionEnabled: Boolean = true,
+    onAction: () -> Unit = {},
+) {
+    LiquidRow(
+        modifier = Modifier
+            .fillMaxWidth()
+            .windowInsetsPadding(WindowInsets.statusBars.union(WindowInsets.displayCutout).only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal))
+            .padding(horizontal = ShellDimensions.TITLE_PILL_START_MARGIN)
+            .padding(top = ShellDimensions.TITLE_PILL_TOP_GAP),
+    ) {
+        KrewdIconPill(onClick = onIcon, icon = icon, contentDescription = iconLabel)
+        KrewdPill(Modifier.weight(1f)) {
+            Text(
+                title,
+                style = MaterialTheme.typography.titleMedium,
+                color = LocalContentColor.current,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(horizontal = 16.dp).semantics { heading() },
+            )
+        }
+        if (action != null) {
+            KrewdPill(onClick = onAction, enabled = actionEnabled, contentAlignment = Alignment.Center) {
+                val ink = LocalContentColor.current.let { if (actionEnabled) it else it.copy(alpha = 0.38f) }
+                Row(
+                    Modifier.padding(start = if (actionIcon != null) 14.dp else 20.dp, end = 20.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    if (actionIcon != null) {
+                        Icon(painterResource(actionIcon), contentDescription = null, tint = ink, modifier = Modifier.size(18.dp))
                         Spacer(Modifier.width(6.dp))
-                        Text("Edit")
                     }
-                }
-                HorizontalDivider()
-                SelectionContainer(Modifier.weight(1f).fillMaxWidth()) {
-                    Text(
-                        text,
-                        style = MaterialTheme.typography.bodyMedium,
-                        modifier = Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 20.dp, vertical = 16.dp),
-                    )
+                    Text(action, style = MaterialTheme.typography.titleSmall, color = ink, maxLines = 1)
                 }
             }
         }
@@ -961,136 +1045,132 @@ private fun RoutineEditor(
         names.toSet().size == names.size
     val valid = (!all || title.isNotBlank()) && (!showInstructions || instructions.isNotBlank()) && (!showSchedule || scheduleOk)
 
-    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)) {
-        Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surface) {
-            Column(
-                Modifier
-                    .fillMaxSize()
-                    .windowInsetsPadding(WindowInsets.systemBars.union(WindowInsets.ime))
-                    .verticalScroll(rememberScrollState())
-                    .padding(horizontal = 16.dp, vertical = 12.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(onClick = onDismiss) { Icon(painterResource(R.drawable.ic_close_24), contentDescription = "Cancel") }
-                    Text(
-                        when {
-                            existing == null -> "New routine"
-                            part == EditPart.SCHEDULE -> "Schedule"
-                            part == EditPart.INSTRUCTIONS -> "Instructions"
-                            part == EditPart.AGENT -> "Agent"
-                            else -> "Edit routine"
-                        },
-                        style = MaterialTheme.typography.titleLarge,
-                        modifier = Modifier.weight(1f),
-                    )
-                    Button(
-                        enabled = valid && !saving,
-                        onClick = {
-                            saving = true
-                            val fields = JSONObject()
-                            if (all) fields.put("title", title.trim())
-                            if (showSchedule) {
-                                fields.put("triggers", JSONArray(drafts.map {
-                                    JSONObject().put("name", it.name.trim().lowercase()).put("schedule", it.schedule.trim())
-                                        .put("max_attempts", it.attempts).put("enabled", it.enabled)
-                                }))
-                            }
-                            if (showInstructions) fields.put("instructions", instructions.trim())
-                            if (showAgent) {
-                                fields.put("auto_approve", autoApprove)
-                                engineId?.let { fields.put("engine", it) }
-                                fields.put("config", JSONObject(picks))
-                            }
-                            if (existing != null && note.isNotBlank()) fields.put("note", note.trim())
-                            // A refused save shows its reason as a message, and the owner can try again.
-                            viewModel.saveRoutine(existing?.id, fields, failed = { saving = false }) { saving = false; onSaved(it) }
-                        },
-                    ) { Text("Save") }
+    val save: () -> Unit = {
+        saving = true
+        val fields = JSONObject()
+        if (all) fields.put("title", title.trim())
+        if (showSchedule) {
+            fields.put("triggers", JSONArray(drafts.map {
+                JSONObject().put("name", it.name.trim().lowercase()).put("schedule", it.schedule.trim())
+                    .put("max_attempts", it.attempts).put("enabled", it.enabled)
+            }))
+        }
+        if (showInstructions) fields.put("instructions", instructions.trim())
+        if (showAgent) {
+            fields.put("auto_approve", autoApprove)
+            engineId?.let { fields.put("engine", it) }
+            fields.put("config", JSONObject(picks))
+        }
+        if (existing != null && note.isNotBlank()) fields.put("note", note.trim())
+        // A refused save shows its reason as a message, and the owner can try again.
+        viewModel.saveRoutine(existing?.id, fields, failed = { saving = false }) { saving = false; onSaved(it) }
+    }
+    val editorTitle = when {
+        existing == null -> "New routine"
+        part == EditPart.SCHEDULE -> "Schedule"
+        part == EditPart.INSTRUCTIONS -> "Instructions"
+        part == EditPart.AGENT -> "Agent"
+        else -> "Edit routine"
+    }
+
+    FullScreenPage(
+        onDismiss = onDismiss,
+        bar = {
+            PageTopBar(
+                icon = R.drawable.ic_close_24, iconLabel = "Cancel", onIcon = onDismiss, title = editorTitle,
+                action = "Save", actionEnabled = valid && !saving, onAction = save,
+            )
+        },
+    ) { contentPadding ->
+        Column(
+            Modifier
+                .verticalScroll(rememberScrollState())
+                .padding(contentPadding)
+                .padding(horizontal = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            if (all) OutlinedTextField(
+                value = title, onValueChange = { title = it }, label = { Text("Title") },
+                singleLine = true, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp),
+            )
+            if (showSchedule) {
+            Text("Triggers: when it runs", style = MaterialTheme.typography.labelLarge)
+            drafts.forEachIndexed { index, draft ->
+                TriggerDraftCard(
+                    draft = draft,
+                    timezone = existing?.timezone,
+                    viewModel = viewModel,
+                    canRemove = drafts.size > 1,
+                    duplicate = names.count { it == draft.name.trim().lowercase() } > 1,
+                    onChange = { drafts[index] = it },
+                    onRemove = { badSchedules.remove(draft.key); drafts.removeAt(index) },
+                    onValidity = { bad -> badSchedules[draft.key] = bad },
+                )
+            }
+            if (drafts.size < 10) {
+                TextButton(onClick = {
+                    val name = if (drafts.size == 1 && drafts[0].name == "main") "second" else "trigger ${drafts.size + 1}"
+                    drafts.add(TriggerDraft(nextDraftKey++, name, "0 9 * * 1-5", 1, true))
+                }) {
+                    Icon(painterResource(R.drawable.ic_add_24), contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("Add trigger")
                 }
-                if (all) OutlinedTextField(
-                    value = title, onValueChange = { title = it }, label = { Text("Title") },
+            }
+            Text(
+                "Several triggers make one routine with one chat (a morning scan and an evening report). Each run is told which trigger fired, today's date and the month's last day; write a part per trigger in the instructions. More than 1 try lets a run ask Krewd to retry later (\u201cthe build is still running\u201d), never more than that.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            }
+            if (showInstructions) OutlinedTextField(
+                value = instructions, onValueChange = { instructions = it }, label = { Text("Instructions") },
+                minLines = if (all) 6 else 14, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp),
+                placeholder = { Text("What should Krewd do on each run? Say what needs your review before it submits anything.") },
+            )
+            if (existing != null && (showSchedule || showInstructions)) {
+                OutlinedTextField(
+                    value = note, onValueChange = { note = it }, label = { Text("What changed (optional, kept with the version)") },
                     singleLine = true, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp),
                 )
-                if (showSchedule) {
-                Text("Triggers: when it runs", style = MaterialTheme.typography.labelLarge)
-                drafts.forEachIndexed { index, draft ->
-                    TriggerDraftCard(
-                        draft = draft,
-                        timezone = existing?.timezone,
-                        viewModel = viewModel,
-                        canRemove = drafts.size > 1,
-                        duplicate = names.count { it == draft.name.trim().lowercase() } > 1,
-                        onChange = { drafts[index] = it },
-                        onRemove = { badSchedules.remove(draft.key); drafts.removeAt(index) },
-                        onValidity = { bad -> badSchedules[draft.key] = bad },
-                    )
-                }
-                if (drafts.size < 10) {
-                    TextButton(onClick = {
-                        val name = if (drafts.size == 1 && drafts[0].name == "main") "second" else "trigger ${drafts.size + 1}"
-                        drafts.add(TriggerDraft(nextDraftKey++, name, "0 9 * * 1-5", 1, true))
-                    }) {
-                        Icon(painterResource(R.drawable.ic_add_24), contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(Modifier.width(6.dp))
-                        Text("Add trigger")
-                    }
-                }
+            }
+            if (showAgent) {
+            // The same controls as the new-task sheet: agents as face cards, models as cards that scroll
+            // sideways, effort as a slider, modes and on/off settings as they are, auto-approve as a switch.
+            SheetLabel("Who")
+            CrewPicker(crewMembers(state), engineId, onPick = { engineId = it })
+            if (existing != null && engineId != existing.engine) {
                 Text(
-                    "Several triggers make one routine with one chat (a morning scan and an evening report). Each run is told which trigger fired, today's date and the month's last day; write a part per trigger in the instructions. More than 1 try lets a run ask Krewd to retry later (\u201cthe build is still running\u201d), never more than that.",
+                    "The routine's chat moves to this agent: the current agent writes a handover first, and switching back later resumes its own session.",
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                }
-                if (showInstructions) OutlinedTextField(
-                    value = instructions, onValueChange = { instructions = it }, label = { Text("Instructions") },
-                    minLines = if (all) 6 else 14, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp),
-                    placeholder = { Text("What should Krewd do on each run? Say what needs your review before it submits anything.") },
-                )
-                if (existing != null && (showSchedule || showInstructions)) {
-                    OutlinedTextField(
-                        value = note, onValueChange = { note = it }, label = { Text("What changed (optional, kept with the version)") },
-                        singleLine = true, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp),
-                    )
-                }
-                if (showAgent) {
-                // The same controls as the new-task sheet: agents as face cards, models as cards that scroll
-                // sideways, effort as a slider, modes and on/off settings as they are, auto-approve as a switch.
-                SheetLabel("Who")
-                CrewPicker(crewMembers(state), engineId, onPick = { engineId = it })
-                if (existing != null && engineId != existing.engine) {
-                    Text(
-                        "The routine's chat moves to this agent: the current agent writes a handover first, and switching back later resumes its own session.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.tertiary,
-                        modifier = Modifier.padding(start = 4.dp, top = 6.dp),
-                    )
-                }
-                if (options.isEmpty()) {
-                    Text(
-                        "${state.engine(engineId)?.name ?: "This agent"} has not listed its settings yet. They appear here once it has started.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(start = 4.dp, top = 10.dp),
-                    )
-                }
-                AgentOptions(
-                    options = options,
-                    selected = { picks[it.id] ?: it.current },
-                    enabled = true,
-                    onPick = { option, value -> picks = picks + (option.id to value) },
-                    autoApprove = autoApprove,
-                    onAutoApprove = { autoApprove = it },
-                )
-                Text(
-                    if (autoApprove) "During runs, agent prompts are answered for you." else "During runs, you OK each agent prompt (the run waits for you).",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = MaterialTheme.colorScheme.tertiary,
                     modifier = Modifier.padding(start = 4.dp, top = 6.dp),
                 )
-                }
-                Spacer(Modifier.padding(bottom = 24.dp))
             }
+            if (options.isEmpty()) {
+                Text(
+                    "${state.engine(engineId)?.name ?: "This agent"} has not listed its settings yet. They appear here once it has started.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(start = 4.dp, top = 10.dp),
+                )
+            }
+            AgentOptions(
+                options = options,
+                selected = { picks[it.id] ?: it.current },
+                enabled = true,
+                onPick = { option, value -> picks = picks + (option.id to value) },
+                autoApprove = autoApprove,
+                onAutoApprove = { autoApprove = it },
+            )
+            Text(
+                if (autoApprove) "During runs, agent prompts are answered for you." else "During runs, you OK each agent prompt (the run waits for you).",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(start = 4.dp, top = 6.dp),
+            )
+            }
+            Spacer(Modifier.padding(bottom = 24.dp))
         }
     }
 }

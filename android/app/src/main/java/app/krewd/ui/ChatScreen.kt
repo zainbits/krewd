@@ -198,8 +198,10 @@ fun ChatScreen(state: UiState, viewModel: KrewdViewModel) {
     // always scrolls clear of the composer however tall it grows.
     var bottomStack by remember { mutableStateOf(ShellDimensions.COMPOSER_MIN_HEIGHT * 2) }
     // The same stack at rest (keyboard closed, the composer one line tall: the smallest seen), and the screen's
-    // height: the quick panel ends as far above the go-to-latest button as that button is above this composer.
-    // A taller composer or the keyboard may cover the panel's end; it scrolls.
+    // height: the quick panel ends as far above the go-to-latest button as that button is above the composer.
+    // With the keyboard closed it measures from the composer as it is, so a composer grown to its full height
+    // shrinks the panel (down to a minimum, then it scrolls) instead of covering its end. While the keyboard is
+    // open it keeps the resting height and the keyboard may cover its end; it scrolls.
     var restingStack by remember { mutableStateOf<Dp?>(null) }
     var screenHeight by remember { mutableStateOf(0.dp) }
     val imeOpen = WindowInsets.ime.getBottom(density) > 0
@@ -343,9 +345,10 @@ fun ChatScreen(state: UiState, viewModel: KrewdViewModel) {
             Column(Modifier.align(Alignment.TopCenter).fillMaxWidth()) {
                 val navBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
                 val resting = restingStack ?: (navBottom + ShellDimensions.COMPOSER_MARGIN * 2 + 96.dp)
+                val composerStack = if (imeOpen) resting else maxOf(resting, bottomStack)
                 // Go-to-latest sits 12 dp above the composer and is 44 dp tall; the panel stops 12 dp above it.
-                val panelMax = (screenHeight - bars.calculateTopPadding() - ShellDimensions.TITLE_PILL_TOP_GAP - resting - 12.dp - 44.dp - 12.dp)
-                    .coerceAtLeast(ShellDimensions.TITLE_PILL_HEIGHT * 3)
+                val panelMax = (screenHeight - bars.calculateTopPadding() - ShellDimensions.TITLE_PILL_TOP_GAP - composerStack - 12.dp - 44.dp - 12.dp)
+                    .coerceAtLeast(QUICK_PANEL_MIN_HEIGHT)
                 ChatTopBar(
                     state, viewModel, backdrop,
                     expanded = titleOpen,
@@ -496,6 +499,12 @@ fun ChatScreen(state: UiState, viewModel: KrewdViewModel) {
         }
     }
 }
+
+/**
+ * The least the open quick panel shrinks to over a tall composer: the title row and a few rows of settings,
+ * enough to scroll through them comfortably. Below this the composer may cover its end.
+ */
+private val QUICK_PANEL_MIN_HEIGHT = 220.dp
 
 /**
  * Back, and the title with the agent and its settings under it. Tapping the title opens it into the quick

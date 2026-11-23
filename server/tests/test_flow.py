@@ -628,6 +628,45 @@ async def test_scheduler_runs_due_routines_once_and_skips_stale_ones(hub):
     assert runs[0]["status"] == "skipped" and "not running" in runs[0]["summary"]
 
 
+async def test_skip_runs_skips_the_next_firings_and_today(hub):
+    routine = await hub.create_routine(
+        "Attendance", "Check in or out.", timezone="UTC",
+        triggers=[{"name": "check-in", "schedule": "*/5 * * * *"},
+                  {"name": "check-out", "schedule": "0 0 1 1 *", "max_attempts": 3}],
+    )
+    rid = uuid.UUID(routine["id"])
+    skipped = await hub.skip_runs(rid, "check-in", runs=2)
+    by = {t["name"]: t for t in skipped["triggers"]}
+    assert by["check-in"]["skip_runs"] == 2 and by["check-out"]["skip_runs"] == 0
+    marks = [u["skipped"] for u in skipped["upcoming"] if u["trigger"] == "check-in"]
+    assert marks[:3] == [True, True, False]
+    assert skipped["next_live_at"] > skipped["next_run_at"]
+
+    now = datetime.now(UTC)
+    await hub.pool.execute("update routine_triggers set next_run_at = $2 where routine_id = $1 and name = 'check-in'",
+                           rid, now - timedelta(seconds=30))
+    assert await hub.run_due(now) == 0  # skipped, not run
+    runs = await hub.routine_runs(rid)
+    assert runs[0]["status"] == "skipped" and "as you asked" in runs[0]["summary"] and "1 more" in runs[0]["summary"]
+    assert await hub.pool.fetchval("select skip_runs from routine_triggers where routine_id = $1 and name = 'check-in'",
+                                   rid) == 1
+
+    # Clearing it lets the next firing run.
+    await hub.skip_runs(rid, "check-in", runs=0)
+    later = now + timedelta(minutes=6)
+    await hub.pool.execute("update routine_triggers set next_run_at = $2 where routine_id = $1 and name = 'check-in'",
+                           rid, later - timedelta(seconds=30))
+    assert await hub.run_due(later) == 1
+    await wait_run(hub, rid, "done")
+
+    # Today: every trigger, as many firings as are left today; a yearly trigger has none today (usually 0).
+    today = await hub.skip_runs(rid, today=True)
+    by = {t["name"]: t for t in today["triggers"]}
+    assert by["check-in"]["skip_runs"] >= 1
+    with pytest.raises(Exception, match="no trigger"):
+        await hub.skip_runs(rid, "nope", runs=1)
+
+
 async def test_routine_run_skips_while_the_last_one_runs(hub):
     routine = await hub.create_routine("Slow", "slow task", "0 9 * * *", timezone="UTC")
     rid = uuid.UUID(routine["id"])

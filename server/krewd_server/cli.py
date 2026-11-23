@@ -9,6 +9,7 @@
     krewd routines later ID (--in 5m | --at 19:05) --reason TEXT     during a run: try this trigger again later
     krewd routines result ID failed|waiting --reason TEXT     during a run: it failed, or waits for the owner
     krewd routines notes ID [--set TEXT | --set-file PATH | --append TEXT]
+    krewd routines skip ID [--trigger NAME] (--today | --runs N | --clear)   skip coming runs (owner's ask only)
     krewd schedule CRON [--timezone TZ]      check a schedule and show its next runs
     krewd chat history CHAT [--last N] [--after SEQ]     a chat's messages (owner, agents), e.g. after a switch
     krewd secret request [--field KIND[:LABEL[:SELECTOR]]]... [--submit enter|none|SELECTOR] --reason TEXT [--tab ID]
@@ -59,6 +60,9 @@ Rules for agents:
     and you are not sure whether to update it or create a new one, ask the owner in the chat first and wait.
     Related jobs at different times (check-in and check-out) are one routine with several triggers.
   - Before deleting one, ask the owner in the chat and wait for a yes.
+  - To skip coming runs (a leave day, a holiday), use `krewd routines skip`, not pause: it skips only those
+    firings and the routine carries on by itself. `--today` skips every firing left today (and today's
+    pending retries); `--runs N` the next N firings; `--clear` undoes it. Without --trigger: every trigger.
   - After a change, tell the owner what changed (triggers in words, instructions version) in the chat.
   - Put the calendar rules ("on Fridays", "skip leave days") in the instructions; a trigger's cron says when to
     look. `L` is the month's last day and `LW` its last weekday ("0 18 LW * *").
@@ -217,8 +221,9 @@ def show(r: dict[str, Any]) -> None:
     print("\nTriggers:")
     for t in r.get("triggers") or []:
         if t["kind"] == "cron":
+            skipping = f", skipping the next {t['skip_runs']}" if t.get("skip_runs") else ""
             print(f"  {t['name']:<14} {t['schedule']:<16} {t['schedule_text']}, attempts {t['max_attempts']}, "
-                  f"{'on' if t['enabled'] else 'off'}, next {_when(t['next_run_at'])}")
+                  f"{'on' if t['enabled'] else 'off'}, next {_when(t['next_run_at'])}{skipping}")
         else:
             print(f"  follow-up of {t['parent']}: {_when(t['next_run_at'])}, attempt {t['attempt']} of "
                   f"{t['max_attempts']} ({t['reason'] or 'no reason'}) [id {t['id'][:8]}]")
@@ -483,6 +488,13 @@ def main(argv: list[str] | None = None) -> int:
     result.add_argument("id")
     result.add_argument("outcome", choices=["failed", "waiting"])
     result.add_argument("--reason", required=True, help="one line: what went wrong, or what the owner must answer")
+    skip = rsub.add_parser("skip", help="skip coming runs of one trigger or all (a leave day); --clear undoes it")
+    skip.add_argument("id")
+    skip.add_argument("--trigger", help="only this trigger (default: every trigger)")
+    sgroup = skip.add_mutually_exclusive_group(required=True)
+    sgroup.add_argument("--today", action="store_true", help="every firing left today, and today's pending retries")
+    sgroup.add_argument("--runs", type=int, metavar="N", help="the next N firings (1 to 100)")
+    sgroup.add_argument("--clear", action="store_true", help="skip nothing")
     notes = rsub.add_parser("notes", help="show or change the notes kept between runs")
     notes.add_argument("id")
     ngroup = notes.add_mutually_exclusive_group()
@@ -591,6 +603,17 @@ def main(argv: list[str] | None = None) -> int:
             t = call("POST", f"/api/routines/{routine_id}/later", body)
             print(f"Follow-up set: {t['parent']} again at {_when(t['next_run_at'])}, attempt {t['attempt']} of "
                   f"{t['max_attempts']}. End this run now; the next attempt comes into this chat.")
+        elif args.action == "skip":
+            body: dict[str, Any] = {"today": True} if args.today else {"runs": 0 if args.clear else args.runs}
+            if args.trigger:
+                body["trigger"] = args.trigger
+            r = call("POST", f"/api/routines/{routine_id}/skip", body)
+            for t in r.get("triggers") or []:
+                if t["kind"] == "cron" and (not args.trigger or t["name"] == args.trigger.strip().lower()):
+                    n = t.get("skip_runs") or 0
+                    print(f"  {t['name']}: " + (f"skipping the next {n} run{'s' if n != 1 else ''}" if n
+                                                 else "not skipping"))
+            print(f"Next real run: {_when(r.get('next_live_at'))}")
         elif args.action == "notes":
             if args.set_text is None and args.set_file is None and args.append is None:
                 print(call("GET", f"/api/routines/{routine_id}").get("notes") or "(no notes yet)")

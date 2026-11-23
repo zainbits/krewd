@@ -2660,6 +2660,7 @@ class Hub:
             "attempt": t["attempt"],
             "reason": t["reason"],
             "parent": parent_name,
+            "skip_runs": t["skip_runs"],
         }
 
     async def _routine_full(self, row: asyncpg.Record, runs: int = 0) -> dict[str, Any]:
@@ -2682,11 +2683,17 @@ class Hub:
                     if t["next_run_at"]:
                         upcoming.append({"at": t["next_run_at"], "trigger": t["name"], "attempt": t["attempt"]})
                 else:
-                    for when in rtn.next_runs(t["schedule"], row["timezone"], now, 3):
-                        upcoming.append({"at": when, "trigger": t["name"], "attempt": None})
+                    skip = t["skip_runs"]
+                    for i, when in enumerate(rtn.next_runs(t["schedule"], row["timezone"], now, min(skip, 50) + 3)):
+                        upcoming.append({"at": when, "trigger": t["name"], "attempt": None, "skipped": i < skip})
             upcoming.sort(key=lambda u: u["at"])
-        routine["upcoming"] = [{**u, "at": u["at"].isoformat()} for u in upcoming[:5]]
-        routine["next_runs"] = [u["at"] for u in routine["upcoming"][:3]]
+        # Skipped firings show too (marked), so the owner sees what will not run; the next real run is separate.
+        live = [u for u in upcoming if not u.get("skipped")]
+        shown = [u for u in upcoming if u.get("skipped")][:20] + live[:5]
+        shown.sort(key=lambda u: u["at"])
+        routine["upcoming"] = [{**u, "at": u["at"].isoformat(), "skipped": bool(u.get("skipped"))} for u in shown]
+        routine["next_runs"] = [u["at"].isoformat() for u in live[:3]]
+        routine["next_live_at"] = live[0]["at"].isoformat() if live else None
         last = await self.pool.fetchrow(
             """select r.*, m.event_seq from routine_runs r left join messages m on m.id = r.message_id
                where r.routine_id = $1 order by r.created_at desc limit 1""",
@@ -2976,6 +2983,37 @@ class Hub:
         await self._sync_routine(routine_id)
         await self._routine_changed(routine_id)
 
+    async def skip_runs(
+        self, routine_id: uuid.UUID, trigger: str | None = None, runs: int | None = None, today: bool = False,
+    ) -> dict[str, Any]:
+        """Skip the next firings of one trigger (or every trigger): `runs` of them (0 clears the skip), or with
+        `today` every firing left today in the routine's timezone, plus any retry still pending from today."""
+        row = await self._routine_row(routine_id)
+        cron = [t for t in await self._triggers(routine_id) if t["kind"] == "cron"]
+        if trigger is not None:
+            cron = [t for t in cron if t["name"] == trigger.strip().lower()]
+            if not cron:
+                raise NotFound(f"no trigger called {trigger!r}")
+        if runs is None and not today:
+            raise rtn.Invalid("give a number of runs to skip, or today")
+        if runs is not None and not 0 <= runs <= 100:
+            raise rtn.Invalid("skip 0 to 100 runs")
+        tz = rtn.zone(row["timezone"])
+        now = datetime.now(UTC)
+        day = now.astimezone(tz).date()
+        for t in cron:
+            if today:
+                count = sum(1 for w in rtn.next_runs(t["schedule"], row["timezone"], now, 200)
+                            if w.astimezone(tz).date() == day)
+                await self.pool.execute(
+                    "delete from routine_triggers where parent_id = $1 and kind = 'once'", t["id"]
+                )
+            else:
+                count = runs or 0
+            await self.pool.execute("update routine_triggers set skip_runs = $2 where id = $1", t["id"], count)
+        await self._sync_routine(routine_id)
+        return await self._routine_changed(routine_id)
+
     async def _routine_changed(self, routine_id: uuid.UUID) -> dict[str, Any]:
         """Tell the apps: a `routine` event on the routine's chat, and the chat's own state."""
         routine = await self._routine_full(await self._routine_row(routine_id))
@@ -3199,6 +3237,17 @@ class Hub:
                     t["id"], t["next_run_at"], following,
                 )
                 if not claimed:
+                    continue
+                if t["skip_runs"] > 0:
+                    left = await self.pool.fetchval(
+                        """update routine_triggers set skip_runs = greatest(skip_runs - 1, 0) where id = $1
+                           returning skip_runs""",
+                        t["id"],
+                    )
+                    await self._start_run(
+                        row, "schedule", [{"trigger": t, "attempt": 1, "max": t["max_attempts"], "reason": None}], due,
+                        skip_reason="Skipped as you asked." + (f" {left} more to skip." if left else ""),
+                    )
                     continue
                 if now - due > rtn.CATCH_UP:
                     local = due.astimezone(rtn.zone(row["timezone"]))
