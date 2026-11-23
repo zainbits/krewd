@@ -48,6 +48,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.text.TextLayoutResult
+import androidx.compose.ui.text.withAnnotation
+import androidx.compose.ui.unit.isSpecified
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.ClipEntry
 import androidx.compose.ui.platform.LocalClipboard
@@ -338,8 +343,8 @@ private fun Block(node: Node, style: MdStyle, depth: Int) {
     val body = MaterialTheme.typography.bodyLarge
     val onSurface = MaterialTheme.colorScheme.onSurface
     when (node) {
-        is Heading -> Text(fadedText(node, style, onSurface), style = headingStyle(node.level), color = onSurface)
-        is Paragraph -> Text(fadedText(node, style, onSurface), style = body, color = onSurface)
+        is Heading -> MdText(fadedText(node, style, onSurface), headingStyle(node.level), onSurface, style.codeBackground)
+        is Paragraph -> MdText(fadedText(node, style, onSurface), body, onSurface, style.codeBackground)
         is ListBlock -> ListView(node, style, depth)
         is BlockQuote -> Quote(node, style, depth)
         is ThematicBreak -> HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
@@ -523,10 +528,11 @@ private fun Table(table: TableBlock, style: MdStyle) {
                                 .border(0.5.dp, colors.outlineVariant)
                                 .padding(horizontal = 8.dp, vertical = 5.dp),
                         ) {
-                            Text(
+                            MdText(
                                 text = pair?.second ?: AnnotatedString(""),
                                 style = if (isHeader) headerText else text,
                                 color = colors.onSurface,
+                                codeBackground = style.codeBackground,
                                 textAlign = when (pair?.first?.alignment) {
                                     TableCell.Alignment.CENTER -> TextAlign.Center
                                     TableCell.Alignment.RIGHT -> TextAlign.End
@@ -544,6 +550,63 @@ private fun Table(table: TableBlock, style: MdStyle) {
 
 // ---- Inlines ----
 
+private const val CODE_TAG = "code-span"
+private const val CODE_PAD = "\u2009"
+private val CODE_RADIUS = 4.dp
+
+/**
+ * [Text] that draws a rounded background behind inline code spans (a span background is a sharp rectangle).
+ * Each wrapped line of a span gets its own rounded piece.
+ */
+@Composable
+private fun MdText(
+    text: AnnotatedString,
+    style: TextStyle,
+    color: Color,
+    codeBackground: Color,
+    modifier: Modifier = Modifier,
+    textAlign: TextAlign = TextAlign.Unspecified,
+) {
+    val spans = remember(text) { text.getStringAnnotations(CODE_TAG, 0, text.length) }
+    if (spans.isEmpty()) {
+        Text(text, modifier = modifier, style = style, color = color, textAlign = textAlign)
+        return
+    }
+    var layout by remember { mutableStateOf<TextLayoutResult?>(null) }
+    Text(
+        text,
+        modifier = modifier.drawBehind {
+            val l = layout ?: return@drawBehind
+            val radius = CornerRadius(CODE_RADIUS.toPx())
+            val em = (style.fontSize.takeIf { it.isSpecified }?.toPx() ?: 16.sp.toPx()) * 0.9f
+            for (span in spans) {
+                val end = minOf(span.end, l.layoutInput.text.length)
+                if (span.start >= end) continue
+                for (line in l.getLineForOffset(span.start)..l.getLineForOffset(end - 1)) {
+                    val from = maxOf(span.start, l.getLineStart(line))
+                    val to = minOf(end, l.getLineEnd(line))
+                    if (from >= to) continue
+                    val a = l.getBoundingBox(from)
+                    val b = l.getBoundingBox(to - 1)
+                    val baseline = l.getLineBaseline(line)
+                    val left = minOf(a.left, b.left)
+                    val right = maxOf(a.right, b.right)
+                    drawRoundRect(
+                        codeBackground,
+                        topLeft = Offset(left, baseline - em * 1.0f),
+                        size = Size(right - left, em * 1.3f),
+                        cornerRadius = radius,
+                    )
+                }
+            }
+        },
+        style = style,
+        color = color,
+        textAlign = textAlign,
+        onTextLayout = { layout = it },
+    )
+}
+
 private fun inlineText(parent: Node, style: MdStyle): AnnotatedString = buildAnnotatedString { appendInlines(parent, style) }
 
 private fun AnnotatedString.Builder.appendInlines(parent: Node, style: MdStyle) {
@@ -557,8 +620,13 @@ private fun AnnotatedString.Builder.appendInline(node: Node, style: MdStyle) {
         is Emphasis -> withStyle(SpanStyle(fontStyle = FontStyle.Italic)) { appendInlines(node, style) }
         is StrongEmphasis -> withStyle(SpanStyle(fontWeight = FontWeight.Bold)) { appendInlines(node, style) }
         is Strikethrough -> withStyle(SpanStyle(textDecoration = TextDecoration.LineThrough)) { appendInlines(node, style) }
-        is Code -> withStyle(SpanStyle(fontFamily = FontFamily.Monospace, background = style.codeBackground, fontSize = 0.9.em)) {
-            append(node.literal.orEmpty())
+        is Code -> withAnnotation(CODE_TAG, "") {
+            // The thin spaces are the padding; MdText draws the rounded background behind the whole span.
+            withStyle(SpanStyle(fontSize = 0.9.em)) {
+                append(CODE_PAD)
+                withStyle(SpanStyle(fontFamily = FontFamily.Monospace)) { append(node.literal.orEmpty()) }
+                append(CODE_PAD)
+            }
         }
         is Link -> appendLink(node.destination, style) { appendInlines(node, style) }
         is MdImage -> appendLink(node.destination, style) {
