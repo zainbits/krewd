@@ -74,6 +74,7 @@ import io.github.zainbits.vitreous.GlassSurface
 import io.github.zainbits.cohesion.GlassStyle
 import io.github.zainbits.cohesion.glassPullExempt
 import io.github.zainbits.vitreous.LocalGlassPull
+import io.github.zainbits.cohesion.LocalGlassContrast
 
 /** Opens the system file picker (any type, several files); call the returned function to show it. */
 @Composable
@@ -397,7 +398,12 @@ fun FilePeekCard(file: Attachment, chip: Rect, backdrop: GlassBackdrop?, onClose
             }
         }
         if (backdrop != null) {
-            GlassSurface(backdrop = backdrop, modifier = place, shape = GlassShape.rounded(16.dp)) { body() }
+            // The Glass clarity setting plus 10 (at most 100), so the name reads over anything; the phone's
+            // contrast setting applies as for all glass.
+            val g = LocalKrewdGlass.current
+            val contrast = LocalGlassContrast.current
+            val style = remember(g.clarity, g.dark, contrast) { GlassStyle.forClarity((g.clarity + 0.10f).coerceAtMost(1f), g.dark, contrast) }
+            GlassSurface(backdrop = backdrop, modifier = place, shape = GlassShape.rounded(16.dp), style = style) { body() }
         } else {
             Surface(modifier = place, shape = RoundedCornerShape(16.dp), color = MaterialTheme.colorScheme.surfaceContainerHighest, shadowElevation = 3.dp) { body() }
         }

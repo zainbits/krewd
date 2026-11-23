@@ -244,8 +244,13 @@ fun ChatScreen(state: UiState, viewModel: KrewdViewModel) {
             addNote(if (block != null) "$itemKey#$block" else itemKey, quote)
         },
     )
-    // Liquid glass (Vitreous): the chat list is what the title bar and composer show through.
+    // Liquid glass (Vitreous), in three layers, so higher glass shows the glass under it: the chat
+    // ([backdrop]: what the title bar and go-to-latest show), the floating layer over it ([floatBackdrop]: the chat
+    // plus the title bar with its open panel, the linked chats and go-to-latest; what the composer shows), and the
+    // composer's layer ([composerBackdrop]: all of that plus the composer; what the cards over it show).
     val backdrop = rememberGlassBackdrop()
+    val floatBackdrop = rememberGlassBackdrop()
+    val composerBackdrop = rememberGlassBackdrop()
     val glassOn = LocalKrewdGlass.current.on
     Box(Modifier.fillMaxSize().onSizeChanged { screenHeight = with(density) { it.height.toDp() } }.background(MaterialTheme.colorScheme.surface)) {
         // Rows that open and close keep their top edge in place (KeepInPlace.kt).
@@ -305,55 +310,59 @@ fun ChatScreen(state: UiState, viewModel: KrewdViewModel) {
             }
         }
 
-        // Scrolled up from the bottom: one tap goes back down and follows the reply again.
-        androidx.compose.animation.AnimatedVisibility(
-            visible = !follow && rowCount > 0,
-            enter = androidx.compose.animation.fadeIn() + androidx.compose.animation.scaleIn(initialScale = 0.8f),
-            exit = androidx.compose.animation.fadeOut() + androidx.compose.animation.scaleOut(targetScale = 0.8f),
-            modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = bottomStack + 12.dp),
-        ) {
-            // A round glass button over the chat (plain while the glass is off).
-            CompositionLocalProvider(LocalKrewdBackdrop provides if (glassOn) backdrop else null) {
-                KrewdIconPill(
-                    onClick = { follow = true; scope.launch { listState.scrollToItem(0) } },
-                    icon = R.drawable.ic_arrow_down_24,
-                    contentDescription = "Go to latest",
-                    size = 44.dp,
+        signIns.firstOrNull { it.id == filling }?.let { ask -> SecretSheet(ask = ask, viewModel = viewModel, onDismiss = { filling = null }) }
+        // The floating layer: recorded over the chat, so the composer's glass shows it (the title's open panel
+        // sliding under the composer stays visible through it). It catches no touches of its own.
+        Box(Modifier.fillMaxSize().then(if (glassOn) Modifier.glassSource(floatBackdrop, under = backdrop) else Modifier)) {
+            // Scrolled up from the bottom: one tap goes back down and follows the reply again.
+            androidx.compose.animation.AnimatedVisibility(
+                visible = !follow && rowCount > 0,
+                enter = androidx.compose.animation.fadeIn() + androidx.compose.animation.scaleIn(initialScale = 0.8f),
+                exit = androidx.compose.animation.fadeOut() + androidx.compose.animation.scaleOut(targetScale = 0.8f),
+                modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = bottomStack + 12.dp),
+            ) {
+                // A round glass button over the chat (plain while the glass is off).
+                CompositionLocalProvider(LocalKrewdBackdrop provides if (glassOn) backdrop else null) {
+                    KrewdIconPill(
+                        onClick = { follow = true; scope.launch { listState.scrollToItem(0) } },
+                        icon = R.drawable.ic_arrow_down_24,
+                        contentDescription = "Go to latest",
+                        size = 44.dp,
+                    )
+                }
+            }
+
+            if (titleOpen) {
+                // A tap anywhere on the chat folds the title's panel (and does nothing else).
+                Box(
+                    Modifier.fillMaxSize().clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) {
+                        titleOpen = false
+                    },
                 )
             }
-        }
-
-        signIns.firstOrNull { it.id == filling }?.let { ask -> SecretSheet(ask = ask, viewModel = viewModel, onDismiss = { filling = null }) }
-        if (titleOpen) {
-            // A tap anywhere on the chat folds the title's panel (and does nothing else).
-            Box(
-                Modifier.fillMaxSize().clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) {
-                    titleOpen = false
-                },
-            )
-        }
-        Column(Modifier.align(Alignment.TopCenter).fillMaxWidth()) {
-            val navBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
-            val resting = restingStack ?: (navBottom + ShellDimensions.COMPOSER_MARGIN * 2 + 96.dp)
-            // Go-to-latest sits 12 dp above the composer and is 44 dp tall; the panel stops 12 dp above it.
-            val panelMax = (screenHeight - bars.calculateTopPadding() - ShellDimensions.TITLE_PILL_TOP_GAP - resting - 12.dp - 44.dp - 12.dp)
-                .coerceAtLeast(ShellDimensions.TITLE_PILL_HEIGHT * 3)
-            ChatTopBar(
-                state, viewModel, backdrop,
-                expanded = titleOpen,
-                maxHeight = panelMax,
-                onToggle = { titleOpen = !titleOpen },
-                onClose = { titleOpen = false },
-                onSideSession = { titleOpen = false; sideOpen = true },
-            )
-            if (session != null) {
-                LinkedChatsStrip(
-                    state, session, onOpen = viewModel::openSession,
-                    modifier = Modifier
-                        .onSizeChanged { stripHeight = with(density) { it.height.toDp() } }
-                        .padding(horizontal = ShellDimensions.TITLE_PILL_START_MARGIN)
-                        .padding(top = 6.dp),
+            Column(Modifier.align(Alignment.TopCenter).fillMaxWidth()) {
+                val navBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+                val resting = restingStack ?: (navBottom + ShellDimensions.COMPOSER_MARGIN * 2 + 96.dp)
+                // Go-to-latest sits 12 dp above the composer and is 44 dp tall; the panel stops 12 dp above it.
+                val panelMax = (screenHeight - bars.calculateTopPadding() - ShellDimensions.TITLE_PILL_TOP_GAP - resting - 12.dp - 44.dp - 12.dp)
+                    .coerceAtLeast(ShellDimensions.TITLE_PILL_HEIGHT * 3)
+                ChatTopBar(
+                    state, viewModel, backdrop,
+                    expanded = titleOpen,
+                    maxHeight = panelMax,
+                    onToggle = { titleOpen = !titleOpen },
+                    onClose = { titleOpen = false },
+                    onSideSession = { titleOpen = false; sideOpen = true },
                 )
+                if (session != null) {
+                    LinkedChatsStrip(
+                        state, session, onOpen = viewModel::openSession,
+                        modifier = Modifier
+                            .onSizeChanged { stripHeight = with(density) { it.height.toDp() } }
+                            .padding(horizontal = ShellDimensions.TITLE_PILL_START_MARGIN)
+                            .padding(top = 6.dp),
+                    )
+                }
             }
         }
         if (sideOpen && session != null) {
@@ -369,76 +378,79 @@ fun ChatScreen(state: UiState, viewModel: KrewdViewModel) {
             }
         }
 
-        Column(
-            Modifier
-                .align(Alignment.BottomCenter)
-                .onSizeChanged {
-                    val h = with(density) { it.height.toDp() }
-                    bottomStack = h
-                    if (!imeOpen && session != null && h > ShellDimensions.COMPOSER_MIN_HEIGHT) restingStack = minOf(restingStack ?: h, h)
-                }
-                .windowInsetsPadding(WindowInsets.ime.union(WindowInsets.navigationBars))
-                .padding(ShellDimensions.COMPOSER_MARGIN),
-        ) {
-            if (session != null) {
-                val files = state.draft(session.id)
-                val tabs = state.draftTabs[session.id].orEmpty()
-                val chats = state.chatsOf(session.id)
-                DraftChatChips(chats, onRemove = { viewModel.removeDraftChat(session.id, it) }, Modifier.padding(start = 4.dp, bottom = 4.dp))
-                if (tabs.isNotEmpty()) {
-                    Row(Modifier.padding(start = 4.dp, bottom = 4.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        tabs.forEach { tab ->
-                            InputChip(
-                                selected = false,
-                                onClick = { viewModel.removeDraftTab(session.id, tab.id) },
-                                label = { Text(tab.title.ifBlank { tab.host }, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 180.dp)) },
-                                leadingIcon = { Icon(painterResource(R.drawable.ic_web_24), contentDescription = null, modifier = Modifier.size(16.dp)) },
-                                trailingIcon = { Icon(painterResource(R.drawable.ic_close_24), contentDescription = "Remove", modifier = Modifier.size(16.dp)) },
-                                colors = androidx.compose.material3.InputChipDefaults.inputChipColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh),
-                            )
+        // The composer's layer: the floating layer plus the composer, what the cards over it show.
+        Box(Modifier.fillMaxSize().then(if (glassOn) Modifier.glassSource(composerBackdrop, under = floatBackdrop) else Modifier)) {
+            Column(
+                Modifier
+                    .align(Alignment.BottomCenter)
+                    .onSizeChanged {
+                        val h = with(density) { it.height.toDp() }
+                        bottomStack = h
+                        if (!imeOpen && session != null && h > ShellDimensions.COMPOSER_MIN_HEIGHT) restingStack = minOf(restingStack ?: h, h)
+                    }
+                    .windowInsetsPadding(WindowInsets.ime.union(WindowInsets.navigationBars))
+                    .padding(ShellDimensions.COMPOSER_MARGIN),
+            ) {
+                if (session != null) {
+                    val files = state.draft(session.id)
+                    val tabs = state.draftTabs[session.id].orEmpty()
+                    val chats = state.chatsOf(session.id)
+                    DraftChatChips(chats, onRemove = { viewModel.removeDraftChat(session.id, it) }, Modifier.padding(start = 4.dp, bottom = 4.dp))
+                    if (tabs.isNotEmpty()) {
+                        Row(Modifier.padding(start = 4.dp, bottom = 4.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            tabs.forEach { tab ->
+                                InputChip(
+                                    selected = false,
+                                    onClick = { viewModel.removeDraftTab(session.id, tab.id) },
+                                    label = { Text(tab.title.ifBlank { tab.host }, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 180.dp)) },
+                                    leadingIcon = { Icon(painterResource(R.drawable.ic_web_24), contentDescription = null, modifier = Modifier.size(16.dp)) },
+                                    trailingIcon = { Icon(painterResource(R.drawable.ic_close_24), contentDescription = "Remove", modifier = Modifier.size(16.dp)) },
+                                    colors = androidx.compose.material3.InputChipDefaults.inputChipColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh),
+                                )
+                            }
                         }
                     }
+                    NoteTray(
+                        notes = notes,
+                        focus = focusNote,
+                        onFocused = { focusNote = null },
+                        onJump = jump,
+                        onText = { i, text -> viewModel.setNoteText(session.id, i, text) },
+                        onRemove = { viewModel.removeNote(session.id, it) },
+                        onClear = { viewModel.setDraftNotes(session.id, emptyList()) },
+                        modifier = Modifier.padding(bottom = 6.dp),
+                    )
+                    val pick = rememberFilePicker { viewModel.attach(session.id, it) }
+                    val live = state.live[session.id]
+                    Composer(
+                        backdrop = floatBackdrop,
+                        sessionId = session.id,
+                        initialText = remember(session.id) { viewModel.messageDraft(session.id) },
+                        onDraft = { viewModel.setMessageDraft(session.id, it) },
+                        busy = busy,
+                        steps = if (busy) live?.steps else null,
+                        onSteps = { scope.launch { listState.animateScrollToItem(0) } },
+                        contextUsed = session.contextUsed,
+                        contextSize = session.contextSize,
+                        onContext = { contextOpen = !contextOpen },
+                        steering = steering,
+                        delivery = delivery,
+                        onDeliveryMenu = { deliveryOpen = !deliveryOpen },
+                        commands = commands,
+                        files = files,
+                        hasTabs = tabs.isNotEmpty() || chats.isNotEmpty() || notes.isNotEmpty(),
+                        mentions = { typed ->
+                            if (typed.isNotEmpty()) viewModel.loadArchived()
+                            mentionCandidates(state, session.id, typed, chats.mapTo(HashSet()) { it.id })
+                        },
+                        engines = state.engines,
+                        onMention = { viewModel.addDraftChat(session.id, it) },
+                        onSend = viewModel::send,
+                        onStop = viewModel::stop,
+                        onAttach = pick,
+                        onRemoveFile = { viewModel.removeAttachment(session.id, it) },
+                    )
                 }
-                NoteTray(
-                    notes = notes,
-                    focus = focusNote,
-                    onFocused = { focusNote = null },
-                    onJump = jump,
-                    onText = { i, text -> viewModel.setNoteText(session.id, i, text) },
-                    onRemove = { viewModel.removeNote(session.id, it) },
-                    onClear = { viewModel.setDraftNotes(session.id, emptyList()) },
-                    modifier = Modifier.padding(bottom = 6.dp),
-                )
-                val pick = rememberFilePicker { viewModel.attach(session.id, it) }
-                val live = state.live[session.id]
-                Composer(
-                    backdrop = backdrop,
-                    sessionId = session.id,
-                    initialText = remember(session.id) { viewModel.messageDraft(session.id) },
-                    onDraft = { viewModel.setMessageDraft(session.id, it) },
-                    busy = busy,
-                    steps = if (busy) live?.steps else null,
-                    onSteps = { scope.launch { listState.animateScrollToItem(0) } },
-                    contextUsed = session.contextUsed,
-                    contextSize = session.contextSize,
-                    onContext = { contextOpen = !contextOpen },
-                    steering = steering,
-                    delivery = delivery,
-                    onDeliveryMenu = { deliveryOpen = !deliveryOpen },
-                    commands = commands,
-                    files = files,
-                    hasTabs = tabs.isNotEmpty() || chats.isNotEmpty() || notes.isNotEmpty(),
-                    mentions = { typed ->
-                        if (typed.isNotEmpty()) viewModel.loadArchived()
-                        mentionCandidates(state, session.id, typed, chats.mapTo(HashSet()) { it.id })
-                    },
-                    engines = state.engines,
-                    onMention = { viewModel.addDraftChat(session.id, it) },
-                    onSend = viewModel::send,
-                    onStop = viewModel::stop,
-                    onAttach = pick,
-                    onRemoveFile = { viewModel.removeAttachment(session.id, it) },
-                )
             }
         }
         val used = session?.contextUsed
@@ -451,7 +463,7 @@ fun ChatScreen(state: UiState, viewModel: KrewdViewModel) {
                 },
             )
             ContextCard(
-                backdrop = backdrop,
+                backdrop = composerBackdrop,
                 used = used,
                 size = window,
                 onCompact = if (state.connection is Connection.Online) ({ viewModel.compact(session.id) }) else null,
@@ -470,7 +482,7 @@ fun ChatScreen(state: UiState, viewModel: KrewdViewModel) {
                 },
             )
             DeliveryCard(
-                backdrop = backdrop,
+                backdrop = composerBackdrop,
                 selected = delivery,
                 steering = steering,
                 onPick = { delivery = it; deliveryOpen = false },
@@ -480,7 +492,7 @@ fun ChatScreen(state: UiState, viewModel: KrewdViewModel) {
             )
         }
         peek?.let { (file, chip) ->
-            FilePeekCard(file, chip, backdrop = if (glassOn) backdrop else null, onClose = { peek = null })
+            FilePeekCard(file, chip, backdrop = if (glassOn) composerBackdrop else null, onClose = { peek = null })
         }
     }
 }
