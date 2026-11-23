@@ -28,6 +28,8 @@ data class PendingFile(
     val error: String? = null,
     val uri: String? = null,
     val mime: String? = null,
+    /** This app's own copy of the file (see [app.krewd.data.OutboxStore]): uploads and retries read it, not [uri]. */
+    val path: String? = null,
 ) {
     val uploading: Boolean get() = uploadId == null && error == null
     val isImage: Boolean get() = uri != null && isImageFile(mime, name)

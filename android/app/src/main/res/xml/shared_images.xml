@@ -1,4 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <paths>
     <cache-path name="shared-images" path="shared-images/" />
+    <!-- The app's copies of files picked for unsent messages (OutboxStore), for their previews. -->
+    <files-path name="outgoing" path="outgoing/" />
 </paths>

@@ -41,14 +41,28 @@ object Tls {
         SSLContext.getInstance("TLS").apply { init(null, arrayOf(PinnedTrust(pin)), null) }.socketFactory
     }
 
+    /**
+     * One verifier per pin, like the socket factory: Android's connection pool only reuses a connection for the
+     * same factory and verifier objects, so a new one per request would make every request a new TLS handshake.
+     */
+    private val verifiers = ConcurrentHashMap<String, HostnameVerifier>()
+
+    private fun verifier(pin: String): HostnameVerifier = verifiers.getOrPut(pin) {
+        HostnameVerifier { host, session ->
+            val pinned = runCatching { pinOf(session.peerCertificates[0]) == pin }.getOrDefault(false)
+            pinned || HttpsURLConnection.getDefaultHostnameVerifier().verify(host, session)
+        }
+    }
+
+    /**
+     * A request to the server. Connections are kept alive and reused: close the response stream when done and
+     * call `disconnect()` only to drop a broken connection or to abort a request.
+     */
     fun open(url: String, pin: String): HttpURLConnection {
         val conn = URL(url).openConnection() as HttpURLConnection
         if (conn is HttpsURLConnection && pin.isNotBlank()) {
             conn.sslSocketFactory = factory(pin)
-            conn.hostnameVerifier = HostnameVerifier { host, session ->
-                val pinned = runCatching { pinOf(session.peerCertificates[0]) == pin }.getOrDefault(false)
-                pinned || HttpsURLConnection.getDefaultHostnameVerifier().verify(host, session)
-            }
+            conn.hostnameVerifier = verifier(pin)
         }
         return conn
     }

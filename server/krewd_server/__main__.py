@@ -68,6 +68,11 @@ async def connect_with_retry(url: str):
             delay = min(delay * 2, 15)
 
 
+# How long an idle connection stays open for the app to reuse (uvicorn's default is 5 s): the phone reuses one
+# connection for its requests instead of a new TLS handshake each time.
+KEEP_ALIVE_SECONDS = 75
+
+
 class _Server(uvicorn.Server):
     """A uvicorn server that leaves signals to `serve`, which runs two of them side by side."""
 
@@ -130,11 +135,13 @@ async def serve() -> None:
     https = [sock for address, sock in sockets if address in secure]
     # The plain server owns the app's lifespan (hub, browser watcher); the HTTPS one only serves requests.
     if plain:
-        servers.append((_Server(uvicorn.Config(peer_marked(app), log_level="info", proxy_headers=False)), plain))
+        servers.append((_Server(uvicorn.Config(
+            peer_marked(app), log_level="info", proxy_headers=False, timeout_keep_alive=KEEP_ALIVE_SECONDS,
+        )), plain))
     if https:
         config = uvicorn.Config(
             tls_marked(app), log_level="info", proxy_headers=False, lifespan="on" if not plain else "off",
-            ssl_certfile=str(settings.tls_cert), ssl_keyfile=str(settings.tls_key),
+            ssl_certfile=str(settings.tls_cert), ssl_keyfile=str(settings.tls_key), timeout_keep_alive=KEEP_ALIVE_SECONDS,
         )
         servers.append((_Server(config), https))
     for address, _ in sockets:

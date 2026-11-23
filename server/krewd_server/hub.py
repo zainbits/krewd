@@ -943,6 +943,19 @@ class Hub:
             if rt and proc and proc.alive and rt.agent_session and rt.generation == proc.generation:
                 for config_id, value in changes["config"].items():
                     await self._apply_config(rt, proc, config_id, value)
+            else:
+                # No live agent session (idle since a restart, or its agent not started): the pick is sent when the
+                # session reopens for its next step. Show it now; otherwise the app keeps the old value and a model
+                # pick looks ignored however often it is tapped.
+                row = await self.pool.fetchrow(
+                    "select config_options, config_wanted, mode from sessions where id = $1", session_id
+                )
+                if row["config_options"]:
+                    options = rebase_config(row["config_options"], row["config_wanted"] or {}, row["mode"])[0]
+                    if options != row["config_options"]:
+                        await self.pool.execute(
+                            "update sessions set config_options = $2 where id = $1", session_id, options
+                        )
         if changes.get("auto_approve"):
             # Answer what is already waiting, the same way new requests will be answered.
             for approval_id, (sid, _) in list(self.waiters.items()):

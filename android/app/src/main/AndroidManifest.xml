@@ -2,6 +2,8 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Notices a switch between Wi-Fi, mobile data and VPN, to reconnect at once instead of waiting for a timeout. -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <!-- Lets Krewd hand an APK the agent built to the package installer. -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <!-- Read once, when the owner taps "Use this phone's location" for the agents' browser; never in the background. -->

@@ -22,7 +22,27 @@ object ShellDimensions {
 
 object Timing {
     const val LONG_POLL_SECONDS = 25
+    /** How much later than the server's wait a long poll may answer before its connection counts as dead. */
+    const val READ_MARGIN_MS = 6_000
     const val CONNECT_TIMEOUT_MS = 4_000
-    const val READ_MARGIN_MS = 10_000
-    val RETRY_DELAYS_MS = longArrayOf(1_000, 2_000, 5_000, 10_000, 20_000)
+    /** A home address answers within this or is not on this network. */
+    const val HOME_PROBE_MS = 2_000
+    /** When another route answers first, a home address still wins if it answers within this. */
+    const val HOME_GRACE_MS = 400L
+    /** The whole race of the addresses, name lookups included. */
+    const val RACE_LIMIT_MS = 8_000L
+    /** While on another route in the foreground, how often the home address is tried again. */
+    const val HOME_CHECK_MS = 30_000L
+    /** A drop this short shows as Connecting, not Offline. */
+    const val QUIET_RECONNECT_MS = 8_000L
+    /** Waits between reconnects (plus up to 25% jitter); the first retry is at once. */
+    val RETRY_DELAYS_MS = longArrayOf(0, 1_000, 2_000, 5_000, 10_000, 20_000)
+    /** Waits between tries of one message or file upload (plus jitter). */
+    val SEND_RETRY_MS = longArrayOf(1_000, 2_000, 5_000, 10_000, 30_000)
+
+    /** The [attempt]th wait of [delays] (the last one repeats), with up to 25% random jitter added. */
+    fun backoff(delays: LongArray, attempt: Int): Long {
+        val base = delays[minOf(attempt, delays.lastIndex)]
+        return base + (base * kotlin.random.Random.nextDouble(0.0, 0.25)).toLong()
+    }
 }

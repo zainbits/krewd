@@ -34,6 +34,9 @@ import app.krewd.data.objects
 import app.krewd.data.optStringOrNull
 import app.krewd.data.ChatRef
 import app.krewd.data.Discovery
+import app.krewd.data.NetworkWatch
+import app.krewd.data.OutboxStore
+import app.krewd.data.OutgoingMessage
 import app.krewd.data.Proposal
 import app.krewd.data.ReplyNote
 import app.krewd.data.EngineDefaults
@@ -70,9 +73,13 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.flow.updateAndGet
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
 
 sealed interface Connection {
@@ -82,20 +89,6 @@ sealed interface Connection {
     data class Online(val route: String, val version: String, val secure: Boolean = false) : Connection
     data class Offline(val reason: String) : Connection
 }
-
-/** A message on its way to the server: shown in the chat as "Sending" until stored, or "Not sent" after a failure. */
-data class OutgoingMessage(
-    val clientId: String,
-    val sessionId: String,
-    val text: String,
-    val uploads: List<String>,
-    val files: List<PendingFile>,
-    val tabs: List<BrowserTab>,
-    val delivery: String?,
-    val failed: Boolean = false,
-    val chats: List<ChatRef> = emptyList(),
-    val notes: List<ReplyNote> = emptyList(),
-)
 
 object NavTab {
     const val TASKS = 0
@@ -256,7 +249,11 @@ class KrewdViewModel(private val app: Application) {
     )
     val state: StateFlow<UiState> = _state.asStateFlow()
 
-    @Volatile private var api: KrewdApi? = null
+    /** The connection in use, null while offline; [apiFlow] lets workers wait for one. */
+    private val apiFlow = MutableStateFlow<KrewdApi?>(null)
+    private var api: KrewdApi?
+        get() = apiFlow.value
+        set(value) { apiFlow.value = value }
     @Volatile private var creds: Credentials = Credentials.of(prefs.load())
 
     /** The activity in front, for the fingerprint prompt and the security key's NFC tap. */
@@ -278,6 +275,8 @@ class KrewdViewModel(private val app: Application) {
             field = value
             if (value) notifier.appVisible()
             if (value != was) streamVisibility(value)
+            // Back in front: the long poll may have died while the app was away, so check it now.
+            if (value && !was) kick(Kick.Resume)
         }
 
     /**
@@ -353,16 +352,94 @@ class KrewdViewModel(private val app: Application) {
      * The first address that answers; when none does, the local network is searched for the server (a router
      * change may have moved it) and a found address is saved first in the list.
      */
-    private fun reach(settings: ConnectionSettings): KrewdApi = try {
-        KrewdApi.resolve(settings, creds)
+    private suspend fun reach(settings: ConnectionSettings): KrewdApi = try {
+        KrewdApi.race(settings, creds)
+    } catch (e: CancellationException) {
+        throw e
     } catch (e: Exception) {
-        if (settings.pin.isBlank()) throw e
+        // The search only helps on a local network, and takes seconds: at most once a minute.
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (settings.pin.isBlank() || !network.onLocalNetwork || now - lastDiscovery < DISCOVERY_EVERY_MS) throw e
+        lastDiscovery = now
         val found = Discovery.find(app, settings.pin).filterNot { it in settings.addresses }
         if (found.isEmpty()) throw e
-        val client = runCatching { KrewdApi.resolve(settings, creds, found) }.getOrNull()?.takeIf { it.verified == Verified.Pin } ?: throw e
+        val client = try {
+            KrewdApi.race(settings, creds, found).takeIf { it.verified == Verified.Pin }
+        } catch (other: CancellationException) {
+            throw other
+        } catch (_: Exception) {
+            null
+        } ?: throw e
         prefs.save(settings.copy(addresses = listOf(client.baseUrl) + settings.addresses))
         _state.update { it.copy(settings = prefs.load()) }
         client
+    }
+
+    private var lastDiscovery = 0L
+
+    /** Why the long poll was ended on purpose: [Resume] polls again on the same route, the others reconnect. */
+    private enum class Kick { Resume, Network, Home }
+
+    /** Ends a connection attempt quietly, to connect again at once (a network change, a home route found). */
+    private class Reconnect : Exception()
+
+    private val kickReason = java.util.concurrent.atomic.AtomicReference<Kick?>(null)
+    /** Ends the wait between reconnects early. */
+    private val wake = Channel<Unit>(Channel.CONFLATED)
+    /** Asks the home-route check to try now. */
+    private val homeWake = Channel<Unit>(Channel.CONFLATED)
+    /** A home route that answered while the app was on another one: the next connection uses it. */
+    @Volatile private var homeApi: KrewdApi? = null
+
+    /**
+     * Checks the connection now instead of waiting for a dead one to time out: ends the long poll (or the wait
+     * before the next try). A stronger reason wins when several come at once.
+     */
+    private fun kick(reason: Kick) {
+        kickReason.getAndUpdate { old -> if (old == null || reason.ordinal > old.ordinal) reason else old }
+        wake.trySend(Unit)
+        if (reason == Kick.Resume) homeWake.trySend(Unit)
+        // Closing a TLS socket may write to the network: never on the main thread.
+        api?.let { client -> scope.launch(Dispatchers.IO) { client.abortPoll() } }
+    }
+
+    private var networkKick: Job? = null
+    private val network = NetworkWatch(app) {
+        // A switch often comes as "lost" then "available": one check for both.
+        scope.launch {
+            networkKick?.cancel()
+            networkKick = launch {
+                delay(NETWORK_SETTLE_MS)
+                kick(Kick.Network)
+            }
+        }
+    }
+
+    /**
+     * While connected over another route (Tailscale, a domain), tries the home addresses every
+     * [Timing.HOME_CHECK_MS] while the app is in front, and when one answers, switches to it.
+     */
+    private fun watchHome(client: KrewdApi): Job? {
+        val settings = prefs.load()
+        val home = settings.addresses.filter(ConnectionSettings::isLocal)
+        if (ConnectionSettings.isLocal(client.baseUrl) || home.isEmpty()) return null
+        return scope.launch(Dispatchers.IO) {
+            while (api === client) {
+                withTimeoutOrNull(Timing.HOME_CHECK_MS) { homeWake.receive() }
+                if (!inForeground || !network.onLocalNetwork || api !== client) continue
+                val found = try {
+                    KrewdApi.race(settings, creds, home).takeIf { it.verified == Verified.Pin }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (_: Exception) {
+                    null
+                } ?: continue
+                if (api !== client) return@launch
+                homeApi = found
+                kick(Kick.Home)
+                return@launch
+            }
+        }
     }
 
     /**
@@ -383,12 +460,14 @@ class KrewdViewModel(private val app: Application) {
 
     private suspend fun runLoop(settings: ConnectionSettings) {
         var attempt = 0
+        var downSince = 0L // when the connection was lost (0: it is not)
         _state.update { it.copy(connection = Connection.Connecting) }
         while (true) {
             try {
+                kickReason.set(null)
                 // Settings learned while connecting (a pin, a found address) count; a new token restarts the loop.
-                val client = reach(prefs.load().takeIf { it.token == settings.token } ?: settings)
-                val version = client.health().optString("version")
+                val client = homeApi?.also { homeApi = null } ?: reach(prefs.load().takeIf { it.token == settings.token } ?: settings)
+                val version = (client.health ?: client.health()).optString("version")
                 learnPin(client)
                 val server = client.state()
                 api = client
@@ -420,28 +499,63 @@ class KrewdViewModel(private val app: Application) {
                 syncLive(sessions)
                 _state.value.openSessionId?.let { loadTimeline(client, it) }
                 _state.value.openRoutineId?.let { loadRoutine(client, it) }
-                retryOutbox()
+                wakeOutbox()
                 attempt = 0
-                var after = server.lastSeq
-                while (true) {
-                    val (events, last) = client.events(after)
-                    // The blocking poll cannot be interrupted, so a replaced loop stops here.
-                    currentCoroutineContext().ensureActive()
-                    events.forEach(::handle)
-                    after = last
+                downSince = 0L
+                val home = watchHome(client)
+                try {
+                    var after = server.lastSeq
+                    while (true) {
+                        // A kick that came between two polls: reconnect, or (Resume) this new poll is the check.
+                        when (kickReason.get()) {
+                            Kick.Network, Kick.Home -> {
+                                kickReason.set(null)
+                                throw Reconnect()
+                            }
+                            Kick.Resume -> kickReason.compareAndSet(Kick.Resume, null)
+                            null -> {}
+                        }
+                        val (events, last) = try {
+                            client.events(after)
+                        } catch (e: Exception) {
+                            // A replaced loop stops here.
+                            currentCoroutineContext().ensureActive()
+                            when (kickReason.getAndSet(null)) {
+                                Kick.Resume -> continue // poll again on this route: if it is dead, that one fails
+                                Kick.Network, Kick.Home -> throw Reconnect()
+                                null -> throw e
+                            }
+                        }
+                        currentCoroutineContext().ensureActive()
+                        events.forEach(::handle)
+                        after = last
+                    }
+                } finally {
+                    home?.cancel()
                 }
             } catch (e: CancellationException) {
                 throw e
+            } catch (e: Reconnect) {
+                // On purpose: connect again straight away. The old route stays in use (and shown) until the new
+                // one answers; if none does, the failure below says so.
+                attempt = 0
             } catch (e: Exception) {
                 api = null
                 val reason = when {
                     e is ApiException && e.code == 401 -> "The server did not accept this phone's token. $RECONNECT_HINT"
-                    e is javax.net.ssl.SSLException || e.cause is java.security.cert.CertificateException ->
+                    // Only a certificate check that failed: other TLS errors are a connection that broke.
+                    e is javax.net.ssl.SSLPeerUnverifiedException || e.cause is java.security.cert.CertificateException ->
                         "The server's certificate is not the one this app trusts. $RECONNECT_HINT"
                     else -> e.message ?: e.javaClass.simpleName
                 }
                 if (_state.value.restarting) sawDown = true
-                _state.update { it.copy(connection = Connection.Offline(reason)) }
+                val now = android.os.SystemClock.elapsedRealtime()
+                if (downSince == 0L) downSince = now
+                // A short drop (a network switch, the app waking up) shows as Connecting while it retries quickly.
+                val refused = (e is ApiException && e.code == 401) || e is javax.net.ssl.SSLPeerUnverifiedException ||
+                    e.cause is java.security.cert.CertificateException
+                val quiet = !refused && now - downSince < Timing.QUIET_RECONNECT_MS
+                _state.update { it.copy(connection = if (quiet) Connection.Connecting else Connection.Offline(reason)) }
                 if (e is ApiException && e.code == 401) {
                     if (!creds.paired) return
                     creds.session = null
@@ -451,8 +565,9 @@ class KrewdViewModel(private val app: Application) {
                     }
                 }
                 // While the server restarts, try every second so the app is back as soon as it is.
-                val wait = if (_state.value.restarting) 1_000L else Timing.RETRY_DELAYS_MS[minOf(attempt, Timing.RETRY_DELAYS_MS.lastIndex)]
-                delay(wait)
+                val wait = if (_state.value.restarting) 1_000L else Timing.backoff(Timing.RETRY_DELAYS_MS, attempt)
+                // A network change or the app coming back ends the wait early.
+                withTimeoutOrNull(wait) { wake.receive() }
                 attempt++
             }
         }
@@ -996,8 +1111,10 @@ class KrewdViewModel(private val app: Application) {
 
     /**
      * Sends a message to the open task. [delivery]: steer, queue or interrupt while a turn runs, or null
-     * for the server's default. The message shows at once; if it does not reach the server it is marked
-     * "Not sent" and [resend] tries again with the same id, so it is never stored twice.
+     * for the server's default. The message shows at once and is kept on the phone until the server has it:
+     * one worker ([runOutbox]) sends it in order once its files are uploaded and the app is connected, and
+     * retries with the same client id, so it is never stored twice. Only a refusal by the server marks it
+     * "Not sent" for [resend].
      */
     fun send(text: String, delivery: String?) {
         val id = _state.value.openSessionId ?: return
@@ -1005,124 +1122,260 @@ class KrewdViewModel(private val app: Application) {
             clientId = UUID.randomUUID().toString(),
             sessionId = id,
             text = text,
-            uploads = readyUploads(id),
-            files = _state.value.draft(id).filter { it.uploadId != null },
+            files = _state.value.draft(id),
             tabs = _state.value.draftTabs[id].orEmpty(),
             delivery = delivery,
             chats = _state.value.chatsOf(id),
             notes = _state.value.notesOf(id),
         )
-        clearDraft(id)
+        // Into the outbox first, then out of the draft: the files and text are never only in memory.
+        updateOutbox { it + message }
+        clearDraft(id, deleteCopies = false)
         prefs.setTextDraft(id, "")
         setDraftChats(id, emptyList())
         setDraftNotes(id, emptyList())
-        _state.update { it.copy(outbox = it.outbox + message, draftTabs = it.draftTabs - id) }
-        deliver(message)
+        _state.update { it.copy(draftTabs = it.draftTabs - id) }
+        wakeOutbox()
     }
 
     fun resend(clientId: String) {
         val message = _state.value.outbox.firstOrNull { it.clientId == clientId } ?: return
-        _state.update { s -> s.copy(outbox = s.outbox.map { if (it.clientId == clientId) it.copy(failed = false) else it }) }
-        deliver(message.copy(failed = false))
+        updateOutbox { list -> list.map { if (it.clientId == clientId) it.copy(failed = false) else it } }
+        // Files the server refused get another try too.
+        message.files.filter { it.error != null && it.path != null }.forEach { f ->
+            updateFile(f.localId) { it.copy(error = null) }
+            startUpload(f.localId)
+        }
+        wakeOutbox()
     }
 
-    private fun deliver(message: OutgoingMessage) {
-        val client = api
-        if (client == null) {
-            markFailed(message.clientId)
-            return
-        }
-        scope.launch(Dispatchers.IO) {
+    private val outbox = OutboxStore(app)
+    private val outboxWake = Channel<Unit>(Channel.CONFLATED)
+
+    private fun wakeOutbox() {
+        outboxWake.trySend(Unit)
+    }
+
+    /** Changes the outbox and saves what the server does not have yet, in one step. */
+    private fun updateOutbox(change: (List<OutgoingMessage>) -> List<OutgoingMessage>) = synchronized(outbox) {
+        val next = _state.updateAndGet { s -> s.copy(outbox = change(s.outbox)) }.outbox
+        outbox.saveMessages(next.filterNot { it.sent })
+    }
+
+    /**
+     * Sends the outbox in order, one message at a time: per chat the oldest unsent message goes first, once its
+     * files are uploaded. Lost requests (no network, no answer) are retried with backoff and the same client id;
+     * a refusal marks the message "Not sent". Runs as long as the app.
+     */
+    private fun runOutbox() = scope.launch(Dispatchers.IO) {
+        var attempt = 0
+        while (true) {
+            val heads = _state.value.outbox.filter { !it.sent && !it.failed }.distinctBy { it.sessionId }
+            heads.firstOrNull { m -> m.files.any { it.error != null } }?.let { m ->
+                val bad = m.files.first { it.error != null }
+                refused(m, "“${bad.name}” could not be uploaded: ${bad.error}")
+                continue
+            }
+            val message = heads.firstOrNull { it.ready }
+            val client = api
+            if (message == null || client == null) {
+                outboxWake.receive() // a new message, a finished upload, a resend or a connection
+                continue
+            }
             try {
-                client.send(message.sessionId, message.text, message.uploads, message.tabs, message.delivery, message.clientId, message.chats, message.notes)
+                client.send(
+                    message.sessionId, message.text, message.files.mapNotNull { it.uploadId }, message.tabs,
+                    message.delivery, message.clientId, message.chats, message.notes,
+                )
+                attempt = 0
+                updateOutbox { list -> list.map { if (it.clientId == message.clientId) it.copy(sent = true) else it } }
+                outbox.delete(message.files)
                 dropStored(message.clientId)
-            } catch (e: ApiException) {
-                // The server answered but refused: show why; resending would fail the same way.
-                markFailed(message.clientId)
-                _state.update { it.copy(message = e.message ?: "Not sent") }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
-                markFailed(message.clientId)
+                if (e is ApiException && e.refusal) {
+                    refused(message, e.message ?: "Not sent")
+                    continue
+                }
+                // Lost on the way, or its answer was: the next try is safe. Check the connection too.
+                if (attempt >= 1) kick(Kick.Resume)
+                withTimeoutOrNull(Timing.backoff(Timing.SEND_RETRY_MS, attempt++)) { outboxWake.receive() }
             }
         }
     }
 
-    private fun markFailed(clientId: String) =
-        _state.update { s -> s.copy(outbox = s.outbox.map { if (it.clientId == clientId) it.copy(failed = true) else it }) }
+    /** The server answered but refused: resending would fail the same way, so the owner decides. */
+    private fun refused(message: OutgoingMessage, reason: String) {
+        updateOutbox { list -> list.map { if (it.clientId == message.clientId) it.copy(failed = true) else it } }
+        _state.update { it.copy(message = reason) }
+    }
 
     /** Drops local rows the server has stored (its own row with the same client id is in the chat now). */
     private fun dropStored(clientId: String? = null) {
         val stored = synchronized(pendingLive) { timeline?.clientIds?.toSet() }.orEmpty()
-        _state.update { s ->
-            val keep = s.outbox.filterNot { it.clientId in stored }
-            if (keep.size == s.outbox.size && clientId == null) s else s.copy(outbox = keep)
-        }
+        if (_state.value.outbox.any { it.clientId in stored }) updateOutbox { list -> list.filterNot { it.clientId in stored } }
         if (clientId != null && clientId !in stored) {
             // Stored, but its event has not arrived yet (or this chat is closed): it is safe to drop once seen.
             scope.launch {
                 delay(4_000)
-                _state.update { s -> s.copy(outbox = s.outbox.filterNot { it.clientId == clientId && !it.failed }) }
+                updateOutbox { list -> list.filterNot { it.clientId == clientId && it.sent } }
             }
         }
     }
 
-    /** After a reconnect, messages that failed while offline go again (same client ids: no duplicates). */
-    private fun retryOutbox() = _state.value.outbox.filter { it.failed }.forEach { resend(it.clientId) }
-
     /** Rows for the open chat that are not stored on the server yet. */
-    fun localRows(sessionId: String): List<UserItem> = _state.value.outbox.filter { it.sessionId == sessionId }.map {
-        UserItem(
-            key = "local-${it.clientId}",
-            text = it.text,
-            tabs = it.tabs,
-            clientId = it.clientId,
-            delivery = it.delivery,
-            state = if (it.failed) "failed" else "sending",
-            chats = it.chats,
-            notes = it.notes,
-        )
+    fun localRows(sessionId: String): List<UserItem> {
+        val online = _state.value.connection is Connection.Online
+        return _state.value.outbox.filter { it.sessionId == sessionId }.map {
+            UserItem(
+                key = "local-${it.clientId}",
+                text = it.text,
+                tabs = it.tabs,
+                clientId = it.clientId,
+                delivery = it.delivery,
+                state = when {
+                    it.failed -> "failed"
+                    it.sent -> "sending"
+                    !it.ready -> "uploading"
+                    !online -> "waiting"
+                    else -> "sending"
+                },
+                chats = it.chats,
+                notes = it.notes,
+            )
+        }
     }
 
-    // attachments: each picked file uploads at once; the message carries the upload ids
+    // attachments: each picked file is copied into the app at once and uploads in the background (retrying
+    // while offline); the message carries the upload ids, and waits in the outbox for files still uploading
 
     private var nextLocalId = 1L
+    private val uploadJobs = java.util.concurrent.ConcurrentHashMap<Long, Job>()
 
     fun attach(draft: String, uris: List<android.net.Uri>) {
-        val client = api ?: run { _state.update { it.copy(message = "Not connected to Krewd") }; return }
         val resolver = app.contentResolver
         uris.forEach { uri ->
             val localId = synchronized(this) { nextLocalId++ }
             var name = "file"
             var size: Long? = null
-            resolver.query(uri, null, null, null, null)?.use { c ->
-                if (c.moveToFirst()) {
-                    c.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME).takeIf { it >= 0 }?.let { c.getString(it) }?.let { name = it }
-                    c.getColumnIndex(android.provider.OpenableColumns.SIZE).takeIf { it >= 0 && !c.isNull(it) }?.let { size = c.getLong(it) }
+            runCatching {
+                resolver.query(uri, null, null, null, null)?.use { c ->
+                    if (c.moveToFirst()) {
+                        c.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME).takeIf { it >= 0 }?.let { c.getString(it) }?.let { name = it }
+                        c.getColumnIndex(android.provider.OpenableColumns.SIZE).takeIf { it >= 0 && !c.isNull(it) }?.let { size = c.getLong(it) }
+                    }
                 }
             }
-            updateDraft(draft) { it + PendingFile(localId, name, size, uri = uri.toString(), mime = resolver.getType(uri)) }
+            val mime = resolver.getType(uri)
+            updateDraft(draft) { it + PendingFile(localId, name, size, uri = uri.toString(), mime = mime) }
             scope.launch(Dispatchers.IO) {
-                val result = runCatching {
-                    val input = resolver.openInputStream(uri) ?: error("Cannot read $name")
-                    client.upload(name, resolver.getType(uri), input)
-                }
-                updateDraft(draft) { list ->
-                    list.map { f ->
-                        if (f.localId != localId) f
-                        else result.fold({ id -> f.copy(uploadId = id) }, { e -> f.copy(error = e.message ?: "Upload failed") })
-                    }
+                try {
+                    val copy = outbox.copyIn(resolver, uri, localId, name)
+                    // From now on the app's own copy is used, also after the app is closed and opened again.
+                    updateFile(localId) { it.copy(path = copy.path, uri = outbox.uriOf(copy).toString(), size = it.size ?: copy.length()) }
+                    if (findFile(localId) == null) copy.delete() else startUpload(localId)
+                } catch (e: Exception) {
+                    updateFile(localId) { it.copy(error = "Cannot read $name") }
                 }
             }
         }
     }
 
-    fun removeAttachment(draft: String, localId: Long) = updateDraft(draft) { list -> list.filterNot { it.localId == localId } }
+    /** Uploads one file from the app's copy, waiting for a connection and retrying until the server has it or refuses it. */
+    private fun startUpload(localId: Long) {
+        uploadJobs.remove(localId)?.cancel()
+        uploadJobs[localId] = scope.launch(Dispatchers.IO) {
+            var attempt = 0
+            while (true) {
+                val file = findFile(localId) ?: return@launch // removed from its draft
+                if (file.uploadId != null || file.error != null) return@launch
+                val path = file.path ?: return@launch
+                val client = apiFlow.filterNotNull().first()
+                try {
+                    val id = client.upload(file.name, file.mime, java.io.File(path).inputStream())
+                    updateFile(localId) { it.copy(uploadId = id) }
+                    return@launch
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: java.io.FileNotFoundException) {
+                    updateFile(localId) { it.copy(error = "The file is gone; pick it again") }
+                    return@launch
+                } catch (e: Exception) {
+                    if (e is ApiException && e.refusal) {
+                        updateFile(localId) { it.copy(error = e.message ?: "Upload failed") }
+                        return@launch
+                    }
+                    delay(Timing.backoff(Timing.SEND_RETRY_MS, attempt++))
+                }
+            }
+        }
+    }
+
+    /** A picked file wherever it is now: in a draft, or in a message waiting in the outbox. */
+    private fun findFile(localId: Long): PendingFile? = _state.value.let { s ->
+        s.drafts.values.firstNotNullOfOrNull { list -> list.firstOrNull { it.localId == localId } }
+            ?: s.outbox.firstNotNullOfOrNull { m -> m.files.firstOrNull { it.localId == localId } }
+    }
+
+    /** Changes one picked file wherever it is, saves that, and lets the outbox see it (an upload may have finished). */
+    private fun updateFile(localId: Long, change: (PendingFile) -> PendingFile) {
+        synchronized(outbox) {
+            val next = _state.updateAndGet { s ->
+                s.copy(
+                    drafts = s.drafts.mapValues { (_, list) -> list.map { if (it.localId == localId) change(it) else it } },
+                    outbox = s.outbox.map { m ->
+                        if (m.files.none { it.localId == localId }) m
+                        else m.copy(files = m.files.map { if (it.localId == localId) change(it) else it })
+                    },
+                )
+            }
+            next.drafts.filterValues { list -> list.any { it.localId == localId } }.forEach { (key, list) -> outbox.saveDraft(key, list) }
+            if (next.outbox.any { m -> m.files.any { it.localId == localId } }) outbox.saveMessages(next.outbox.filterNot { it.sent })
+        }
+        wakeOutbox()
+    }
+
+    /** Messages and picked files from before the app was closed: shown again, and their uploads and sends go on. */
+    private fun restoreOutbox() {
+        val drafts = outbox.draftKeys().associateWith { outbox.draft(it) }.filterValues { it.isNotEmpty() }
+        val messages = outbox.messages()
+        val files = drafts.values.flatten() + messages.flatMap { it.files }
+        nextLocalId = (files.maxOfOrNull { it.localId } ?: 0L) + 1
+        // The app was closed while a file was being copied: there is nothing to upload.
+        val lost = files.filter { it.path == null && it.uploadId == null && it.error == null }.map { it.localId }.toSet()
+        fun fix(list: List<PendingFile>) = list.map { if (it.localId in lost) it.copy(error = "Not saved; pick it again") else it }
+        _state.update { s ->
+            s.copy(drafts = s.drafts + drafts.mapValues { fix(it.value) }, outbox = messages.map { it.copy(files = fix(it.files)) } + s.outbox)
+        }
+        outbox.clean(files.mapNotNull { it.path }.toSet())
+        files.filter { it.uploading && it.localId !in lost }.forEach { startUpload(it.localId) }
+        if (messages.isNotEmpty()) wakeOutbox()
+    }
+
+    fun removeAttachment(draft: String, localId: Long) {
+        uploadJobs.remove(localId)?.cancel()
+        val file = _state.value.draft(draft).firstOrNull { it.localId == localId }
+        updateDraft(draft) { list -> list.filterNot { it.localId == localId } }
+        file?.let { outbox.delete(listOf(it)) }
+    }
 
     private fun readyUploads(draft: String) = _state.value.draft(draft).mapNotNull { it.uploadId }
 
-    private fun clearDraft(draft: String) = updateDraft(draft) { emptyList() }
+    /** Empties a draft's files; [deleteCopies] unless they moved on with a message. */
+    private fun clearDraft(draft: String, deleteCopies: Boolean = true) {
+        val files = _state.value.draft(draft)
+        updateDraft(draft) { emptyList() }
+        if (deleteCopies) {
+            files.forEach { uploadJobs.remove(it.localId)?.cancel() }
+            outbox.delete(files)
+        }
+    }
 
-    private fun updateDraft(draft: String, change: (List<PendingFile>) -> List<PendingFile>) =
-        _state.update { s -> s.copy(drafts = s.drafts + (draft to change(s.draft(draft)))) }
+    private fun updateDraft(draft: String, change: (List<PendingFile>) -> List<PendingFile>) = synchronized(outbox) {
+        val next = _state.updateAndGet { s -> s.copy(drafts = s.drafts + (draft to change(s.draft(draft)))) }
+        outbox.saveDraft(draft, next.draft(draft))
+    }
 
     fun stop() {
         val id = _state.value.openSessionId ?: return
@@ -2229,6 +2482,8 @@ class KrewdViewModel(private val app: Application) {
                 block(client)
             } catch (e: Exception) {
                 _state.update { it.copy(message = e.message ?: "Request failed") }
+                // No answer at all: the connection may be dead too, so check it now instead of at the poll's timeout.
+                if (e !is ApiException) kick(Kick.Resume)
             }
         }
     }
@@ -2240,6 +2495,9 @@ class KrewdViewModel(private val app: Application) {
     // Last in the class: everything above must be initialised before the loops start.
     init {
         startInputWorker()
+        restoreOutbox()
+        runOutbox()
+        network.start()
         connect()
     }
 }
@@ -2273,6 +2531,12 @@ private fun b64(data: ByteArray): String = android.util.Base64.encodeToString(da
 private fun unb64(text: String): ByteArray = android.util.Base64.decode(text, android.util.Base64.DEFAULT)
 
 /** What to do when the server does not take this phone: shown with the reason, in Settings. */
+/** The local-network search for the server runs at most this often. */
+private const val DISCOVERY_EVERY_MS = 60_000L
+
+/** A network switch often reports "lost" then "available": one check after it settles. */
+private const val NETWORK_SETTLE_MS = 300L
+
 const val RECONNECT_HINT = "On the server, run ./master.sh token, copy its krewd://connect link, then tap Paste connect code in Settings > Server."
 
 /**

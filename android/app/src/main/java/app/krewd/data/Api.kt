@@ -1,11 +1,18 @@
 package app.krewd.data
 
 import android.content.Context
+import android.os.SystemClock
 import app.krewd.constants.Timing
 import java.io.IOException
 import java.net.HttpURLConnection
 import org.json.JSONArray
 import org.json.JSONObject
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * Where the server is and how to trust it: addresses tried in order (home network, Tailscale, a domain...),
@@ -34,6 +41,12 @@ data class ConnectionSettings(
             if (a.startsWith("http://")) a = "https://" + a.removePrefix("http://")
             return a
         }
+
+        /** On the home network (a private address or .local): tried first, since it is the fastest route. */
+        fun isLocal(address: String): Boolean = label(address) == "Home"
+
+        /** Home addresses first, then the others in the order the owner gave them. */
+        fun ranked(addresses: List<String>): List<String> = addresses.sortedBy { if (isLocal(it)) 0 else 1 }
 
         /** A short name for an address: "Home" (private or .local), "Tailscale" (.ts.net or 100.64.0.0/10), else its host. */
         fun label(address: String): String {
@@ -302,7 +315,13 @@ data class EngineDefaults(
     }
 }
 
-class ApiException(val code: Int, message: String) : IOException(message)
+class ApiException(val code: Int, message: String) : IOException(message) {
+    /**
+     * The server looked at the request and said no (a 4xx other than sign-in, timeout or rate limit): trying the
+     * same request again would fail the same way. 5xx and the rest are worth another try later.
+     */
+    val refusal: Boolean get() = code in 400..499 && code !in setOf(401, 408, 425, 429)
+}
 
 /** Blocking HTTP client for the Krewd server; call it from Dispatchers.IO. */
 class KrewdApi(
@@ -312,6 +331,13 @@ class KrewdApi(
     /** Only while pairing a phone that does not know the server's certificate yet: see [Tls.Capture]. */
     private val capture: Tls.Capture? = null,
 ) {
+    /** The server's health answer from [probe] (version and so on). */
+    @Volatile var health: JSONObject? = null
+        private set
+
+    /** The long poll in progress, so [abortPoll] can end it from another thread. */
+    @Volatile private var polling: HttpURLConnection? = null
+
     /** How this server was checked on the first request ([probe]). */
     @Volatile var verified: Verified = Verified.Plain
         private set
@@ -327,15 +353,13 @@ class KrewdApi(
     /** The first request to an address: answers health and records how the server was checked. */
     fun probe(timeoutMs: Int): JSONObject {
         val conn = open("$baseUrl/api/health")
-        try {
+        return conn.keepAlive {
             conn.connectTimeout = timeoutMs
             conn.readTimeout = timeoutMs
             val code = conn.responseCode
             if (code !in 200..299) throw ApiException(code, "HTTP $code")
             verified = Tls.verifiedBy(conn, pin)
-            return JSONObject(conn.inputStream.bufferedReader().use { it.readText() })
-        } finally {
-            conn.disconnect()
+            JSONObject(conn.inputStream.bufferedReader().use { it.readText() }).also { health = it }
         }
     }
 
@@ -497,11 +521,19 @@ class KrewdApi(
     fun sessionEvents(id: String, after: Long): List<Event> =
         obj("GET", "/api/sessions/$id/events?after=$after").optJSONArray("events").objects().map(Event::from)
 
-    /** Long-poll: returns as soon as there are events after [after], or empty after the wait. */
+    /** Long-poll: returns as soon as there are events after [after], or empty after the wait. [abortPoll] ends it. */
     fun events(after: Long): Pair<List<Event>, Long> {
         val wait = Timing.LONG_POLL_SECONDS
-        val o = JSONObject(call("GET", "/api/events?after=$after&wait=$wait", null, Timing.CONNECT_TIMEOUT_MS, wait * 1000 + Timing.READ_MARGIN_MS))
+        val o = JSONObject(call("GET", "/api/events?after=$after&wait=$wait", null, Timing.CONNECT_TIMEOUT_MS, wait * 1000 + Timing.READ_MARGIN_MS, poll = true))
         return o.optJSONArray("events").objects().map(Event::from) to o.optLong("last_seq", after)
+    }
+
+    /**
+     * Ends the long poll at once (it then throws), for when its connection may have died: the app came back to
+     * the front, the network changed, or a better route was found. Safe from any thread.
+     */
+    fun abortPoll() {
+        polling?.let { runCatching { it.disconnect() } }
     }
 
     /** Move the chat to another agent after the running turn; the current agent writes a handover first. */
@@ -620,7 +652,7 @@ class KrewdApi(
     /** Streams a file to the server (no size limit in memory). Returns the upload id. */
     fun upload(name: String, mime: String?, input: java.io.InputStream): String {
         val conn = open("$baseUrl/api/uploads?name=" + java.net.URLEncoder.encode(name, "UTF-8").replace("+", "%20"))
-        try {
+        return conn.keepAlive {
             conn.requestMethod = "POST"
             conn.connectTimeout = Timing.CONNECT_TIMEOUT_MS
             conn.readTimeout = 120_000
@@ -632,12 +664,11 @@ class KrewdApi(
             val code = conn.responseCode
             val text = (if (code in 200..299) conn.inputStream else conn.errorStream)?.bufferedReader()?.use { it.readText() }.orEmpty()
             if (code !in 200..299) {
+                if (code == 401 && creds.paired) creds.session = null // the next try signs in again
                 val detail = runCatching { JSONObject(text).optString("detail") }.getOrNull()
                 throw ApiException(code, detail?.takeIf { it.isNotBlank() } ?: "Upload failed (HTTP $code)")
             }
-            return JSONObject(text).getString("id")
-        } finally {
-            conn.disconnect()
+            JSONObject(text).getString("id")
         }
     }
 
@@ -697,45 +728,39 @@ class KrewdApi(
     /** A file sent with a message (GET /api/attachments/{name}). */
     fun attachment(name: String): ByteArray {
         val conn = open("$baseUrl/api/attachments/" + java.net.URLEncoder.encode(name, "UTF-8").replace("+", "%20"))
-        try {
+        return conn.keepAlive {
             conn.connectTimeout = Timing.CONNECT_TIMEOUT_MS
             conn.readTimeout = 60_000
             conn.setRequestProperty("Authorization", "Bearer ${bearer()}")
             val code = conn.responseCode
             if (code !in 200..299) throw ApiException(code, if (code == 404) "The file is no longer there" else "Image failed (HTTP $code)")
-            return conn.inputStream.use { it.readBytes() }
-        } finally {
-            conn.disconnect()
+            conn.inputStream.use { it.readBytes() }
         }
     }
 
     /** An image from a tool result (GET /api/tool-images/{name}). */
     fun toolImage(name: String): ByteArray {
         val conn = open("$baseUrl/api/tool-images/" + java.net.URLEncoder.encode(name, "UTF-8"))
-        try {
+        return conn.keepAlive {
             conn.connectTimeout = Timing.CONNECT_TIMEOUT_MS
             conn.readTimeout = 60_000
             conn.setRequestProperty("Authorization", "Bearer ${bearer()}")
             val code = conn.responseCode
             if (code !in 200..299) throw ApiException(code, if (code == 404) "The image is no longer there" else "Image failed (HTTP $code)")
-            return conn.inputStream.use { it.readBytes() }
-        } finally {
-            conn.disconnect()
+            conn.inputStream.use { it.readBytes() }
         }
     }
 
     /** A small JPEG of a browser tab (GET /api/browser/tabs/{id}/snapshot), [width] pixels wide. */
     fun tabSnapshot(tabId: String, width: Int): ByteArray {
         val conn = open("$baseUrl/api/browser/tabs/" + java.net.URLEncoder.encode(tabId, "UTF-8") + "/snapshot?width=$width")
-        try {
+        return conn.keepAlive {
             conn.connectTimeout = Timing.CONNECT_TIMEOUT_MS
             conn.readTimeout = 15_000
             conn.setRequestProperty("Authorization", "Bearer ${bearer()}")
             val code = conn.responseCode
             if (code !in 200..299) throw ApiException(code, "Snapshot failed (HTTP $code)")
-            return conn.inputStream.use { it.readBytes() }
-        } finally {
-            conn.disconnect()
+            conn.inputStream.use { it.readBytes() }
         }
     }
 
@@ -756,8 +781,10 @@ class KrewdApi(
         text: String? = null,
         headers: Map<String, String> = emptyMap(),
         retried: Boolean = false,
+        poll: Boolean = false,
     ): String {
         val conn = open(baseUrl + path)
+        if (poll) polling = conn
         try {
             conn.requestMethod = method
             conn.connectTimeout = connectTimeoutMs
@@ -775,8 +802,8 @@ class KrewdApi(
             if (code == 401 && auth && creds.paired && !retried) {
                 // The session ran out (or the server restarted): get a new one with the phone's key, once.
                 creds.session = null
-                conn.disconnect()
-                return call(method, path, body, connectTimeoutMs, readTimeoutMs, auth, text, headers, retried = true)
+                conn.errorStream?.use { it.readBytes() } // read to the end, so the connection is reused
+                return call(method, path, body, connectTimeoutMs, readTimeoutMs, auth, text, headers, retried = true, poll = poll)
             }
             val stream = if (code in 200..299) conn.inputStream else conn.errorStream
             val text = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
@@ -785,8 +812,11 @@ class KrewdApi(
                 throw ApiException(code, detail?.takeIf { it.isNotBlank() } ?: "HTTP $code")
             }
             return text
+        } catch (e: Throwable) {
+            conn.disconnect() // a broken connection is not put back for reuse
+            throw e
         } finally {
-            conn.disconnect()
+            if (poll && polling === conn) polling = null
         }
     }
 
@@ -801,19 +831,79 @@ class KrewdApi(
             throw ApiException(0, "Keys only go over HTTPS, and no address answered over HTTPS")
         }
 
-        /** The first of [addresses] that answers, tried in order; all but the last get a short timeout. */
-        fun resolve(settings: ConnectionSettings, creds: Credentials, addresses: List<String> = settings.addresses): KrewdApi {
-            var last: Exception? = null
-            addresses.forEachIndexed { i, address ->
-                val api = KrewdApi(address, creds, settings.pin)
-                try {
-                    api.probe(if (i < addresses.lastIndex) 2_000 else Timing.CONNECT_TIMEOUT_MS)
-                    return api
-                } catch (e: Exception) {
-                    last = e
+        /** Probes run here, so a slow address can finish (and be dropped) after [race] has picked another. */
+        private val probes = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+        /**
+         * Tries every address at once and picks the best one that answers: a home address wins, then the owner's
+         * order. When a lower-ranked address answers first, the better ones get [graceMs] more to answer.
+         */
+        suspend fun race(
+            settings: ConnectionSettings, creds: Credentials, addresses: List<String> = settings.addresses,
+            graceMs: Long = Timing.HOME_GRACE_MS,
+        ): KrewdApi {
+            val ranked = ConnectionSettings.ranked(addresses)
+            if (ranked.isEmpty()) throw IOException("No server address set")
+            val results = Channel<Pair<Int, Result<KrewdApi>>>(Channel.UNLIMITED)
+            ranked.forEachIndexed { i, address ->
+                probes.launch {
+                    val api = KrewdApi(address, creds, settings.pin)
+                    val timeout = if (ConnectionSettings.isLocal(address)) Timing.HOME_PROBE_MS else Timing.CONNECT_TIMEOUT_MS
+                    results.trySend(i to runCatching { api.probe(timeout); api })
                 }
             }
-            throw last ?: IOException("No server address set")
+            val pick = RacePick<KrewdApi>(ranked.size)
+            // Name lookups are outside the connect timeout, so the whole race has its own limit too.
+            val deadline = SystemClock.elapsedRealtime() + Timing.RACE_LIMIT_MS
+            var graceEnd = Long.MAX_VALUE
+            while (true) {
+                pick.winner()?.let { return it }
+                val now = SystemClock.elapsedRealtime()
+                val until = minOf(graceEnd, deadline)
+                if (now >= until) {
+                    pick.best()?.let { return it }
+                    break
+                }
+                val (i, result) = withTimeoutOrNull(until - now) { results.receive() } ?: continue
+                if (result.isSuccess && graceEnd == Long.MAX_VALUE) graceEnd = SystemClock.elapsedRealtime() + graceMs
+                pick.done(i, result)
+                if (pick.allDone() && pick.best() == null) break
+            }
+            throw pick.error() ?: IOException("No address answered")
         }
     }
+}
+
+/** Which raced address wins: index 0 is the best ranked. Kept apart from the network so it can be tested. */
+internal class RacePick<T>(size: Int) {
+    private val finished = BooleanArray(size)
+    private val found = arrayOfNulls<Any>(size)
+    private val errors = arrayOfNulls<Throwable>(size)
+
+    fun done(i: Int, result: Result<T>) {
+        finished[i] = true
+        result.onSuccess { found[i] = it }.onFailure { errors[i] = it }
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    fun best(): T? = found.firstOrNull { it != null } as T?
+
+    /** The best answer once every better-ranked address has failed: nothing better can come. */
+    fun winner(): T? {
+        val i = found.indexOfFirst { it != null }
+        return if (i >= 0 && (0 until i).all { finished[it] }) best() else null
+    }
+
+    fun allDone(): Boolean = finished.all { it }
+
+    /** The error of the last-ranked address that failed (usually the one meant for away from home). */
+    fun error(): Throwable? = errors.lastOrNull { it != null }
+}
+
+/** Runs [block] on [this] connection; on a failure the connection is dropped instead of kept for reuse. */
+internal inline fun <T> HttpURLConnection.keepAlive(block: () -> T): T = try {
+    block()
+} catch (e: Throwable) {
+    disconnect()
+    throw e
 }

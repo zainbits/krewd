@@ -112,6 +112,39 @@ private val parser: Parser = Parser.builder()
     .extensions(listOf(TablesExtension.create(), StrikethroughExtension.create(), AutolinkExtension.create()))
     .build()
 
+/** Parses agent Markdown, after [listBreaks] so numbered lists under a label line stay lists. */
+private fun parse(text: String): Node = parser.parse(listBreaks(text))
+
+private val ORDERED_START = Regex("^\\d{1,9}[.)] ")
+private val LIST_MARKER = Regex("^\\s*([-*+]|\\d{1,9}[.)])( |$)")
+
+/**
+ * CommonMark lets an ordered list break into a paragraph only when it starts at 1, so a label line followed by
+ * `5. ...` (a list continued from an earlier group) becomes one run-on paragraph. Agents write that all the time;
+ * put a blank line before such a list start so it renders as a list. Code fences and lines inside lists are left alone.
+ */
+internal fun listBreaks(text: String): String {
+    if (!text.contains('\n')) return text
+    val lines = text.split('\n')
+    val out = StringBuilder(text.length + 16)
+    var fence = false
+    var previous = ""
+    var inList = false // a list item seen with no blank line since: its lazy lines are not labels
+    for ((i, line) in lines.withIndex()) {
+        if (i > 0) out.append('\n')
+        val trimmed = line.trimStart()
+        if (trimmed.startsWith("```") || trimmed.startsWith("~~~")) fence = !fence
+        else if (!fence && ORDERED_START.containsMatchIn(line) && previous.isNotBlank() &&
+            !inList && !previous[0].isWhitespace() &&
+            !previous.startsWith("|") && !previous.startsWith(">")
+        ) out.append('\n')
+        out.append(line)
+        previous = if (fence) "" else line
+        if (line.isBlank()) inList = false else if (!fence && LIST_MARKER.containsMatchIn(line)) inList = true
+    }
+    return out.toString()
+}
+
 private val TABLE_MAX_COLUMN = 280.dp
 private const val COPIED_MS = 1_500L
 
@@ -121,7 +154,7 @@ private data class MdStyle(val codeBackground: Color, val links: TextLinkStyles,
 /** Renders [text] as Markdown. Wrap in a SelectionContainer to make it selectable. */
 @Composable
 fun Markdown(text: String, modifier: Modifier = Modifier, notes: Boolean = true, fade: ((Int) -> Float)? = null) {
-    val document = remember(text) { parser.parse(text) }
+    val document = remember(text) { parse(text) }
     if (fade != null) {
         // The paragraph or heading being written fades its newest characters in (StreamText.kt).
         val last = remember(document) {
@@ -219,7 +252,7 @@ private fun stableEnd(text: String): Int {
  * the i-th top-level block, `b<i>.<j>` for the j-th item of a top-level list.
  */
 fun markdownBlocks(text: String): List<Pair<String, String>> = buildList {
-    parser.parse(text).children().forEachIndexed { i, node ->
+    parse(text).children().forEachIndexed { i, node ->
         when (node) {
             is LinkReferenceDefinition -> Unit
             is ListBlock -> node.children().forEachIndexed { j, item -> add("b$i.$j" to blockPlain(item)) }
@@ -268,7 +301,7 @@ fun markdownPreview(text: String): String {
             }
         }
     }
-    walk(parser.parse(text))
+    walk(parse(text))
     return out.toString().replace(Regex("\\s+"), " ").trim()
 }
 

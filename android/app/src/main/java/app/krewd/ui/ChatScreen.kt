@@ -689,7 +689,8 @@ private fun Composer(
     val ink = MaterialTheme.colorScheme.primary
     val highlight = remember(commands, ink) { CommandHighlight(commands, ink) }
     val uploading = files.any { it.uploading }
-    val ready = files.any { it.uploadId != null } || hasTabs
+    // A file the server refused must be removed first; files still uploading go with the message when done.
+    val refused = files.any { it.error != null }
     val hasDraft = text.isNotBlank() || files.isNotEmpty() || hasTabs
     val colors = MaterialTheme.colorScheme
     ComposerShell(backdrop, modifier.fillMaxWidth()) {
@@ -767,7 +768,7 @@ private fun Composer(
                     Spacer(Modifier.width(6.dp))
                 }
                 val stop = busy && !hasDraft
-                val enabled = stop || ((text.isNotBlank() || ready) && !uploading)
+                val enabled = stop || ((text.isNotBlank() || files.isNotEmpty() || hasTabs) && !refused)
                 // A solid round button that stretches like the glass pieces (no glass of its own).
                 KrewdIconPill(
                     onClick = {
@@ -779,7 +780,12 @@ private fun Composer(
                         }
                     },
                     icon = if (stop) R.drawable.ic_stop_24 else R.drawable.ic_send_24,
-                    contentDescription = if (stop) "Stop" else if (uploading) "Uploading" else "Send",
+                    contentDescription = when {
+                        stop -> "Stop"
+                        refused -> "Remove the file that could not be uploaded"
+                        uploading -> "Send when the files are uploaded"
+                        else -> "Send"
+                    },
                     enabled = enabled,
                     glass = false,
                     size = 40.dp,
@@ -1209,6 +1215,8 @@ private fun CompactRow(item: UserItem) {
 private fun ColumnScope.DeliveryLine(item: UserItem, busy: Boolean, color: Color) {
     val (ticks, label) = when (item.state) {
         "sending" -> "" to "Sending…"
+        "uploading" -> "" to "Uploading files…"
+        "waiting" -> "" to "Waiting for connection…"
         "failed" -> "" to "Not sent · tap to resend"
         "cancelled" -> "" to "Not run (stopped)"
         "delivered" -> "✓✓" to if (item.how == "steered") "Steered" else ""

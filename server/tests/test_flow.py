@@ -217,6 +217,20 @@ async def test_config_picks_return_after_agent_restart(hub):
     assert "model:big" in text["text"]
 
 
+async def test_config_pick_shows_while_agent_is_down(hub):
+    session = await hub.create_session("first", config={"model": "big"})
+    sid = uuid.UUID(session["id"])
+    await wait_for(hub, sid, "turn_end")
+    await hub.procs["fake"].stop()
+    await asyncio.sleep(0.2)
+    # No live agent session: the pick shows at once and reaches the agent when the session reopens.
+    updated = await hub.update_session(sid, {"config": {"effort": "high"}})
+    assert {o["id"]: o["current"] for o in updated["config_options"]}["effort"] == "high"
+    await hub.send(sid, "second calls")
+    text = await wait_for(hub, sid, "text", lambda p: "calls=" in p["text"])
+    assert "effort:high" in text["text"]
+
+
 async def test_engines_are_probed_for_their_options(hub):
     listing = hub.engines()
     assert listing[0]["id"] == "fake" and listing[0]["config_options"] == []
