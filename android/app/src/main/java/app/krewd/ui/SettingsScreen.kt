@@ -233,9 +233,9 @@ fun SettingsScreen(state: UiState, viewModel: KrewdViewModel, padding: PaddingVa
         }
         item {
             SectionCard {
-                Text("Delete chats", style = MaterialTheme.typography.titleMedium)
+                Text("Delete old chats", style = MaterialTheme.typography.titleMedium)
                 Text(
-                    "Clear out many chats at once: those from the last few days, or everything older. Pinned and working chats always stay.",
+                    "Clear out every chat not used for a week, a month or longer. Pinned and working chats always stay.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -244,7 +244,7 @@ fun SettingsScreen(state: UiState, viewModel: KrewdViewModel, padding: PaddingVa
                     enabled = online,
                     modifier = Modifier.fillMaxWidth(),
                     colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
-                ) { Text("Delete chats") }
+                ) { Text("Delete old chats") }
             }
         }
         item {

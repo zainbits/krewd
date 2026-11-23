@@ -23,9 +23,6 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.SegmentedButton
-import androidx.compose.material3.SegmentedButtonDefaults
-import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -54,24 +51,28 @@ import app.krewd.data.deleteOldChats
 import app.krewd.data.oldChats
 import kotlinx.coroutines.delay
 
-private val PRESET_DAYS = listOf(1, 7, 30, 90)
+private val PRESET_DAYS = listOf(7, 30, 90, 365)
 private const val MAX_DAYS = 3650
 private const val LISTED = 5
 
-private fun days(n: Int) = if (n == 1) "1 day" else "$n days"
+private fun days(n: Int) = when {
+    n == 1 -> "1 day"
+    n == 365 -> "1 year"
+    else -> "$n days"
+}
 private fun chats(n: Int) = if (n == 1) "1 chat" else "$n chats"
 
 /**
- * Settings > Delete chats: deletes every chat last active in the past N days, or every chat older than that.
- * Pinned chats and chats that are working always stay. The server previews what would go (the counts and the
+ * Settings > Delete old chats: deletes every chat last active more than N days ago. Pinned chats and chats that
+ * are working always stay. The server previews what would go (the counts and the
  * first few titles update as the range changes), and the delete takes exactly the previewed chats, after a
  * confirmation, since it cannot be undone.
  */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun DeleteChatsSheet(viewModel: KrewdViewModel, onDismiss: () -> Unit) {
-    var scope by rememberSaveable { mutableStateOf("recent") }
-    var days by rememberSaveable { mutableIntStateOf(7) }
+    val scope = "older"
+    var days by rememberSaveable { mutableIntStateOf(30) }
     var custom by rememberSaveable { mutableStateOf(false) }
     var customText by rememberSaveable(stateSaver = TextFieldValue.Saver) { mutableStateOf(TextFieldValue("")) }
     var preview by remember { mutableStateOf<OldChats?>(null) }
@@ -103,7 +104,7 @@ fun DeleteChatsSheet(viewModel: KrewdViewModel, onDismiss: () -> Unit) {
     }
 
     val shown = preview?.takeIf { it.days == days && it.scope == scope }
-    val range = if (scope == "recent") "last active in the past ${days(days)}" else "last active more than ${days(days)} ago"
+    val range = "last active more than ${days(days)} ago"
 
     if (confirm && shown != null) {
         val n = shown.chats.size
@@ -145,27 +146,17 @@ fun DeleteChatsSheet(viewModel: KrewdViewModel, onDismiss: () -> Unit) {
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("Delete chats", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
+                Text("Delete old chats", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
                 if (loading || deleting) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
             }
             Text(
-                "Pick a range by when each chat was last active. Pinned chats and chats that are working always stay.",
+                "Deletes every chat not used for a while. Pinned chats and chats that are working always stay.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
 
-            SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
-                listOf("recent" to "In the last", "older" to "Older than").forEachIndexed { i, (value, label) ->
-                    SegmentedButton(
-                        selected = scope == value,
-                        onClick = { scope = value; note = null },
-                        enabled = !deleting,
-                        shape = SegmentedButtonDefaults.itemShape(i, 2),
-                        label = { Text(label, maxLines = 1) },
-                    )
-                }
-            }
-
+            Text("Not used for more than", style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 PRESET_DAYS.forEach { n ->
                     FilterChip(
