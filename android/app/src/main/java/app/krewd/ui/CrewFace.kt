@@ -3,6 +3,8 @@ package app.krewd.ui
 import androidx.compose.animation.core.InfiniteTransition
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.StartOffset
+import androidx.compose.animation.core.StartOffsetType
 import androidx.compose.runtime.State
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
@@ -34,6 +36,7 @@ import app.krewd.LiveInfo
 import app.krewd.data.EngineInfo
 import app.krewd.data.SessionInfo
 import kotlin.math.PI
+import kotlin.random.Random
 import kotlin.math.sin
 
 /** What a crew member is doing, shown with its eyes. */
@@ -128,11 +131,13 @@ fun CrewFace(
     animate: Boolean = true,
 ) {
     val small = size < 28.dp
+    // Each face gets its own random timing so a row of faces never moves or blinks in lockstep.
+    val seed = remember { Random.nextFloat() }
     key(state, animate) {
         val transition = rememberInfiniteTransition(label = "face")
-        val phase = transition.loop(if (animate) periodOf(state) else 0, "phase")
-        val blink = transition.blink(animate)
-        val breathe = transition.loop(if (animate) 3600 else 0, "breathe")
+        val phase = transition.loop(if (animate) periodOf(state) else 0, "phase", seed)
+        val blink = transition.blink(animate, seed)
+        val breathe = transition.loop(if (animate) 3600 else 0, "breathe", (seed * 7.3f) % 1f)
         Canvas(
             modifier
                 .size(size)
@@ -147,18 +152,31 @@ fun CrewFace(
 }
 
 @Composable
-private fun InfiniteTransition.loop(period: Int, label: String): State<Float> =
+private fun InfiniteTransition.loop(period: Int, label: String, seed: Float): State<Float> =
     if (period <= 0) remember { androidx.compose.runtime.mutableFloatStateOf(0f) }
-    else animateFloat(0f, 1f, infiniteRepeatable(tween(period, easing = LinearEasing), RepeatMode.Restart), label = label)
+    else animateFloat(
+        0f, 1f,
+        infiniteRepeatable(
+            tween(period, easing = LinearEasing), RepeatMode.Restart,
+            initialStartOffset = StartOffset((period * seed).toInt(), StartOffsetType.FastForward),
+        ),
+        label = label,
+    )
 
 @Composable
-private fun InfiniteTransition.blink(animate: Boolean): State<Float> =
-    if (!animate) remember { androidx.compose.runtime.mutableFloatStateOf(1f) }
-    else animateFloat(
+private fun InfiniteTransition.blink(animate: Boolean, seed: Float): State<Float> {
+    if (!animate) return remember { androidx.compose.runtime.mutableFloatStateOf(1f) }
+    // Blink gap 3.4-5.4 s per face, started mid-cycle.
+    val total = 3400 + (seed * 2000).toInt()
+    return animateFloat(
         1f, 1f,
-        infiniteRepeatable(keyframes { durationMillis = 4400; 1f at 4040; 0.08f at 4170; 1f at 4300 }),
+        infiniteRepeatable(
+            keyframes { durationMillis = total; 1f at total - 360; 0.08f at total - 230; 1f at total - 100 },
+            initialStartOffset = StartOffset(((seed * 13.7f) % 1f * total).toInt(), StartOffsetType.FastForward),
+        ),
         label = "blink",
     )
+}
 
 /** Linear interpolation over keyframes [(at, value)], at in 0..1 and sorted. */
 private fun track(p: Float, vararg keys: Pair<Float, Float>): Float {
