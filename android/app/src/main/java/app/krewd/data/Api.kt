@@ -764,7 +764,8 @@ class KrewdApi(
         }
     }
 
-    internal fun rawCall(method: String, path: String, body: JSONObject? = null): String = call(method, path, body)
+    internal fun rawCall(method: String, path: String, body: JSONObject? = null, readTimeoutMs: Int = 20_000): String =
+        call(method, path, body, readTimeoutMs = readTimeoutMs)
 
     private fun obj(method: String, path: String, body: JSONObject? = null) =
         JSONObject(call(method, path, body))

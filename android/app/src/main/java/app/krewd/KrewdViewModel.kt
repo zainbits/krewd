@@ -1608,6 +1608,21 @@ class KrewdViewModel(private val app: Application) {
         }
     }
 
+    /** Chats deleted on the server at once (Settings > Delete chats): off the lists, their drafts and alerts gone. */
+    fun chatsDeleted(ids: Collection<String>) {
+        if (ids.isEmpty()) return
+        val gone = ids.toSet()
+        _state.update { s -> s.copy(sessions = s.sessions.filterNot { it.id in gone }, archived = s.archived?.filterNot { it.id in gone }) }
+        gone.forEach { id ->
+            live.remove(id)
+            notifier.clear(id)
+            prefs.setTextDraft(id, "")
+            setDraftNotes(id, emptyList())
+        }
+        pushLive()
+        if (_state.value.openSessionId in gone) closeSession()
+    }
+
     fun deleteSessionNow(id: String, done: (String?) -> Unit) {
         request({ it.deleteSession(id) }) { _, problem ->
             if (problem == null) {

@@ -86,6 +86,45 @@ fun KrewdApi.cleanStorage(): Long = JSONObject(rawCall("POST", "/api/storage/cle
 /** Shrinks one chat's history in Krewd, keeping its messages and the agent's session; the bytes freed. */
 fun KrewdApi.trimSession(id: String): Long = JSONObject(rawCall("POST", "/api/sessions/$id/trim", JSONObject())).optLong("bytes")
 
+/** A chat a "Delete chats" preview would delete (`GET /api/sessions/old`). */
+data class OldChat(val id: String, val title: String, val updatedAt: String, val archived: Boolean, val isRoutine: Boolean)
+
+/** The unpinned, idle chats last active in the past [days] days ("recent") or before them ("older"). */
+data class OldChats(val days: Int, val scope: String, val chats: List<OldChat>, val keptPinned: Int, val keptWorking: Int) {
+    companion object {
+        fun from(o: JSONObject): OldChats {
+            val chats = o.optJSONArray("chats")
+            val kept = o.optJSONObject("kept") ?: JSONObject()
+            return OldChats(
+                days = o.optInt("days"),
+                scope = o.optString("scope"),
+                chats = (0 until (chats?.length() ?: 0)).map { i ->
+                    val c = chats!!.getJSONObject(i)
+                    OldChat(
+                        id = c.getString("id"),
+                        title = c.optString("title").ifBlank { "Untitled" },
+                        updatedAt = c.optString("updated_at"),
+                        archived = c.optBoolean("archived"),
+                        isRoutine = !c.isNull("routine_id"),
+                    )
+                },
+                keptPinned = kept.optInt("pinned"),
+                keptWorking = kept.optInt("working"),
+            )
+        }
+    }
+}
+
+fun KrewdApi.oldChats(days: Int, scope: String): OldChats =
+    OldChats.from(JSONObject(rawCall("GET", "/api/sessions/old?days=$days&scope=$scope")))
+
+/** Deletes the previewed chats that still match; the ids deleted. Many chats can take a while, so it waits longer. */
+fun KrewdApi.deleteOldChats(days: Int, scope: String, ids: List<String>): List<String> {
+    val body = JSONObject().put("days", days).put("scope", scope).put("ids", org.json.JSONArray(ids))
+    val deleted = JSONObject(rawCall("POST", "/api/sessions/old/delete", body, readTimeoutMs = 120_000)).optJSONArray("deleted")
+    return (0 until (deleted?.length() ?: 0)).map { deleted!!.getString(it) }
+}
+
 fun formatBytes(bytes: Long): String = when {
     bytes >= 1_000_000_000 -> String.format(Locale.US, "%.1f GB", bytes / 1e9)
     bytes >= 1_000_000 -> String.format(Locale.US, "%.1f MB", bytes / 1e6)

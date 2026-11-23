@@ -967,8 +967,10 @@ class Hub:
         await self.emit_session(session_id)
         return await self.get_session(session_id)
 
-    async def delete_session(self, session_id: uuid.UUID) -> None:
-        """Delete a task for good: stop its turn, forget its agent session, drop its history and messages."""
+    async def delete_session(self, session_id: uuid.UUID, *, remove_files: bool = True) -> set[str]:
+        """Delete a task for good: stop its turn, forget its agent session, drop its history and messages.
+
+        Returns the chat's agent sessions; with remove_files=False the caller removes its files (see delete_old_chats)."""
         await self.get_session(session_id)
         rt = self.runtimes.pop(session_id, None)
         if rt:
@@ -1014,10 +1016,68 @@ class Hub:
         for child in children:
             await self.emit_session(child)
         self.last_sent.pop(session_id, None)
+        if remove_files:
+            try:
+                await self._remove_chat_files({session_id: ids})
+            except Exception as exc:  # the chat is gone either way; Storage > Free up space finds what is left
+                log.warning("could not remove the files of chat %s: %s", session_id, exc)
+        return ids
+
+    # deleting chats by age (Settings > Delete chats)
+
+    _AGE_SCOPES = {"recent": ">=", "older": "<"}
+
+    async def old_chats(self, days: int, scope: str) -> dict[str, Any]:
+        """The chats last active in the past `days` days (scope "recent") or before them ("older"), newest first.
+
+        Pinned chats are never in it, nor chats that are working (running, waiting for the owner, or with a
+        queued message); those are only counted, so the app can say what stays."""
+        if scope not in self._AGE_SCOPES or not 1 <= days <= 3650:
+            raise Invalid("days must be 1 to 3650 and scope recent or older")
+        rows = await self.pool.fetch(
+            f"""select s.id, s.title, s.updated_at, s.pinned, s.archived, {db.ROUTINE_OF} as routine_id,
+                   (s.status in ('running', 'waiting')
+                    or exists (select 1 from messages m where m.session_id = s.id and m.state = 'queued')
+                    or exists (select 1 from approvals a where a.session_id = s.id and a.status = 'pending')) as working
+                from sessions s
+                where s.updated_at {self._AGE_SCOPES[scope]} now() - make_interval(days => $1)
+                order by s.updated_at desc""",
+            days,
+        )
+        chats, pinned, working = [], 0, 0
+        for r in rows:
+            if r["pinned"]:
+                pinned += 1
+            elif r["working"] or self._busy(r["id"]):
+                working += 1
+            else:
+                chats.append({"id": str(r["id"]), "title": r["title"], "updated_at": r["updated_at"].isoformat(),
+                              "archived": r["archived"], "routine_id": str(r["routine_id"]) if r["routine_id"] else None})
+        return {"days": days, "scope": scope, "count": len(chats), "chats": chats,
+                "kept": {"pinned": pinned, "working": working}}
+
+    async def delete_old_chats(self, days: int, scope: str, ids: list[uuid.UUID]) -> dict[str, Any]:
+        """Deletes the chats the owner saw in the preview (`ids`) that still match it: a chat pinned, started
+        working or moved out of the range since then stays. Files go in one pass at the end."""
+        match = {uuid.UUID(c["id"]) for c in (await self.old_chats(days, scope))["chats"]}
+        deleted: list[str] = []
+        files: dict[uuid.UUID, set[str]] = {}
+        for session_id in dict.fromkeys(ids):
+            if session_id not in match or self._busy(session_id):
+                continue
+            try:
+                files[session_id] = await self.delete_session(session_id, remove_files=False)
+            except NotFound:
+                continue
+            except Exception:
+                log.exception("could not delete chat %s", session_id)
+                continue
+            deleted.append(str(session_id))
         try:
-            await self._remove_chat_files(session_id, ids)
-        except Exception as exc:  # the chat is gone either way; Storage > Free up space finds what is left
-            log.warning("could not remove the files of chat %s: %s", session_id, exc)
+            await self._remove_chat_files(files)
+        except Exception as exc:
+            log.warning("could not remove the files of %d deleted chats: %s", len(files), exc)
+        return {"deleted": deleted, "count": len(deleted), "skipped": len(set(ids)) - len(deleted)}
 
     # storage
 
@@ -1029,19 +1089,26 @@ class Hub:
         )
         return {r["agent_session"] for r in rows}
 
-    async def _remove_chat_files(self, session_id: uuid.UUID, agent_sessions: set[str]) -> int:
-        """A deleted chat's attachments, tool images and agent transcripts (none of them is used again)."""
+    async def _remove_chat_files(self, chats: dict[uuid.UUID, set[str]]) -> int:
+        """Deleted chats' attachments, tool images and agent transcripts (none of them is used again)."""
+        if not chats:
+            return 0
+        gone = {str(c)[:8] for c in chats}
+        agent_sessions = set().union(*chats.values())
         async with self.storage_lock:
-            return await asyncio.to_thread(self._remove_chat_files_sync, str(session_id)[:8], agent_sessions,
+            return await asyncio.to_thread(self._remove_chat_files_sync, gone, agent_sessions,
                                            await self._known_prefixes(), await self._used_agent_sessions())
 
-    def _remove_chat_files_sync(self, prefix: str, agent_sessions: set[str], prefixes: set[str], used: set[str]) -> int:
+    def _remove_chat_files_sync(self, gone: set[str], agent_sessions: set[str], prefixes: set[str], used: set[str]) -> int:
         freed = 0
-        if prefix not in prefixes:  # another chat whose id starts the same way keeps the files
+        gone = gone - prefixes  # another chat whose id starts the same way keeps the files
+        if gone:
             for folder in (self.attachments.root, self.tool_images.root):
-                for path, size in store.files_by_prefix(folder).get(prefix, []):
-                    path.unlink(missing_ok=True)
-                    freed += size
+                for prefix, items in store.files_by_prefix(folder).items():
+                    if prefix in gone:
+                        for path, size in items:
+                            path.unlink(missing_ok=True)
+                            freed += size
         if agent_sessions - used:
             found = self.transcripts.scan()
             for agent_session in agent_sessions - used:

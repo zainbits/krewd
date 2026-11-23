@@ -51,6 +51,7 @@ fun SettingsScreen(state: UiState, viewModel: KrewdViewModel, padding: PaddingVa
     var confirmRestart by remember { mutableStateOf(false) }
     var locationSheet by remember { mutableStateOf(false) }
     var storageSheet by remember { mutableStateOf(false) }
+    var deleteChatsSheet by remember { mutableStateOf(false) }
     val online = state.connection is Connection.Online
     val clipboard = LocalClipboardManager.current
     LaunchedEffect(online) { if (online) viewModel.loadProfiles() }
@@ -92,6 +93,7 @@ fun SettingsScreen(state: UiState, viewModel: KrewdViewModel, padding: PaddingVa
 
     if (locationSheet) LocationSheet(viewModel) { locationSheet = false }
     if (storageSheet) StorageSheet(viewModel) { storageSheet = false }
+    if (deleteChatsSheet) DeleteChatsSheet(viewModel) { deleteChatsSheet = false }
 
     LazyColumn(
         state = listState,
@@ -227,6 +229,22 @@ fun SettingsScreen(state: UiState, viewModel: KrewdViewModel, padding: PaddingVa
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 OutlinedButton(onClick = { storageSheet = true }, enabled = online, modifier = Modifier.fillMaxWidth()) { Text("Storage") }
+            }
+        }
+        item {
+            SectionCard {
+                Text("Delete chats", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    "Clear out many chats at once: those from the last few days, or everything older. Pinned and working chats always stay.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                OutlinedButton(
+                    onClick = { deleteChatsSheet = true },
+                    enabled = online,
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                ) { Text("Delete chats") }
             }
         }
         item {

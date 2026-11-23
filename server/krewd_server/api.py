@@ -100,6 +100,12 @@ class Message(WithAttachments):
     notes: list[Note] = Field(default_factory=list, max_length=20)  # margin notes on parts of earlier replies
 
 
+class DeleteOldChats(BaseModel):
+    days: int = Field(ge=1, le=3650)
+    scope: Literal["recent", "older"]
+    ids: list[uuid.UUID] = Field(max_length=10000)
+
+
 class SessionChanges(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=200)
     auto_approve: bool | None = None
@@ -657,6 +663,18 @@ def create_app(hub: Hub, token: str, lifespan_hub: bool = True) -> FastAPI:
             chats=[{"id": str(c.id)} for c in body.chats], parent_id=body.parent_id, returns=body.returns,
             title=body.title,
         )
+
+    # Before /api/sessions/{session_id}, which would take "old" for an id.
+    @app.get("/api/sessions/old", dependencies=auth)
+    async def old_chats(days: int = Query(ge=1, le=3650),
+                        scope: Literal["recent", "older"] = "older") -> dict[str, Any]:
+        """Preview: the unpinned, idle chats last active in the past `days` days (recent) or before (older)."""
+        return await hub.old_chats(days, scope)
+
+    @app.post("/api/sessions/old/delete", dependencies=auth)
+    async def delete_old_chats(body: DeleteOldChats) -> dict[str, Any]:
+        """Deletes the previewed chats (`ids`) that still match; pinned or working ones stay."""
+        return await hub.delete_old_chats(body.days, body.scope, body.ids)
 
     @app.get("/api/sessions/{session_id}", dependencies=auth)
     async def session(session_id: uuid.UUID) -> dict[str, Any]:

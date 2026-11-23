@@ -1116,6 +1116,41 @@ async def test_trim_and_delete_free_a_chats_space(hub):
     assert not attachment.exists() and not transcript.exists()
 
 
+async def test_delete_chats_by_age_keeps_pinned_and_working_ones(hub):
+    ids = {}
+    for name in ("old", "old pinned", "recent", "old working"):
+        session = await hub.create_session("slow" if name == "old working" else "Say hello")
+        ids[name] = uuid.UUID(session["id"])
+        if name != "old working":
+            await wait_for(hub, ids[name], "turn_end")
+    await wait_for(hub, ids["old working"], "text", lambda p: p["role"] == "thought")
+    await hub.update_session(ids["old pinned"], {"pinned": True})
+    for name in ("old", "old pinned", "old working"):
+        await hub.pool.execute("update sessions set updated_at = now() - interval '10 days' where id = $1", ids[name])
+    attachment = hub.attachments.root / f"{str(ids['old'])[:8]}-notes.txt"
+    attachment.write_text("notes")
+
+    app = create_app(hub, TOKEN, lifespan_hub=False)
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test", headers=headers) as client:
+        older = (await client.get("/api/sessions/old", params={"days": 7, "scope": "older"})).json()
+        assert [c["id"] for c in older["chats"]] == [str(ids["old"])]
+        assert older["kept"] == {"pinned": 1, "working": 1}
+        recent = (await client.get("/api/sessions/old", params={"days": 7, "scope": "recent"})).json()
+        assert [c["id"] for c in recent["chats"]] == [str(ids["recent"])]
+        assert (await client.get("/api/sessions/old", params={"days": 0})).status_code == 422
+
+        # Only what the preview showed and still matches goes: the recent chat is out of range, the pinned one stays.
+        body = {"days": 7, "scope": "older", "ids": [str(ids["old"]), str(ids["recent"]), str(ids["old pinned"])]}
+        done = (await client.post("/api/sessions/old/delete", json=body)).json()
+        assert done == {"deleted": [str(ids["old"])], "count": 1, "skipped": 2}
+    left = {s["id"] for s in await hub.list_sessions()}
+    assert str(ids["old"]) not in left
+    assert {str(ids["old pinned"]), str(ids["recent"]), str(ids["old working"])} <= left
+    assert not attachment.exists()
+    await hub.cancel(ids["old working"])
+
+
 # chats that work for each other: side sessions, sub-agents, prompts to another chat
 
 
