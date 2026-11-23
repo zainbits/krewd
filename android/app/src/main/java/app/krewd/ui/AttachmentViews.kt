@@ -397,10 +397,7 @@ fun FilePeekCard(file: Attachment, chip: Rect, backdrop: GlassBackdrop?, onClose
             }
         }
         if (backdrop != null) {
-            // The Glass clarity setting plus 10 (at most 100), so the name reads over anything.
-            val g = LocalKrewdGlass.current
-            val style = remember(g.clarity, g.dark) { GlassStyle.forClarity((g.clarity + 0.10f).coerceAtMost(1f), g.dark) }
-            GlassSurface(backdrop = backdrop, modifier = place, shape = GlassShape.rounded(16.dp), style = style) { body() }
+            GlassSurface(backdrop = backdrop, modifier = place, shape = GlassShape.rounded(16.dp)) { body() }
         } else {
             Surface(modifier = place, shape = RoundedCornerShape(16.dp), color = MaterialTheme.colorScheme.surfaceContainerHighest, shadowElevation = 3.dp) { body() }
         }

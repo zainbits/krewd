@@ -139,12 +139,85 @@ fun SettingsLine(values: List<Pair<String, String>>, onClick: () -> Unit, modifi
     }
 }
 
+/** A section heading in a sheet; on glass it is the quick panel's bold small caps in the glass's ink. */
 @Composable
 fun SheetLabel(text: String, modifier: Modifier = Modifier, trailing: String? = null) {
+    val onGlass = LocalOnGlass.current
+    val ink = if (onGlass) LocalContentColor.current.copy(alpha = 0.8f) else MaterialTheme.colorScheme.onSurfaceVariant
     Row(modifier.fillMaxWidth().padding(top = 18.dp, bottom = 8.dp, start = 4.dp, end = 4.dp)) {
-        Text(text, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.weight(1f))
-        if (trailing != null) Text(trailing, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(
+            if (onGlass) text.uppercase() else text,
+            style = MaterialTheme.typography.labelLarge,
+            fontWeight = if (onGlass) FontWeight.Bold else null,
+            letterSpacing = if (onGlass) androidx.compose.ui.unit.TextUnit(0.8f, androidx.compose.ui.unit.TextUnitType.Sp) else androidx.compose.ui.unit.TextUnit.Unspecified,
+            color = ink,
+            modifier = Modifier.weight(1f),
+        )
+        if (trailing != null) Text(trailing, style = MaterialTheme.typography.labelMedium, color = ink)
     }
+}
+
+/**
+ * Models as cards that scroll sideways, the picked one outlined: the chat title's quick panel, the new-task
+ * sheet, chat settings and the routine editor all pick models this way. Cards are solid so they read on glass.
+ */
+@Composable
+fun ModelCards(
+    option: ConfigOption,
+    selected: String?,
+    enabled: Boolean,
+    onPick: (String) -> Unit,
+    modifier: Modifier = Modifier,
+    contentPadding: androidx.compose.foundation.layout.PaddingValues = androidx.compose.foundation.layout.PaddingValues(0.dp),
+) {
+    val picked = option.choices.indexOfFirst { it.value == selected }.coerceAtLeast(0)
+    val list = androidx.compose.foundation.lazy.rememberLazyListState(initialFirstVisibleItemIndex = (picked - 1).coerceAtLeast(0))
+    androidx.compose.foundation.lazy.LazyRow(
+        state = list,
+        modifier = modifier,
+        contentPadding = contentPadding,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        items(option.choices.size, key = { option.choices[it].value }) { i ->
+            val choice = option.choices[i]
+            val isPicked = choice.value == selected
+            Surface(
+                onClick = { if (!isPicked) onPick(choice.value) },
+                enabled = enabled,
+                shape = RoundedCornerShape(18.dp),
+                color = if (isPicked) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surfaceContainerHighest,
+                contentColor = if (isPicked) MaterialTheme.colorScheme.onSecondaryContainer else MaterialTheme.colorScheme.onSurface,
+                border = if (isPicked) BorderStroke(2.dp, MaterialTheme.colorScheme.primary) else null,
+                // One size for every card, so the row (and what is under it) never jumps while it scrolls.
+                modifier = Modifier.width(148.dp).height(76.dp),
+            ) {
+                Column(Modifier.padding(horizontal = 12.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text(
+                        choice.name,
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = if (isPicked) FontWeight.Bold else FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    choice.description?.takeIf { it.isNotBlank() && it != choice.name }?.let {
+                        Text(it, style = MaterialTheme.typography.labelSmall, color = LocalContentColor.current.copy(alpha = 0.7f), maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** A solid card around a control on glass (a slider, segmented buttons), so it does not melt into the glass. */
+@Composable
+private fun OnGlassCard(content: @Composable () -> Unit) {
+    if (!LocalOnGlass.current) { content(); return }
+    Surface(
+        shape = RoundedCornerShape(20.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerHighest,
+        contentColor = MaterialTheme.colorScheme.onSurface,
+        modifier = Modifier.fillMaxWidth(),
+    ) { Column(Modifier.padding(horizontal = 10.dp, vertical = 8.dp)) { content() } }
 }
 
 /**
@@ -176,8 +249,9 @@ fun ColumnScope.AgentOptions(
         SheetLabel(label)
         val value = selected(option)
         when {
-            option.category == "thought_level" && option.choices.size in 2..7 -> StepChoice(option, value, enabled) { onPick(option, it) }
-            option.isMode && option.choices.size <= 4 && option.choices.all { it.name.length <= 14 } -> SegmentChoice(option, value, enabled) { onPick(option, it) }
+            option.category == "model" && option.choices.size > 1 -> ModelCards(option, value, enabled, onPick = { onPick(option, it) })
+            option.category == "thought_level" && option.choices.size in 2..7 -> OnGlassCard { StepChoice(option, value, enabled) { onPick(option, it) } }
+            option.isMode && option.choices.size <= 4 && option.choices.all { it.name.length <= 14 } -> OnGlassCard { SegmentChoice(option, value, enabled) { onPick(option, it) } }
             else -> ListChoice(option.choices, value, enabled) { onPick(option, it) }
         }
     }
@@ -303,7 +377,7 @@ fun StepChoice(option: ConfigOption, selected: String?, enabled: Boolean, onPick
 
 /** A short list of modes as segmented buttons. */
 @Composable
-private fun SegmentChoice(option: ConfigOption, selected: String?, enabled: Boolean, onPick: (String) -> Unit) {
+private fun ColumnScope.SegmentChoice(option: ConfigOption, selected: String?, enabled: Boolean, onPick: (String) -> Unit) {
     SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
         option.choices.forEachIndexed { i, c ->
             SegmentedButton(

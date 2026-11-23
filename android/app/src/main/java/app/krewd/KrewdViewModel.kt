@@ -1,5 +1,6 @@
 package app.krewd
 
+import app.krewd.ui.whenText
 import android.app.Application
 import android.content.ContentValues
 import android.content.Intent
@@ -273,9 +274,20 @@ class KrewdViewModel(private val app: Application) {
 
     @Volatile var inForeground = true
         set(value) {
+            val was = field
             field = value
             if (value) notifier.appVisible()
+            if (value != was) streamVisibility(value)
         }
+
+    /**
+     * The live view stops while the app is in the background and starts fresh when it comes back: the old
+     * connection has usually died with the phone asleep, and would show a frozen picture until it timed out.
+     */
+    private fun streamVisibility(visible: Boolean) {
+        val tabId = watched ?: return
+        if (!visible) stopStream() else api?.let { startStream(it, tabId, keepFrame = true) }
+    }
 
     // The agents' browser. Frames live in their own flow so a new picture does not re-render everything.
     private val _frame = MutableStateFlow<BrowserFrame?>(null)
@@ -380,6 +392,8 @@ class KrewdViewModel(private val app: Application) {
                 learnPin(client)
                 val server = client.state()
                 api = client
+                // A live view asked for while offline, or still on the last connection's address, starts on this one.
+                launchMain { watched?.let { if (inForeground && api === client) startStream(client, it, keepFrame = true) } }
                 val sessions = client.sessions().filterNot { it.id == _state.value.pendingDelete?.id }
                 val approvals = client.approvals()
                 val secrets = runCatching { client.secrets() }.getOrDefault(emptyList())
@@ -674,6 +688,19 @@ class KrewdViewModel(private val app: Application) {
         val routine = client.setRoutineNotes(id, notes)
         _state.update { s -> s.copy(routines = upsertRoutine(s.routines, routine)) }
         loadRoutine(client, id)
+    }
+
+    /** Skips coming runs of one trigger (or all): the next [runs] (0 undoes it), or with [today] the rest of today. */
+    fun skipRoutineRuns(id: String, trigger: String?, runs: Int?, today: Boolean = false) = act { client ->
+        val routine = client.skipRuns(id, trigger, runs, today)
+        _state.update { s -> s.copy(routines = upsertRoutine(s.routines, routine)) }
+        loadRoutine(client, id)
+        val what = when {
+            runs == 0 -> "Skip undone"
+            today -> "Skipping the rest of today"
+            else -> "Skipping the next ${if (runs == 1) "run" else "$runs runs"}"
+        }
+        _state.update { it.copy(message = what + (routine.nextLiveAt?.let { at -> " · next run ${whenText(at)}" } ?: "")) }
     }
 
     /** Drops a follow-up a run asked for ("try again at 19:05"); the trigger's next scheduled time stays. */
@@ -1809,8 +1836,13 @@ class KrewdViewModel(private val app: Application) {
     /** Streams [tabId] live into [frame], for whichever screen shows it. One stream at a time. */
     fun watchTab(tabId: String) {
         if (watched == tabId && streamJob?.isActive == true) return
-        val client = api ?: return
         watched = tabId
+        val client = api
+        if (client == null) {
+            // Offline (starting up or reconnecting): the stream starts when the connection is back.
+            stopStream()
+            return
+        }
         startStream(client, tabId)
     }
 
@@ -1858,11 +1890,12 @@ class KrewdViewModel(private val app: Application) {
     private fun startStream(client: KrewdApi, tabId: String, keepFrame: Boolean = false) {
         stopStream()
         if (!keepFrame) _frame.value = null
+        if (_state.value.streamError != null) _state.update { it.copy(streamError = null) }
         streamJob = scope.launch(Dispatchers.IO) {
             var failures = 0
             while (watched == tabId) {
                 try {
-                    val s = client.openBrowserStream(tabId, _state.value.highQuality)
+                    val s = (api ?: client).openBrowserStream(tabId, _state.value.highQuality)
                     stream = s
                     s.read { frame ->
                         failures = 0

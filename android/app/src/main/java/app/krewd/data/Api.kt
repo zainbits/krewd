@@ -575,6 +575,15 @@ class KrewdApi(
     fun setRoutineNotes(id: String, notes: String): Routine =
         Routine.from(obj("PUT", "/api/routines/$id/notes", JSONObject().put("notes", notes)))
 
+    /** Skips the next [runs] firings (0 clears) or, with [today], every firing left today; null trigger: all. */
+    fun skipRuns(id: String, trigger: String?, runs: Int?, today: Boolean): Routine = Routine.from(
+        obj("POST", "/api/routines/$id/skip", JSONObject().apply {
+            if (trigger != null) put("trigger", trigger)
+            if (runs != null) put("runs", runs)
+            put("today", today)
+        }),
+    )
+
     fun cancelFollowUp(id: String, triggerId: String) {
         obj("DELETE", "/api/routines/$id/later/$triggerId")
     }

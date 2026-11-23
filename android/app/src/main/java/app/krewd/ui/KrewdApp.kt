@@ -125,6 +125,8 @@ fun KrewdApp(viewModel: KrewdViewModel) {
     // The tab screens are what the nav bar's glass (Meniscus) shows through.
     val tabsBackdrop = rememberGlassBackdrop()
     val homeAsk = rememberHomeAsk()
+    // In-window menus (glass over the screen behind them) open here, over everything.
+    val menuHost = remember { GlassMenuHost() }
     val navGlass = remember(tabsBackdrop, glass.on) { if (glass.on) MeniscusGlass(tabsBackdrop) else null }
     CompositionLocalProvider(
         // The theme's text colour everywhere, glass included (white on dark, near-black on light).
@@ -132,6 +134,7 @@ fun KrewdApp(viewModel: KrewdViewModel) {
         LocalCodeWrap provides CodeWrap(state.codeWrap, viewModel::setCodeWrap),
         LocalKrewdGlass provides glass,
         LocalKrewdBackdrop provides if (glass.on) tabsBackdrop else null,
+        LocalGlassMenuHost provides menuHost,
     ) {
     ProvideGlass(
         clarity = state.glassClarity,
@@ -202,6 +205,14 @@ fun KrewdApp(viewModel: KrewdViewModel) {
                             bottom = MeniscusNavBarDefaults.BottomGap,
                         ),
                 )
+                // The new task: a glass sheet over the Krewd tab, outside its glass source and over the nav bar.
+                if (tab == Tab.Tasks && homeAsk.asking) NewTaskSheet(
+                    state, viewModel, homeAsk.engine,
+                    onDismiss = { homeAsk.asking = false },
+                    onOpenSettings = { viewModel.navigate(NavTab.SETTINGS) },
+                    inWindow = true,
+                    backdrop = if (glass.on) tabsBackdrop else null,
+                )
             }
         }
     }
@@ -230,6 +241,7 @@ fun KrewdApp(viewModel: KrewdViewModel) {
                 .padding(top = ShellDimensions.TITLE_PILL_TOP_GAP + ShellDimensions.TITLE_PILL_HEIGHT + 8.dp),
         )
     }
+    GlassMenuLayer(menuHost)
     }
     }
     }

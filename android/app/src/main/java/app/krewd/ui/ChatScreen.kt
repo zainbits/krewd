@@ -79,6 +79,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.zIndex
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
@@ -129,6 +130,7 @@ import app.krewd.data.TextItem
 import app.krewd.data.ToolItem
 import app.krewd.data.UserItem
 import app.krewd.data.Attachment
+import androidx.compose.ui.unit.Dp
 
 @Composable
 fun ChatScreen(state: UiState, viewModel: KrewdViewModel) {
@@ -175,8 +177,7 @@ fun ChatScreen(state: UiState, viewModel: KrewdViewModel) {
     val liveReply = remember(listState, liveKey) { LiveReply(liveKey) { !follow } }
 
     val bars = WindowInsets.statusBars.union(WindowInsets.displayCutout).asPaddingValues()
-    var settingsOpen by rememberSaveable(state.openSessionId) { mutableStateOf(false) }
-    // The title opened into its quick panel (models, effort); back, or a tap on the chat, folds it.
+    // The title opened into its quick panel (every chat setting); back, or a tap on the chat, folds it.
     var titleOpen by rememberSaveable(state.openSessionId) { mutableStateOf(false) }
     // The context ring's card above the composer.
     var contextOpen by remember(state.openSessionId) { mutableStateOf(false) }
@@ -196,6 +197,12 @@ fun ChatScreen(state: UiState, viewModel: KrewdViewModel) {
     // Height of everything pinned at the bottom (composer, chips, keyboard), measured, so the last message
     // always scrolls clear of the composer however tall it grows.
     var bottomStack by remember { mutableStateOf(ShellDimensions.COMPOSER_MIN_HEIGHT * 2) }
+    // The same stack at rest (keyboard closed, the composer one line tall: the smallest seen), and the screen's
+    // height: the quick panel ends as far above the go-to-latest button as that button is above this composer.
+    // A taller composer or the keyboard may cover the panel's end; it scrolls.
+    var restingStack by remember { mutableStateOf<Dp?>(null) }
+    var screenHeight by remember { mutableStateOf(0.dp) }
+    val imeOpen = WindowInsets.ime.getBottom(density) > 0
     // The strip of linked chats under the title (parent, side sessions, chats this one waits on), measured too.
     var stripHeight by remember(state.openSessionId) { mutableStateOf(0.dp) }
     var reviewing by remember(state.openSessionId) { mutableStateOf<String?>(null) }
@@ -240,7 +247,7 @@ fun ChatScreen(state: UiState, viewModel: KrewdViewModel) {
     // Liquid glass (Vitreous): the chat list is what the title bar and composer show through.
     val backdrop = rememberGlassBackdrop()
     val glassOn = LocalKrewdGlass.current.on
-    Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surface)) {
+    Box(Modifier.fillMaxSize().onSizeChanged { screenHeight = with(density) { it.height.toDp() } }.background(MaterialTheme.colorScheme.surface)) {
         // Rows that open and close keep their top edge in place (KeepInPlace.kt).
         val holdRow = remember(listState) { { key: Any -> listState.holdRow(key) } }
         // Everything the glass shows through: the chat.
@@ -277,11 +284,14 @@ fun ChatScreen(state: UiState, viewModel: KrewdViewModel) {
         }
         }
         }
-        // The picture-in-picture stays between the title bar and the composer, so it is drawn outside what the
-        // glass records: its live video would otherwise redraw the glass every frame.
+        // The picture-in-picture is drawn outside what the glass records (its live video would otherwise redraw
+        // the glass every frame) and above the title bar and composer, so nothing glass ever sits over it. While
+        // the title's panel, the context card, the Queue/Steer card or a file card is open it drops back under them.
         val pipTab = state.pipTab(session)
         if (session != null && pipTab != null) {
             val tab = state.browser?.tabs?.firstOrNull { it.id == pipTab } ?: session.browserTab?.takeIf { it.id == pipTab }
+            val pipOnTop = !titleOpen && !contextOpen && !deliveryOpen && peek == null
+            Box(Modifier.fillMaxSize().zIndex(if (pipOnTop) 1f else 0f)) {
             BrowserPip(
                 tabId = pipTab,
                 label = listOfNotNull(state.engine(session.engine)?.name, tab?.host?.ifBlank { null }).joinToString(" · "),
@@ -292,6 +302,7 @@ fun ChatScreen(state: UiState, viewModel: KrewdViewModel) {
                 onClose = { viewModel.hidePip(session.id, pipTab) },
                 onOpen = { viewModel.openBrowserAt(pipTab) },
             )
+            }
         }
 
         // Scrolled up from the bottom: one tap goes back down and follows the reply again.
@@ -322,11 +333,18 @@ fun ChatScreen(state: UiState, viewModel: KrewdViewModel) {
             )
         }
         Column(Modifier.align(Alignment.TopCenter).fillMaxWidth()) {
+            val navBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+            val resting = restingStack ?: (navBottom + ShellDimensions.COMPOSER_MARGIN * 2 + 96.dp)
+            // Go-to-latest sits 12 dp above the composer and is 44 dp tall; the panel stops 12 dp above it.
+            val panelMax = (screenHeight - bars.calculateTopPadding() - ShellDimensions.TITLE_PILL_TOP_GAP - resting - 12.dp - 44.dp - 12.dp)
+                .coerceAtLeast(ShellDimensions.TITLE_PILL_HEIGHT * 3)
             ChatTopBar(
                 state, viewModel, backdrop,
                 expanded = titleOpen,
+                maxHeight = panelMax,
                 onToggle = { titleOpen = !titleOpen },
-                onSettings = { titleOpen = false; settingsOpen = true },
+                onClose = { titleOpen = false },
+                onSideSession = { titleOpen = false; sideOpen = true },
             )
             if (session != null) {
                 LinkedChatsStrip(
@@ -338,24 +356,27 @@ fun ChatScreen(state: UiState, viewModel: KrewdViewModel) {
                 )
             }
         }
-        if (settingsOpen && session != null) {
-            ChatSettingsSheet(state, viewModel, session, onDismiss = { settingsOpen = false }, onSideSession = { settingsOpen = false; sideOpen = true })
-        }
         if (sideOpen && session != null) {
-            NewTaskSheet(state, viewModel, session.engine, onDismiss = { sideOpen = false }, onOpenSettings = {}, parent = session)
+            NewTaskSheet(state, viewModel, session.engine, onDismiss = { sideOpen = false }, onOpenSettings = {}, parent = session,
+                inWindow = true, backdrop = if (glassOn) backdrop else null)
         }
         reviewing?.let { id ->
             val proposal = state.proposals.firstOrNull { it.id == id }
                 ?: (state.timeline.firstOrNull { it is ProposalItem && it.proposal.id == id } as? ProposalItem)?.proposal
             if (proposal != null) {
-                NewTaskSheet(state, viewModel, proposal.engine ?: session?.engine, onDismiss = { reviewing = null }, onOpenSettings = {}, proposal = proposal)
+                NewTaskSheet(state, viewModel, proposal.engine ?: session?.engine, onDismiss = { reviewing = null }, onOpenSettings = {}, proposal = proposal,
+                    inWindow = true, backdrop = if (glassOn) backdrop else null)
             }
         }
 
         Column(
             Modifier
                 .align(Alignment.BottomCenter)
-                .onSizeChanged { bottomStack = with(density) { it.height.toDp() } }
+                .onSizeChanged {
+                    val h = with(density) { it.height.toDp() }
+                    bottomStack = h
+                    if (!imeOpen && session != null && h > ShellDimensions.COMPOSER_MIN_HEIGHT) restingStack = minOf(restingStack ?: h, h)
+                }
                 .windowInsetsPadding(WindowInsets.ime.union(WindowInsets.navigationBars))
                 .padding(ShellDimensions.COMPOSER_MARGIN),
         ) {
@@ -466,7 +487,7 @@ fun ChatScreen(state: UiState, viewModel: KrewdViewModel) {
 
 /**
  * Back, and the title with the agent and its settings under it. Tapping the title opens it into the quick
- * panel (models, effort, all settings; [ChatQuickPanel]) and tapping it again folds it. On liquid glass
+ * panel (every chat setting, scrolling, at most [maxHeight] tall; [ChatQuickPanel]) and tapping it again folds it. On liquid glass
  * (Vitreous) both pieces draw in one pass, can be pulled like liquid, merge when pulled together, and
  * their text turns dark over bright content.
  */
@@ -476,8 +497,10 @@ private fun ChatTopBar(
     viewModel: KrewdViewModel,
     backdrop: GlassBackdrop,
     expanded: Boolean,
+    maxHeight: Dp,
     onToggle: () -> Unit,
-    onSettings: () -> Unit,
+    onClose: () -> Unit,
+    onSideSession: () -> Unit,
 ) {
     val session = state.openSession
     val barModifier = Modifier
@@ -491,7 +514,9 @@ private fun ChatTopBar(
     val titleBody: @Composable () -> Unit = {
         Column(Modifier.animateContentSize(spring(dampingRatio = 0.86f, stiffness = Spring.StiffnessMediumLow))) {
             ChatTitle(state, expanded)
-            if (expanded && session != null) ChatQuickPanel(state, viewModel, session, onAllSettings = onSettings)
+            if (expanded && session != null) {
+                ChatQuickPanel(state, viewModel, session, onClose = onClose, onSideSession = onSideSession, modifier = Modifier.weight(1f, fill = false))
+            }
         }
     }
     if (!LocalKrewdGlass.current.on) {
@@ -509,7 +534,7 @@ private fun ChatTopBar(
                 color = MaterialTheme.colorScheme.surfaceContainerHigh,
                 border = androidx.compose.foundation.BorderStroke(ShellDimensions.PILL_BORDER_WIDTH, MaterialTheme.colorScheme.outlineVariant),
                 shadowElevation = 2.dp,
-                modifier = Modifier.weight(1f),
+                modifier = Modifier.weight(1f).heightIn(max = maxHeight),
             ) { titleBody() }
         }
         return
@@ -534,7 +559,7 @@ private fun ChatTopBar(
         }
         GlassSurface(
             backdrop = backdrop,
-            modifier = Modifier.weight(1f),
+            modifier = Modifier.weight(1f).heightIn(max = maxHeight),
             shape = GlassShape.rounded(26.dp),
             elastic = true,
             onClick = onToggle,

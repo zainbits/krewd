@@ -6,6 +6,8 @@ import androidx.compose.material3.LocalContentColor
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -185,9 +187,16 @@ private fun RoutineCard(routine: Routine, chatStatus: String?, engineName: Strin
                 Switch(checked = routine.enabled, onCheckedChange = onToggle)
             }
             Text(
-                routine.scheduleText + if (routine.enabled) " · next ${whenText(routine.nextRunAt)} (${untilText(routine.nextRunAt)})" else " · paused",
+                routine.scheduleText,
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                nextLine(routine),
+                style = MaterialTheme.typography.labelMedium,
+                color = if (routine.skipping && routine.enabled) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.onSurfaceVariant,
             )
             val last = routine.lastRun
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -214,13 +223,35 @@ private fun RoutineCard(routine: Routine, chatStatus: String?, engineName: Strin
     }
 }
 
-/** One routine's page: schedule, instructions and every run (tap a run to see it in the chat). */
+/** "Next Tue 24 Nov, 09:55 (in 23 h) · skipping 2", or "Paused". */
+private fun nextLine(routine: Routine): String {
+    if (!routine.enabled) return "Paused"
+    val skipped = routine.cronTriggers.sumOf { it.skipRuns }
+    val next = routine.nextLiveAt?.let { "Next ${whenText(it)} (${untilText(it)})" } ?: "No coming runs"
+    return next + if (skipped > 0) " · skipping $skipped" else ""
+}
+
+/** Which part of a routine an editor changes: everything (a new routine) or one section of its page. */
+private enum class EditPart { ALL, SCHEDULE, INSTRUCTIONS, AGENT }
+
+/** How many runs a routine's page lists before "Show all". */
+private const val RUNS_SHOWN = 5
+
+/**
+ * One routine's page, as an overview: status, schedule with skips and what comes next, then instructions and
+ * notes folded to a few lines (tap to read them whole), then the latest runs. Each section edits on its own.
+ */
 @Composable
 fun RoutineScreen(state: UiState, viewModel: KrewdViewModel, listState: androidx.compose.foundation.lazy.LazyListState) {
     val routine = state.openRoutine
-    var editing by remember { mutableStateOf(false) }
+    var editing by remember { mutableStateOf<EditPart?>(null) }
     var editingNotes by remember { mutableStateOf(false) }
+    var renaming by remember { mutableStateOf(false) }
+    var skipping by remember { mutableStateOf(false) }
+    var reading by remember { mutableStateOf<String?>(null) }
+    var allRuns by remember(routine?.id) { mutableStateOf(false) }
     var confirmDelete by remember { mutableStateOf(false) }
+    var menuOpen by remember(routine?.id) { mutableStateOf(false) }
     val bars = WindowInsets.statusBars.union(WindowInsets.displayCutout).asPaddingValues()
     val bottom = WindowInsets.systemBars.asPaddingValues().calculateBottomPadding()
     // The page scrolls under its glass top bar.
@@ -245,23 +276,18 @@ fun RoutineScreen(state: UiState, viewModel: KrewdViewModel, listState: androidx
                 ),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
-                item(key = "schedule") {
+                item(key = "status") {
                     SectionCard {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                                 Text(if (routine.enabled) "On" else "Paused", style = MaterialTheme.typography.titleMedium)
                                 Text(
-                                    routine.timezone + " · " + if (routine.enabled) "next ${whenText(routine.nextRunAt)} (${untilText(routine.nextRunAt)})" else "no scheduled runs until you turn it on",
+                                    if (routine.enabled) nextLine(routine) else "No scheduled runs until you turn it on",
                                     style = MaterialTheme.typography.labelMedium,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    color = if (routine.skipping && routine.enabled) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
                             }
                             Switch(checked = routine.enabled, onCheckedChange = { viewModel.setRoutineEnabled(routine.id, it) }, enabled = online)
-                        }
-                        Text("Triggers", style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(top = 4.dp))
-                        routine.cronTriggers.forEach { TriggerLine(it, routine.enabled) }
-                        routine.followUps.forEach { follow ->
-                            FollowUpLine(follow, onCancel = { viewModel.cancelFollowUp(routine.id, follow.id) }, enabled = online)
                         }
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             var runMenu by remember { mutableStateOf(false) }
@@ -274,12 +300,13 @@ fun RoutineScreen(state: UiState, viewModel: KrewdViewModel, listState: androidx
                                     Spacer(Modifier.width(6.dp))
                                     Text(if (busy) "Running" else "Run now")
                                 }
-                                DropdownMenu(expanded = runMenu, onDismissRequest = { runMenu = false }) {
+                                KrewdMenu(expanded = runMenu, onDismiss = { runMenu = false }, backdrop = if (glassOn) backdrop else null, width = 220.dp) {
+                                    KrewdMenuHeader("Run now as")
                                     routine.cronTriggers.forEach { t ->
-                                        DropdownMenuItem(text = { Text("Run as ${t.name}") }, onClick = {
+                                        KrewdMenuItem(t.name, t.scheduleText) {
                                             runMenu = false
                                             viewModel.runRoutine(routine.id, t.name)
-                                        })
+                                        }
                                     }
                                 }
                             }
@@ -289,46 +316,66 @@ fun RoutineScreen(state: UiState, viewModel: KrewdViewModel, listState: androidx
                                 Text("Latest chat")
                             }
                         }
-                        Text(
-                            listOfNotNull(
-                                "Agent: ${state.engine(routine.engine)?.name ?: routine.engine}",
-                                if (routine.autoApprove) "auto-approve on" else "you OK agent prompts",
-                                if (routine.createdBy == "agent") "made by Krewd" else null,
-                            ).joinToString(" · "),
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                listOfNotNull(
+                                    "Agent: ${state.engine(routine.engine)?.name ?: routine.engine}",
+                                    if (routine.autoApprove) "auto-approve on" else "you OK agent prompts",
+                                    if (routine.createdBy == "agent") "made by Krewd" else null,
+                                ).joinToString(" · "),
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.weight(1f),
+                            )
+                            IconButton(onClick = { editing = EditPart.AGENT }, enabled = online) {
+                                Icon(painterResource(R.drawable.ic_edit_24), contentDescription = "Change agent", modifier = Modifier.size(20.dp))
+                            }
+                        }
+                    }
+                }
+                item(key = "schedule") {
+                    SectionCard {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("Schedule · ${routine.timezone}", style = MaterialTheme.typography.labelLarge, modifier = Modifier.weight(1f))
+                            TextButton(onClick = { skipping = true }, enabled = online && routine.enabled) { Text("Skip…") }
+                            IconButton(onClick = { editing = EditPart.SCHEDULE }, enabled = online) {
+                                Icon(painterResource(R.drawable.ic_edit_24), contentDescription = "Edit schedule")
+                            }
+                        }
+                        routine.cronTriggers.forEach { t ->
+                            TriggerLine(t, routine.enabled, onUndoSkip = { viewModel.skipRoutineRuns(routine.id, t.name, 0) }, online = online)
+                        }
+                        routine.followUps.forEach { follow ->
+                            FollowUpLine(follow, onCancel = { viewModel.cancelFollowUp(routine.id, follow.id) }, enabled = online)
+                        }
+                        if (routine.enabled && routine.upcoming.isNotEmpty()) {
+                            Text("Coming up", style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(top = 4.dp))
+                            val several = routine.cronTriggers.size > 1
+                            // Every skipped firing, then enough real ones to show what runs next.
+                            val shown = routine.upcoming.filter { it.skipped } + routine.upcoming.filterNot { it.skipped }.take(3)
+                            shown.sortedBy { it.at }.forEach { u -> UpcomingLine(u, several) }
+                        }
                     }
                 }
                 item(key = "instructions") {
-                    SectionCard {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text("Instructions · v${routine.version}", style = MaterialTheme.typography.labelLarge, modifier = Modifier.weight(1f))
-                            IconButton(onClick = { editing = true }, enabled = online) {
-                                Icon(painterResource(R.drawable.ic_edit_24), contentDescription = "Edit routine")
-                            }
-                        }
-                        SelectionContainer { Text(routine.instructions, style = MaterialTheme.typography.bodyMedium) }
-                    }
+                    FoldedTextCard(
+                        title = "Instructions · v${routine.version}",
+                        text = routine.instructions,
+                        empty = "No instructions.",
+                        onOpen = { reading = "instructions" },
+                        onEdit = { editing = EditPart.INSTRUCTIONS },
+                        editEnabled = online,
+                    )
                 }
                 item(key = "notes") {
-                    SectionCard {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text("Notes · what Krewd learned", style = MaterialTheme.typography.labelLarge, modifier = Modifier.weight(1f))
-                            IconButton(onClick = { editingNotes = true }, enabled = online) {
-                                Icon(painterResource(R.drawable.ic_edit_24), contentDescription = "Edit notes")
-                            }
-                        }
-                        if (routine.notes.isBlank()) {
-                            Text(
-                                "Nothing yet. Each run reads these, and Krewd adds what it learns (links, where buttons are, exact names). You can edit them too.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        } else {
-                            SelectionContainer { Text(routine.notes, style = MaterialTheme.typography.bodyMedium) }
-                        }
-                    }
+                    FoldedTextCard(
+                        title = "Notes · what Krewd learned",
+                        text = routine.notes,
+                        empty = "Nothing yet. Each run reads these, and Krewd adds what it learns (links, where buttons are, exact names). You can edit them too.",
+                        onOpen = { reading = "notes" },
+                        onEdit = { editingNotes = true },
+                        editEnabled = online,
+                    )
                 }
                 item(key = "runs-title") {
                     Column(Modifier.padding(start = 8.dp, top = 6.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
@@ -350,8 +397,15 @@ fun RoutineScreen(state: UiState, viewModel: KrewdViewModel, listState: androidx
                         Text("No runs yet.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(8.dp))
                     }
                 } else {
-                    items(runs, key = { it.id }) { run ->
+                    items(if (allRuns) runs else runs.take(RUNS_SHOWN), key = { it.id }) { run ->
                         RunRow(run, onClick = { viewModel.openRoutineChat(routine, run) })
+                    }
+                    if (runs.size > RUNS_SHOWN) {
+                        item(key = "runs-more") {
+                            TextButton(onClick = { allRuns = !allRuns }, modifier = Modifier.fillMaxWidth()) {
+                                Text(if (allRuns) "Show fewer" else "Show all ${runs.size} runs")
+                            }
+                        }
                     }
                 }
             }
@@ -359,16 +413,61 @@ fun RoutineScreen(state: UiState, viewModel: KrewdViewModel, listState: androidx
         CompositionLocalProvider(LocalKrewdBackdrop provides if (glassOn && routine != null) backdrop else null) {
             RoutineTopBar(
                 title = routine?.title ?: "Routine",
-                enabled = routine?.enabled,
+                showMenu = routine != null,
                 onBack = viewModel::closeRoutine,
-                onEdit = { editing = true },
-                onToggle = { routine?.let { viewModel.setRoutineEnabled(it.id, !it.enabled) } },
-                onDelete = { confirmDelete = true },
+                onMenu = { menuOpen = !menuOpen },
+            )
+        }
+        if (menuOpen && routine != null) {
+            BackHandler { menuOpen = false }
+            Box(
+                Modifier.fillMaxSize().clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) {
+                    menuOpen = false
+                },
+            )
+            RoutineMenuCard(
+                backdrop = if (glassOn) backdrop else null,
+                enabled = routine.enabled,
+                onRename = { menuOpen = false; renaming = true },
+                onSkip = { menuOpen = false; skipping = true },
+                onToggle = { menuOpen = false; viewModel.setRoutineEnabled(routine.id, !routine.enabled) },
+                onDelete = { menuOpen = false; confirmDelete = true },
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(
+                        top = bars.calculateTopPadding() + ShellDimensions.TITLE_PILL_TOP_GAP + ShellDimensions.TITLE_PILL_HEIGHT + 8.dp,
+                        end = ShellDimensions.TITLE_PILL_START_MARGIN,
+                    ),
             )
         }
     }
-    if (editing && routine != null) {
-        RoutineEditor(state, viewModel, existing = routine, onDismiss = { editing = false }, onSaved = { editing = false })
+    if (routine != null) {
+        editing?.let { part ->
+            RoutineEditor(state, viewModel, existing = routine, part = part, onDismiss = { editing = null }, onSaved = { editing = null })
+        }
+        reading?.let { which ->
+            val isNotes = which == "notes"
+            TextReader(
+                title = if (isNotes) "Notes" else "Instructions · v${routine.version}",
+                text = if (isNotes) routine.notes else routine.instructions,
+                onDismiss = { reading = null },
+                onEdit = {
+                    reading = null
+                    if (isNotes) editingNotes = true else editing = EditPart.INSTRUCTIONS
+                },
+            )
+        }
+        if (skipping) {
+            SkipSheet(routine, backdrop = if (glassOn) backdrop else null, onDismiss = { skipping = false }, onSkip = { trigger, runs, today ->
+                viewModel.skipRoutineRuns(routine.id, trigger, runs, today)
+            })
+        }
+        if (renaming) {
+            RenameDialog(routine.title, onDismiss = { renaming = false }, onSave = { title ->
+                renaming = false
+                viewModel.saveRoutine(routine.id, JSONObject().put("title", title))
+            })
+        }
     }
     if (editingNotes && routine != null) {
         NotesEditor(routine.notes, onDismiss = { editingNotes = false }, onSave = {
@@ -392,16 +491,165 @@ fun RoutineScreen(state: UiState, viewModel: KrewdViewModel, listState: androidx
     }
 }
 
+/** Long text folded to a few lines; tap it to read it whole, the pencil to edit. */
 @Composable
-private fun RoutineTopBar(
-    title: String,
-    enabled: Boolean?,
-    onBack: () -> Unit,
-    onEdit: () -> Unit,
-    onToggle: () -> Unit,
-    onDelete: () -> Unit,
+private fun FoldedTextCard(title: String, text: String, empty: String, onOpen: () -> Unit, onEdit: () -> Unit, editEnabled: Boolean) {
+    val lines = remember(text) { text.lines().size }
+    val long = lines > FOLDED_LINES || text.length > 360
+    SectionCard {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(title, style = MaterialTheme.typography.labelLarge, modifier = Modifier.weight(1f))
+            IconButton(onClick = onEdit, enabled = editEnabled) {
+                Icon(painterResource(R.drawable.ic_edit_24), contentDescription = "Edit")
+            }
+        }
+        if (text.isBlank()) {
+            Text(empty, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        } else {
+            Column(Modifier.fillMaxWidth().clickable(enabled = long, onClick = onOpen), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text(text, style = MaterialTheme.typography.bodyMedium, maxLines = FOLDED_LINES, overflow = TextOverflow.Ellipsis)
+                if (long) {
+                    Text(
+                        "Read all · $lines lines",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                }
+            }
+        }
+    }
+}
+
+private const val FOLDED_LINES = 5
+
+/** A routine's instructions or notes, whole, on their own screen. */
+@Composable
+private fun TextReader(title: String, text: String, onDismiss: () -> Unit, onEdit: () -> Unit) {
+    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)) {
+        Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surface) {
+            Column(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.systemBars)) {
+                Row(Modifier.padding(horizontal = 8.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(onClick = onDismiss) { Icon(painterResource(R.drawable.ic_chevron_left_24), contentDescription = "Back") }
+                    Text(title, style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    FilledTonalButton(onClick = onEdit) {
+                        Icon(painterResource(R.drawable.ic_edit_24), contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Edit")
+                    }
+                }
+                HorizontalDivider()
+                SelectionContainer(Modifier.weight(1f).fillMaxWidth()) {
+                    Text(
+                        text,
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 20.dp, vertical = 16.dp),
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** Skip coming runs: of every trigger or one, the rest of today or the next few firings. */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun SkipSheet(
+    routine: Routine,
+    backdrop: io.github.zainbits.cohesion.GlassBackdrop?,
+    onDismiss: () -> Unit,
+    onSkip: (trigger: String?, runs: Int?, today: Boolean) -> Unit,
 ) {
-    var menuOpen by remember { mutableStateOf(false) }
+    val triggers = routine.cronTriggers.filter { it.enabled }
+    var trigger by remember { mutableStateOf<String?>(null) }
+    val chosen = triggers.filter { trigger == null || it.name == trigger }
+    val current = chosen.sumOf { it.skipRuns }
+    val sheet = rememberGlassSheetState()
+    val pick: (String?, Int?, Boolean) -> Unit = { t, n, today -> onSkip(t, n, today); sheet.close() }
+    GlassSheet(backdrop = backdrop, onDismiss = onDismiss, state = sheet) {
+            Column(Modifier.padding(start = 16.dp, end = 16.dp, bottom = 16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("Skip runs", style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(start = 4.dp))
+                Text(
+                    "Skipped firings are logged as skipped and the routine carries on by itself after them. Pausing stops it until you turn it back on.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = LocalContentColor.current.copy(alpha = 0.75f),
+                    modifier = Modifier.padding(start = 4.dp),
+                )
+                if (triggers.size > 1) {
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        FilterChip(selected = trigger == null, onClick = { trigger = null }, label = { Text("All triggers") })
+                        triggers.forEach { t ->
+                            FilterChip(selected = trigger == t.name, onClick = { trigger = t.name }, label = { Text(t.name) })
+                        }
+                    }
+                }
+                SkipOption("Rest of today", "Every run left today, and any retry still waiting") { pick(trigger, null, true) }
+                SkipOption("Next run", nextOf(routine, trigger)) { pick(trigger, 1, false) }
+                listOf(2, 3, 5).forEach { n -> SkipOption("Next $n runs", null) { pick(trigger, n, false) } }
+                if (current > 0) {
+                    SkipOption("Don't skip", "Undo: skipping $current now", danger = true) { pick(trigger, 0, false) }
+                }
+            }
+    }
+}
+
+/** When the next firing of [trigger] (or of any trigger) is, for the "Next run" option. */
+private fun nextOf(routine: Routine, trigger: String?): String? =
+    routine.upcoming.firstOrNull { (trigger == null || it.trigger == trigger) && !it.skipped }?.let {
+        (if (trigger == null && routine.cronTriggers.size > 1) "${it.trigger} · " else "") + whenText(it.at)
+    }
+
+@Composable
+private fun SkipOption(label: String, detail: String?, danger: Boolean = false, onClick: () -> Unit) {
+    Surface(
+        modifier = Modifier.fillMaxWidth().clickable(onClick = onClick),
+        shape = RoundedCornerShape(16.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerHighest,
+        contentColor = MaterialTheme.colorScheme.onSurface,
+    ) {
+        Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+            Text(label, style = MaterialTheme.typography.titleSmall, color = if (danger) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface)
+            detail?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+        }
+    }
+}
+
+/** One coming firing; skipped ones are struck through. */
+@Composable
+private fun UpcomingLine(u: app.krewd.data.UpcomingRun, several: Boolean) {
+    val color = if (u.skipped) MaterialTheme.colorScheme.outline else MaterialTheme.colorScheme.onSurface
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(
+            whenText(u.at) + if (several) " · ${u.trigger}" else "",
+            style = MaterialTheme.typography.bodySmall.copy(
+                textDecoration = if (u.skipped) androidx.compose.ui.text.style.TextDecoration.LineThrough else null,
+            ),
+            color = color,
+            modifier = Modifier.weight(1f),
+        )
+        Text(
+            if (u.skipped) "skipped" else untilText(u.at),
+            style = MaterialTheme.typography.labelSmall,
+            color = if (u.skipped) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+@Composable
+private fun RenameDialog(initial: String, onDismiss: () -> Unit, onSave: (String) -> Unit) {
+    var text by remember { mutableStateOf(initial) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Rename routine") },
+        text = {
+            OutlinedTextField(value = text, onValueChange = { text = it.take(120) }, singleLine = true, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp))
+        },
+        confirmButton = { TextButton(onClick = { onSave(text.trim()) }, enabled = text.isNotBlank() && text.trim() != initial) { Text("Save") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
+@Composable
+private fun RoutineTopBar(title: String, showMenu: Boolean, onBack: () -> Unit, onMenu: () -> Unit) {
     // Back, title and options: one liquid glass bar, like the chat's.
     LiquidRow(
         modifier = Modifier
@@ -414,15 +662,47 @@ private fun RoutineTopBar(
         KrewdPill(Modifier.weight(1f)) {
             Text(title, style = MaterialTheme.typography.titleMedium, color = LocalContentColor.current, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(horizontal = 16.dp))
         }
-        if (enabled != null) Box {
-            KrewdIconPill(onClick = { menuOpen = true }, icon = R.drawable.ic_more_24, contentDescription = "Routine options")
-            DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                DropdownMenuItem(text = { Text("Edit") }, onClick = { menuOpen = false; onEdit() })
-                DropdownMenuItem(text = { Text(if (enabled) "Pause" else "Resume") }, onClick = { menuOpen = false; onToggle() })
-                HorizontalDivider()
-                DropdownMenuItem(text = { Text("Delete routine", color = MaterialTheme.colorScheme.error) }, onClick = { menuOpen = false; onDelete() })
+        if (showMenu) KrewdIconPill(onClick = onMenu, icon = R.drawable.ic_more_24, contentDescription = "Routine options")
+    }
+}
+
+/** The routine's options: a glass card under the top bar (plain while the glass is off), like the chat's cards. */
+@Composable
+private fun RoutineMenuCard(
+    backdrop: io.github.zainbits.cohesion.GlassBackdrop?,
+    enabled: Boolean,
+    onRename: () -> Unit,
+    onSkip: () -> Unit,
+    onToggle: () -> Unit,
+    onDelete: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val body: @Composable () -> Unit = {
+        val ink = LocalContentColor.current
+        Column(Modifier.padding(vertical = 8.dp)) {
+            @Composable
+            fun Option(label: String, hint: String?, color: androidx.compose.ui.graphics.Color = ink, onClick: () -> Unit) {
+                Column(Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 18.dp, vertical = 10.dp)) {
+                    Text(label, style = MaterialTheme.typography.bodyLarge, color = color)
+                    hint?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = ink.copy(alpha = 0.7f)) }
+                }
             }
+            Option("Rename", null, onClick = onRename)
+            if (enabled) Option("Skip runs…", "Today, or the next few; it carries on after", onClick = onSkip)
+            Option(if (enabled) "Pause" else "Resume", if (enabled) "No runs until you turn it back on" else null, onClick = onToggle)
+            HorizontalDivider(Modifier.padding(vertical = 4.dp), color = ink.copy(alpha = 0.15f))
+            Option("Delete routine", null, color = MaterialTheme.colorScheme.error, onClick = onDelete)
         }
+    }
+    if (backdrop != null) {
+        io.github.zainbits.vitreous.GlassSurface(backdrop = backdrop, modifier = modifier.width(240.dp), shape = io.github.zainbits.vitreous.GlassShape.rounded(22.dp)) { body() }
+    } else {
+        Surface(
+            modifier = modifier.width(240.dp),
+            shape = RoundedCornerShape(22.dp),
+            color = MaterialTheme.colorScheme.surfaceContainerHighest,
+            shadowElevation = 3.dp,
+        ) { body() }
     }
 }
 
@@ -477,7 +757,7 @@ fun RunChip(status: String) {
 }
 
 @Composable
-private fun TriggerLine(t: RoutineTrigger, routineOn: Boolean) {
+private fun TriggerLine(t: RoutineTrigger, routineOn: Boolean, onUndoSkip: () -> Unit, online: Boolean) {
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
         Icon(
             painterResource(R.drawable.ic_schedule_24),
@@ -494,11 +774,23 @@ private fun TriggerLine(t: RoutineTrigger, routineOn: Boolean) {
                 listOfNotNull(
                     t.schedule,
                     if (t.maxAttempts > 1) "up to ${t.maxAttempts} tries" else "1 try",
-                    if (!t.enabled) "off" else if (routineOn) "next ${whenText(t.nextRunAt)}" else null,
+                    if (!t.enabled) "off" else null,
                 ).joinToString(" · "),
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+        }
+        if (t.skipRuns > 0 && t.enabled) {
+            Surface(shape = CircleShape, color = MaterialTheme.colorScheme.tertiaryContainer, modifier = Modifier.clickable(enabled = online, onClick = onUndoSkip)) {
+                Row(Modifier.padding(start = 10.dp, end = 6.dp, top = 4.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "Skip ${t.skipRuns}",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onTertiaryContainer,
+                    )
+                    Icon(painterResource(R.drawable.ic_close_24), contentDescription = "Don't skip", tint = MaterialTheme.colorScheme.onTertiaryContainer, modifier = Modifier.padding(start = 2.dp).size(16.dp))
+                }
+            }
         }
     }
 }
@@ -621,10 +913,24 @@ private val PRESETS = listOf(
     "Every hour" to "0 * * * *",
 )
 
-/** Create or edit a routine, full screen. The schedule is checked on the server as you type. */
+/**
+ * Create a routine (every field), or edit one section of it ([part]): only that section is shown and saved.
+ * The schedule is checked on the server as you type.
+ */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun RoutineEditor(state: UiState, viewModel: KrewdViewModel, existing: Routine?, onDismiss: () -> Unit, onSaved: (Routine) -> Unit) {
+private fun RoutineEditor(
+    state: UiState,
+    viewModel: KrewdViewModel,
+    existing: Routine?,
+    part: EditPart = EditPart.ALL,
+    onDismiss: () -> Unit,
+    onSaved: (Routine) -> Unit,
+) {
+    val all = part == EditPart.ALL || existing == null
+    val showSchedule = all || part == EditPart.SCHEDULE
+    val showInstructions = all || part == EditPart.INSTRUCTIONS
+    val showAgent = all || part == EditPart.AGENT
     var title by remember { mutableStateOf(existing?.title ?: "") }
     val drafts = remember {
         mutableStateListOf<TriggerDraft>().apply {
@@ -648,12 +954,12 @@ private fun RoutineEditor(state: UiState, viewModel: KrewdViewModel, existing: R
     }
     var note by remember { mutableStateOf("") }
     var saving by remember { mutableStateOf(false) }
-    var engineMenu by remember { mutableStateOf(false) }
 
     val names = drafts.map { it.name.trim().lowercase() }
-    val valid = title.isNotBlank() && instructions.isNotBlank() && drafts.isNotEmpty() &&
+    val scheduleOk = drafts.isNotEmpty() &&
         drafts.all { it.schedule.isNotBlank() && it.name.isNotBlank() && badSchedules[it.key] != true } &&
         names.toSet().size == names.size
+    val valid = (!all || title.isNotBlank()) && (!showInstructions || instructions.isNotBlank()) && (!showSchedule || scheduleOk)
 
     Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)) {
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surface) {
@@ -667,31 +973,46 @@ private fun RoutineEditor(state: UiState, viewModel: KrewdViewModel, existing: R
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     IconButton(onClick = onDismiss) { Icon(painterResource(R.drawable.ic_close_24), contentDescription = "Cancel") }
-                    Text(if (existing == null) "New routine" else "Edit routine", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
+                    Text(
+                        when {
+                            existing == null -> "New routine"
+                            part == EditPart.SCHEDULE -> "Schedule"
+                            part == EditPart.INSTRUCTIONS -> "Instructions"
+                            part == EditPart.AGENT -> "Agent"
+                            else -> "Edit routine"
+                        },
+                        style = MaterialTheme.typography.titleLarge,
+                        modifier = Modifier.weight(1f),
+                    )
                     Button(
                         enabled = valid && !saving,
                         onClick = {
                             saving = true
                             val fields = JSONObject()
-                                .put("title", title.trim())
-                                .put("triggers", JSONArray(drafts.map {
+                            if (all) fields.put("title", title.trim())
+                            if (showSchedule) {
+                                fields.put("triggers", JSONArray(drafts.map {
                                     JSONObject().put("name", it.name.trim().lowercase()).put("schedule", it.schedule.trim())
                                         .put("max_attempts", it.attempts).put("enabled", it.enabled)
                                 }))
-                                .put("instructions", instructions.trim())
-                                .put("auto_approve", autoApprove)
-                            engineId?.let { fields.put("engine", it) }
-                            fields.put("config", JSONObject(picks))
+                            }
+                            if (showInstructions) fields.put("instructions", instructions.trim())
+                            if (showAgent) {
+                                fields.put("auto_approve", autoApprove)
+                                engineId?.let { fields.put("engine", it) }
+                                fields.put("config", JSONObject(picks))
+                            }
                             if (existing != null && note.isNotBlank()) fields.put("note", note.trim())
                             // A refused save shows its reason as a message, and the owner can try again.
                             viewModel.saveRoutine(existing?.id, fields, failed = { saving = false }) { saving = false; onSaved(it) }
                         },
                     ) { Text("Save") }
                 }
-                OutlinedTextField(
+                if (all) OutlinedTextField(
                     value = title, onValueChange = { title = it }, label = { Text("Title") },
                     singleLine = true, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp),
                 )
+                if (showSchedule) {
                 Text("Triggers: when it runs", style = MaterialTheme.typography.labelLarge)
                 drafts.forEachIndexed { index, draft ->
                     TriggerDraftCard(
@@ -720,57 +1041,53 @@ private fun RoutineEditor(state: UiState, viewModel: KrewdViewModel, existing: R
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                OutlinedTextField(
+                }
+                if (showInstructions) OutlinedTextField(
                     value = instructions, onValueChange = { instructions = it }, label = { Text("Instructions") },
-                    minLines = 6, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp),
+                    minLines = if (all) 6 else 14, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp),
                     placeholder = { Text("What should Krewd do on each run? Say what needs your review before it submits anything.") },
                 )
-                if (existing != null) {
+                if (existing != null && (showSchedule || showInstructions)) {
                     OutlinedTextField(
                         value = note, onValueChange = { note = it }, label = { Text("What changed (optional, kept with the version)") },
                         singleLine = true, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp),
                     )
                 }
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("Agent", style = MaterialTheme.typography.labelLarge, modifier = Modifier.weight(1f))
-                    Box {
-                        OutlinedButton(onClick = { engineMenu = true }) { Text(state.engine(engineId)?.name ?: engineId ?: "Default") }
-                        DropdownMenu(expanded = engineMenu, onDismissRequest = { engineMenu = false }) {
-                            state.engines.forEach { engine ->
-                                DropdownMenuItem(text = { Text(engine.name) }, onClick = { engineId = engine.id; engineMenu = false })
-                            }
-                        }
-                    }
-                }
-                if (options.isNotEmpty()) {
-                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        options.forEach { option ->
-                            ConfigChip(
-                                option = option,
-                                selected = picks[option.id] ?: option.current,
-                                enabled = true,
-                                onPick = { value -> picks = picks + (option.id to value) },
-                            )
-                        }
-                    }
-                }
+                if (showAgent) {
+                // The same controls as the new-task sheet: agents as face cards, models as cards that scroll
+                // sideways, effort as a slider, modes and on/off settings as they are, auto-approve as a switch.
+                SheetLabel("Who")
+                CrewPicker(crewMembers(state), engineId, onPick = { engineId = it })
                 if (existing != null && engineId != existing.engine) {
                     Text(
                         "The routine's chat moves to this agent: the current agent writes a handover first, and switching back later resumes its own session.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.tertiary,
+                        modifier = Modifier.padding(start = 4.dp, top = 6.dp),
                     )
                 }
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f)) {
-                        Text("Auto-approve", style = MaterialTheme.typography.labelLarge)
-                        Text(
-                            if (autoApprove) "Agent prompts are answered for you during runs" else "You OK each agent prompt (runs wait for you)",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                    Switch(checked = autoApprove, onCheckedChange = { autoApprove = it })
+                if (options.isEmpty()) {
+                    Text(
+                        "${state.engine(engineId)?.name ?: "This agent"} has not listed its settings yet. They appear here once it has started.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(start = 4.dp, top = 10.dp),
+                    )
+                }
+                AgentOptions(
+                    options = options,
+                    selected = { picks[it.id] ?: it.current },
+                    enabled = true,
+                    onPick = { option, value -> picks = picks + (option.id to value) },
+                    autoApprove = autoApprove,
+                    onAutoApprove = { autoApprove = it },
+                )
+                Text(
+                    if (autoApprove) "During runs, agent prompts are answered for you." else "During runs, you OK each agent prompt (the run waits for you).",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(start = 4.dp, top = 6.dp),
+                )
                 }
                 Spacer(Modifier.padding(bottom = 24.dp))
             }

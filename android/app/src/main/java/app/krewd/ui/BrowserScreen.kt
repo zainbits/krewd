@@ -408,12 +408,24 @@ private fun TabPill(tab: BrowserTab, selected: Boolean, actions: TabActions) {
                 if (tab.sessionId != null) Box(Modifier.size(7.dp).background(MaterialTheme.colorScheme.tertiary, CircleShape))
             }
         }
-        TabMenu(tab, menu, onDismiss = { menu = false }, actions)
+        TabMenu(tab, menu, onDismiss = { menu = false }, actions, glass = true)
     }
 }
 
 @Composable
-private fun TabMenu(tab: BrowserTab, open: Boolean, onDismiss: () -> Unit, actions: TabActions) {
+private fun TabMenu(tab: BrowserTab, open: Boolean, onDismiss: () -> Unit, actions: TabActions, glass: Boolean = false) {
+    // On the tab strip: a glass card over the page. In the All tabs sheet (another window) the plain menu.
+    if (glass) {
+        KrewdMenu(expanded = open, onDismiss = onDismiss, backdrop = LocalKrewdBackdrop.current, width = 260.dp) {
+            KrewdMenuHeader(tab.title.ifBlank { tab.host })
+            KrewdMenuItem("Add to chat", "Tell a task to use this tab") { onDismiss(); actions.onAddToChat(tab) }
+            KrewdMenuItem("Show in chat", "Picture-in-picture on a task") { onDismiss(); actions.onPip(tab) }
+            KrewdMenuItem("Copy link") { onDismiss(); actions.onCopy(tab) }
+            KrewdMenuDivider()
+            KrewdMenuItem("Close tab") { onDismiss(); actions.onClose(tab) }
+        }
+        return
+    }
     DropdownMenu(expanded = open, onDismissRequest = onDismiss) {
         Text(
             tab.title.ifBlank { tab.host },
@@ -618,19 +630,19 @@ private fun ControlsRow(
         }
         Box(Modifier.padding(start = gap)) {
             KrewdIconPill(onClick = { menu = true }, icon = R.drawable.ic_more_24, contentDescription = "Browser options", size = SMALL_PILL)
-            DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                Text("Display", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp))
-                CheckRow("Horizontal (1080p)", !vertical, enabled = !viewOnly) { menu = false; onVertical(false) }
-                CheckRow("Vertical (fits the phone)", vertical, enabled = !viewOnly) { menu = false; onVertical(true) }
-                CheckRow("High quality (60 fps)", highQuality) { menu = false; onHighQuality(!highQuality) }
-                HorizontalDivider()
-                Text("Input", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp))
-                CheckRow("Cursor", cursor) { menu = false; onCursor(true) }
-                CheckRow("Touch", !cursor) { menu = false; onCursor(false) }
-                HorizontalDivider()
-                DropdownMenuItem(text = { Text("Keyboard") }, enabled = !viewOnly, onClick = { menu = false; onKeyboard() })
-                HorizontalDivider()
-                DropdownMenuItem(text = { Text("Location…") }, onClick = { menu = false; onLocation() })
+            // A glass card over the live page, like the chat's cards.
+            KrewdMenu(expanded = menu, onDismiss = { menu = false }, backdrop = LocalKrewdBackdrop.current, width = 260.dp) {
+                KrewdMenuHeader("Display")
+                KrewdMenuItem("Horizontal (1080p)", checked = !vertical, enabled = !viewOnly) { menu = false; onVertical(false) }
+                KrewdMenuItem("Vertical (fits the phone)", checked = vertical, enabled = !viewOnly) { menu = false; onVertical(true) }
+                KrewdMenuItem("High quality (60 fps)", checked = highQuality) { menu = false; onHighQuality(!highQuality) }
+                KrewdMenuDivider()
+                KrewdMenuHeader("Input")
+                KrewdMenuItem("Cursor", checked = cursor) { menu = false; onCursor(true) }
+                KrewdMenuItem("Touch", checked = !cursor) { menu = false; onCursor(false) }
+                KrewdMenuDivider()
+                KrewdMenuItem("Keyboard", enabled = !viewOnly) { menu = false; onKeyboard() }
+                KrewdMenuItem("Location…") { menu = false; onLocation() }
             }
         }
     }

@@ -59,6 +59,8 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.krewd.KrewdViewModel
 import app.krewd.R
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlin.math.abs
 import kotlin.math.roundToInt
@@ -90,6 +92,7 @@ fun BrowserPip(
     onOpen: () -> Unit,
 ) {
     val frame by viewModel.frame.collectAsStateWithLifecycle()
+    val streamError by remember { viewModel.state.map { it.streamError }.distinctUntilChanged() }.collectAsStateWithLifecycle(null)
     DisposableEffect(tabId) {
         viewModel.watchTab(tabId)
         onDispose { viewModel.unwatch(tabId) }
@@ -213,8 +216,9 @@ fun BrowserPip(
                         horizontalArrangement = Arrangement.spacedBy(5.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Box(Modifier.size(6.dp).background(Color(0xFFFF5A5A), CircleShape))
-                        Text(label, color = Color.White, style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        // A broken stream says so, instead of leaving its last picture up as if it were live.
+                        Box(Modifier.size(6.dp).background(if (streamError == null) Color(0xFFFF5A5A) else Color(0xFF9E9E9E), CircleShape))
+                        Text(if (streamError == null) label else "Reconnecting…", color = Color.White, style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                     Box(
                         Modifier

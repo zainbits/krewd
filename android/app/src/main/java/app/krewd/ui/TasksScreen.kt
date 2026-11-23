@@ -136,7 +136,7 @@ fun TasksScreen(
     val today = LocalDate.now()
     val todays = rest.filter { !it.pinned && localDate(it.updatedAt) == today }
     val earlier = rest.filter { !it.pinned && localDate(it.updatedAt) != today }
-    val upcoming = state.routines.filter { it.enabled && it.nextRunAt != null }.sortedBy { it.nextRunAt }.take(4)
+    val upcoming = state.routines.filter { it.enabled && it.nextLiveAt != null }.sortedBy { it.nextLiveAt }.take(4)
     val members = crewMembers(state)
 
     signIns.firstOrNull { it.id == filling }?.let { ask ->
@@ -274,7 +274,7 @@ fun TasksScreen(
     }
     }
 
-    if (home.asking) NewTaskSheet(state, viewModel, home.engine, onDismiss = { home.asking = false }, onOpenSettings = onOpenSettings)
+    // The new task itself (home.asking) is a glass sheet drawn by KrewdApp, outside this screen's glass source.
     reviewing?.let { id ->
         val proposal = state.proposals.firstOrNull { it.id == id }
         if (proposal == null) {
@@ -334,7 +334,7 @@ private fun Hero(needs: Int, working: Int, next: Routine?) {
         if (needs > 0 && working > 0) "$working working" else null,
         if (needs == 0 && working > 0) "Nothing needs you" else null,
         if (needs == 0 && working == 0) "Nothing running" else null,
-        next?.let { "${it.title.lowercase().replaceFirstChar { c -> c.uppercase() }} at ${shortTime(it.nextRunAt)}" },
+        next?.let { "${it.title.lowercase().replaceFirstChar { c -> c.uppercase() }} at ${shortTime(it.nextLiveAt)}" },
     ).joinToString(" · ")
     Column(Modifier.padding(start = 6.dp, end = 6.dp, top = 22.dp, bottom = 4.dp)) {
         Text(
@@ -561,14 +561,26 @@ private fun ComingUp(routines: List<Routine>, state: UiState, onOpen: (String) -
         routines.forEach { r ->
             Surface(onClick = { onOpen(r.id) }, shape = RoundedCornerShape(24.dp), color = MaterialTheme.colorScheme.surfaceContainer) {
                 Column(Modifier.widthIn(min = 160.dp, max = 220.dp).padding(horizontal = 16.dp, vertical = 14.dp)) {
-                    Text(shortTime(r.nextRunAt), fontFamily = KrewdType.number, fontSize = 26.sp)
+                    Text(shortTime(r.nextLiveAt), fontFamily = KrewdType.number, fontSize = 26.sp)
                     Text(r.title, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 2.dp))
                     Text(
-                        listOfNotNull(state.engine(r.engine)?.name, dayOf(r.nextRunAt)).joinToString(" · "),
+                        listOfNotNull(state.engine(r.engine)?.name, dayOf(r.nextLiveAt)).joinToString(" · "),
                         style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.outline,
                         modifier = Modifier.padding(top = 2.dp),
                     )
+                    // Firings skipped before the next real run: "Skipping 16:00, 19:00".
+                    val skipped = r.upcoming.filter { it.skipped && (r.nextLiveAt == null || it.at < r.nextLiveAt) }
+                    if (skipped.isNotEmpty()) {
+                        Text(
+                            "Skipping " + skipped.take(3).joinToString(", ") { shortTime(it.at) } + if (skipped.size > 3) " +${skipped.size - 3}" else "",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.tertiary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.padding(top = 2.dp),
+                        )
+                    }
                 }
             }
         }

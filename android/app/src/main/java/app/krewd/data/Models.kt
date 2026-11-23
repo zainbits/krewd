@@ -303,6 +303,8 @@ data class RoutineTrigger(
     val attempt: Int?,
     val reason: String?,
     val parent: String?,
+    /** How many of its next firings are skipped (recorded as skipped runs, not run). */
+    val skipRuns: Int = 0,
 ) {
     val isFollowUp: Boolean get() = kind == "once"
 
@@ -319,6 +321,7 @@ data class RoutineTrigger(
             attempt = if (o.isNull("attempt")) null else o.optInt("attempt"),
             reason = o.optStringOrNull("reason"),
             parent = o.optStringOrNull("parent"),
+            skipRuns = o.optInt("skip_runs", 0),
         )
     }
 }
@@ -366,6 +369,9 @@ data class RoutineRun(
     }
 }
 
+/** A coming firing of a routine; [skipped] ones will be recorded as skipped instead of run. */
+data class UpcomingRun(val at: String, val trigger: String, val skipped: Boolean, val attempt: Int?)
+
 /** Instructions Krewd runs on a schedule, every run in its own chat. */
 data class Routine(
     val id: String,
@@ -391,7 +397,11 @@ data class Routine(
     val notes: String = "",
     /** The routine's picks for its agent (model, effort, permission mode...), by ACP config option id. */
     val config: Map<String, String> = emptyMap(),
+    /** The next firing that really runs (skipped ones left out). */
+    val nextLiveAt: String? = null,
+    val upcoming: List<UpcomingRun> = emptyList(),
 ) {
+    val skipping: Boolean get() = triggers.any { !it.isFollowUp && it.skipRuns > 0 }
     val cronTriggers: List<RoutineTrigger> get() = triggers.filterNot { it.isFollowUp }
     val followUps: List<RoutineTrigger> get() = triggers.filter { it.isFollowUp }
 
@@ -417,6 +427,10 @@ data class Routine(
             triggers = o.optJSONArray("triggers").objects().map(RoutineTrigger::from),
             notes = o.optString("notes"),
             config = o.optJSONObject("config")?.let { c -> c.keys().asSequence().associateWith { c.optString(it) } } ?: emptyMap(),
+            nextLiveAt = o.optStringOrNull("next_live_at") ?: o.optStringOrNull("next_run_at"),
+            upcoming = o.optJSONArray("upcoming").objects().map { u ->
+                UpcomingRun(u.optString("at"), u.optString("trigger"), u.optBoolean("skipped"), if (u.isNull("attempt")) null else u.optInt("attempt"))
+            },
         )
     }
 }

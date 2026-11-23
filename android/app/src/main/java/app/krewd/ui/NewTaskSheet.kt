@@ -2,6 +2,7 @@ package app.krewd.ui
 
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -83,10 +84,15 @@ fun NewTaskSheet(
     onOpenSettings: () -> Unit,
     parent: SessionInfo? = null,
     proposal: Proposal? = null,
+    // In the app's own window (outside the glass source of the screen behind): a floating glass sheet over
+    // [backdrop]. Otherwise a system bottom sheet (where it opens inside a glass source, which must not hold it).
+    inWindow: Boolean = false,
+    backdrop: io.github.zainbits.cohesion.GlassBackdrop? = null,
 ) {
     val sheet = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val glassSheet = rememberGlassSheetState()
     val scope = rememberCoroutineScope()
-    val close: () -> Unit = { scope.launch { sheet.hide() }.invokeOnCompletion { onDismiss() } }
+    val close: () -> Unit = if (inWindow) ({ glassSheet.close() }) else ({ scope.launch { sheet.hide() }.invokeOnCompletion { onDismiss() } })
     // Which draft the text, files and @ chats belong to: the new task's, a side session's, or a proposal's.
     val draftKey = proposal?.let { proposalDraft(it.id) } ?: parent?.let { sideDraft(it.id) } ?: NEW_DRAFT
     val plainTask = proposal == null && parent == null
@@ -112,7 +118,6 @@ fun NewTaskSheet(
             },
         )
     }
-    var settingsOpen by remember { mutableStateOf(false) }
     val online = state.connection is Connection.Online
     // The new task's text lives in the view model (saved prompts set it too); a side session's or proposal's here,
     // kept on the phone under its own draft key.
@@ -153,8 +158,9 @@ fun NewTaskSheet(
         }
     }
 
-    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheet, containerColor = MaterialTheme.colorScheme.surfaceContainer) {
-        Column(Modifier.fillMaxWidth().imePadding()) {
+    val sheetBody: @Composable () -> Unit = {
+        val onGlass = LocalOnGlass.current
+        Column(Modifier.fillMaxWidth().then(if (inWindow) Modifier else Modifier.imePadding())) {
         Column(
             Modifier
                 .fillMaxWidth()
@@ -244,7 +250,12 @@ fun NewTaskSheet(
                 maxLines = 8,
                 modifier = Modifier.fillMaxWidth().focusRequester(focus),
                 decorationBox = { inner ->
-                    Box(Modifier.padding(horizontal = 16.dp, vertical = 16.dp)) {
+                    // On glass the field is a solid card, so the text never sits on the glass itself.
+                    Box(
+                        Modifier
+                            .then(if (onGlass) Modifier.padding(top = 8.dp).background(colors.surfaceContainerHighest, RoundedCornerShape(22.dp)) else Modifier)
+                            .padding(horizontal = 16.dp, vertical = 16.dp),
+                    ) {
                         if (field.text.isEmpty()) {
                             Text(
                                 if (promptOnly) "The message" else if (plainTask) "What should Krewd do? @ adds a chat" else "What should it do?",
@@ -264,6 +275,7 @@ fun NewTaskSheet(
                         .fillMaxWidth()
                         .heightIn(min = 48.dp)
                         .padding(top = 6.dp)
+                        .then(if (onGlass) Modifier.background(colors.surfaceContainerHighest, RoundedCornerShape(20.dp)) else Modifier)
                         .combinedClickable(onClick = { returns = !returns }),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
@@ -297,11 +309,30 @@ fun NewTaskSheet(
                     Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(start = 4.dp, top = 6.dp))
                 }
             }
+            // The agent's settings right here, like the chat title's panel: models as cards, effort as a slider,
+            // modes and switches as they are. Krewd remembers the picks per agent.
             if (engine != null && !promptOnly) {
-                SettingsLine(
-                    settingsSummary(options, selected, autoApprove),
-                    onClick = { settingsOpen = true },
-                    modifier = Modifier.padding(top = 10.dp),
+                if (options.isEmpty()) {
+                    Text(
+                        "${engine.name} has not listed its settings yet. They appear here once it has started.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(start = 4.dp, top = 10.dp),
+                    )
+                }
+                AgentOptions(
+                    options = options,
+                    selected = selected,
+                    enabled = online,
+                    onPick = { option, value ->
+                        picks = if (value == option.current) picks - option.id else picks + (option.id to value)
+                        viewModel.rememberPick(engine.id, option.id, value)
+                    },
+                    autoApprove = autoApprove,
+                    onAutoApprove = {
+                        autoApprove = it
+                        viewModel.rememberAutoApprove(engine.id, it)
+                    },
                 )
             }
             if (plainTask) SheetLabel("Saved prompts", trailing = if (state.savedPrompts.isNotEmpty()) "Long-press to remove" else null)
@@ -332,7 +363,7 @@ fun NewTaskSheet(
                     onClick = { viewModel.savePrompt(text) },
                     enabled = canSave,
                     shape = RoundedCornerShape(12.dp),
-                    color = Color.Transparent,
+                    color = if (onGlass) colors.surfaceContainerHighest else Color.Transparent,
                     border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
                 ) {
                     Text(
@@ -400,43 +431,9 @@ fun NewTaskSheet(
         }
     }
 
-    if (settingsOpen && engine != null) {
-        ModalBottomSheet(
-            onDismissRequest = { settingsOpen = false },
-            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-            containerColor = MaterialTheme.colorScheme.surfaceContainer,
-        ) {
-            Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(start = 18.dp, end = 18.dp, bottom = 24.dp)) {
-                Text("${engine.name} settings", style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(start = 4.dp))
-                Text(
-                    "For this task. Krewd remembers your picks for ${engine.name}.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(start = 4.dp, top = 2.dp),
-                )
-                if (options.isEmpty()) {
-                    Text(
-                        "${engine.name} has not listed its settings yet. They appear here once it has started.",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(4.dp, 16.dp),
-                    )
-                }
-                AgentOptions(
-                    options = options,
-                    selected = selected,
-                    enabled = online,
-                    onPick = { option, value ->
-                        picks = if (value == option.current) picks - option.id else picks + (option.id to value)
-                        viewModel.rememberPick(engine.id, option.id, value)
-                    },
-                    autoApprove = autoApprove,
-                    onAutoApprove = {
-                        autoApprove = it
-                        viewModel.rememberAutoApprove(engine.id, it)
-                    },
-                )
-            }
-        }
+    if (inWindow) {
+        GlassSheet(backdrop = backdrop, onDismiss = onDismiss, state = glassSheet) { sheetBody() }
+    } else {
+        ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheet, containerColor = MaterialTheme.colorScheme.surfaceContainer) { sheetBody() }
     }
 }
