@@ -145,6 +145,22 @@ async def _turns(hub, sid, n):  # noqa: F811
     return [e["kind"] for e in await hub.events(0, sid)].count("turn_end") >= n
 
 
+async def test_a_new_voice_session_goes_on_with_the_answer_ids(hub, voice):  # noqa: F811
+    sid = await chat(hub)
+    s = await voice.start_session(sid, my_voice=True)
+    WORDS.update({1: "What is a tumbling window?", 11: "And a sliding one?"})
+    await voice.piece(sid, s["voice_id"], 0, piece(1), False)
+    await until(lambda: users(hub, sid))
+    await voice.stop(sid, s["voice_id"])
+    again = await voice.start_session(sid, my_voice=True)
+    ROUTES["And a sliding one?"] = ("add_A1", 0.9, {"add_A1": 0.9, "new": 0.1})
+    await voice.piece(sid, again["voice_id"], 0, piece(11), False)
+    msgs = await until(lambda: _two(hub, sid))
+    assert msgs[1]["meta"]["voice"]["kind"] == "add" and msgs[1]["meta"]["voice"]["answer"] == "A1"
+    assert "A1 (" in ROUTED[-1]["state"]  # the earlier answer is still open after the restart
+    assert voice.sessions[sid].next_answer == 2
+
+
 async def test_my_voice_off_drops_the_owners_lines_but_instructions_go(hub, voice):  # noqa: F811
     sid = await chat(hub)
     s = await voice.start_session(sid, my_voice=False)

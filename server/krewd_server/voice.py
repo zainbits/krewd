@@ -391,6 +391,7 @@ class Voice:
             if vs is not None:
                 await self.stop(chat, vs.id)
             vs = VoiceSession(chat=chat, id=voice_id or uuid.uuid4().hex, my_voice=my_voice)
+            await self._resume_answers(vs)
             vs.dispatcher = asyncio.create_task(self._dispatch_loop(vs))
             self.sessions[chat] = vs
             self._warm()
@@ -410,6 +411,24 @@ class Voice:
                 log.warning("voice warm-up: %s", exc)
 
         self.warming = asyncio.create_task(go())
+
+    async def _resume_answers(self, vs: VoiceSession) -> None:
+        """A new voice session in a chat that listened before goes on with its answer ids (A4 after A3), and its
+        last answers stay open for additions."""
+        rows = await self.hub.pool.fetch(
+            """select id, text, meta->'voice' as voice from messages
+               where session_id = $1 and meta->'voice'->>'kind' in ('new', 'instruct')
+               order by created_at desc limit $2""",
+            vs.chat, OPEN_ANSWERS,
+        )
+        for r in reversed(rows):
+            voice = r["voice"] or {}
+            answer = str(voice.get("answer") or "")
+            if not re.fullmatch(r"A\d+", answer):
+                continue
+            vs.answers.append(Answer(id=answer, topic=_clip(r["text"], 80), speaker=str(voice.get("speaker") or "?"),
+                                     message_id=r["id"]))
+            vs.next_answer = max(vs.next_answer, int(answer[1:]) + 1)
 
     def _session_json(self, vs: VoiceSession) -> dict[str, Any]:
         return {"voice_id": vs.id, "my_voice": vs.my_voice, "ask": vs.ask, "enrolled": self.me is not None,
