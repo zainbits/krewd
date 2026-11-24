@@ -96,30 +96,14 @@ class ProposalSend(BaseModel):
 
 
 class VoiceStart(BaseModel):
-    my_voice: bool = True
-    ask: bool = True
-    voice_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{32}$")
-
-
-class VoiceChange(BaseModel):
-    my_voice: bool | None = None
-    ask: bool | None = None
-
-
-class VoiceSpeaker(BaseModel):
-    name: str | None = Field(default=None, max_length=30)
-    merge_into: str | None = Field(default=None, pattern=r"^(me|P[0-9]{1,3})$")
-
-
-class VoiceChoice(BaseModel):
-    line_id: str = Field(max_length=40)
-    choice: str = Field(max_length=40)
+    voice_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{32}$")  # go on with this one if the server has it
 
 
 class Message(WithAttachments):
     # steer: into the running turn (where the engine supports it); queue: after it; interrupt: stop it, then send.
     delivery: Literal["steer", "queue", "interrupt"] | None = None
     notes: list[Note] = Field(default_factory=list, max_length=20)  # margin notes on parts of earlier replies
+    voice: bool = False  # sent from voice mode (heard lines in the composer): the agent gets Krewd's voice rules once
 
 
 class DeleteOldChats(BaseModel):
@@ -733,7 +717,7 @@ def create_app(hub: Hub, token: str, lifespan_hub: bool = True) -> FastAPI:
         message = await hub.send(
             session_id, body.text, body.attachments, tabs=[t.model_dump() for t in body.tabs],
             delivery=body.delivery, client_id=body.client_id, chats=[{"id": str(c.id)} for c in body.chats],
-            notes=[n.model_dump() for n in body.notes],
+            notes=[n.model_dump() for n in body.notes], meta={"voice": True} if body.voice else None,
         )
         return {"ok": True, "message": message}
 
@@ -767,33 +751,16 @@ def create_app(hub: Hub, token: str, lifespan_hub: bool = True) -> FastAPI:
 
     @app.post("/api/sessions/{session_id}/voice", dependencies=auth)
     async def voice_start(session_id: uuid.UUID, body: VoiceStart) -> dict[str, Any]:
-        return await hub.voice.start_session(session_id, body.my_voice, body.voice_id, body.ask)
-
-    @app.patch("/api/sessions/{session_id}/voice/{voice_id}", dependencies=auth)
-    async def voice_change(session_id: uuid.UUID, voice_id: str, body: VoiceChange) -> dict[str, Any]:
-        return await hub.voice.change(session_id, voice_id, body.my_voice, body.ask)
+        return await hub.voice.start_session(session_id, body.voice_id)
 
     @app.post("/api/sessions/{session_id}/voice/{voice_id}/audio", dependencies=auth)
     async def voice_audio(session_id: uuid.UUID, voice_id: str, request: Request,
-                          seq: int = Query(ge=0), instruct: bool = False) -> dict[str, Any]:
-        return await hub.voice.piece(session_id, voice_id, seq, await _pcm(request, MAX_PIECE_BYTES), instruct)
-
-    @app.post("/api/sessions/{session_id}/voice/{voice_id}/pause", dependencies=auth)
-    async def voice_pause(session_id: uuid.UUID, voice_id: str) -> dict[str, Any]:
-        return await hub.voice.pause(session_id, voice_id)
-
-    @app.post("/api/sessions/{session_id}/voice/{voice_id}/speakers/{speaker}", dependencies=auth)
-    async def voice_speaker(session_id: uuid.UUID, voice_id: str, speaker: str, body: VoiceSpeaker) -> dict[str, Any]:
-        return await hub.voice.rename(session_id, voice_id, speaker, body.name, body.merge_into)
-
-    @app.post("/api/sessions/{session_id}/voice/{voice_id}/choice", dependencies=auth)
-    async def voice_choice(session_id: uuid.UUID, voice_id: str, body: VoiceChoice) -> dict[str, Any]:
-        hub.voice.choose(session_id, voice_id, body.line_id, body.choice)
-        return {"ok": True}
+                          seq: int = Query(ge=0)) -> dict[str, Any]:
+        return await hub.voice.piece(session_id, voice_id, seq, await _pcm(request, MAX_PIECE_BYTES))
 
     @app.delete("/api/sessions/{session_id}/voice/{voice_id}", dependencies=auth)
     async def voice_stop(session_id: uuid.UUID, voice_id: str) -> dict[str, Any]:
-        await hub.voice.stop(session_id, voice_id)
+        hub.voice.stop(session_id, voice_id)
         return {"active": False}
 
     @app.get("/api/sessions/{session_id}/links", dependencies=auth)

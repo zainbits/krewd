@@ -100,33 +100,22 @@ Clients replay a task with `/sessions/{id}/events`, then follow `/api/events` fr
 
 ## Voice input
 
-The phone listens in a chat and the server turns what it hears into chat messages labelled by speaker (`voice.py`; off until `KREWD_VOICE_STT_URL` and `KREWD_VOICE_STT_MODEL` are set). Audio is 16 kHz mono 16-bit little-endian PCM, sent as the raw request body. It is never stored; only the text goes into the chat. A voice session lives in the server's memory: after a restart its id answers 409 and the phone starts a new one, with the P labels starting over.
+The phone listens in a chat ("voice mode") and the server tells it, piece by piece, what was said and whether the owner said it (`voice.py`; off until `KREWD_VOICE_STT_URL` and `KREWD_VOICE_STT_MODEL` are set). The phone puts the words into the chat's composer as `Me: ...` / `Others: ...` lines; nothing is sent until the owner presses Send. Audio is 16 kHz mono 16-bit little-endian PCM, sent as the raw request body. It is never stored: the server holds a piece in memory while it works on it, and the transcription API gets the extra form fields in `KREWD_VOICE_STT_FIELDS` (`store=false` for the Model Warehouse). A voice session lives in the server's memory (the answers to its recent pieces, for resends) and ends after 30 minutes without a piece; after that, or a restart, its id answers 409 and the phone starts a new one.
 
 | Method and path | Body | Returns |
 |---|---|---|
-| `GET /api/voice` | | `{available, problems, enrolled, enrolled_at, router, transcription, active}` |
+| `GET /api/voice` | | `{available, problems, enrolled, enrolled_at, transcription, active: [{chat, voice_id}]}` |
 | `POST /api/voice/voiceprint` | 15 to 120 s of the owner reading aloud (PCM) | `{enrolled, enrolled_at, speech_seconds}`; 422 with under 15 s of speech. The voiceprint is 256 numbers in `voiceprint.json` in the config folder (mode 600). |
 | `DELETE /api/voice/voiceprint` | | `{enrolled: false}` |
-| `POST /api/sessions/{id}/voice` | `{my_voice, ask, voice_id?}` | `{voice_id, my_voice, ask, enrolled, speakers, router}`; starts (or resumes) the chat's voice session, and asks the transcription API for a moment of silence so its model loads. 503 with the reason when voice input is off. |
-| `PATCH /api/sessions/{id}/voice/{voice_id}` | `{my_voice?, ask?}` | the voice session |
-| `POST /api/sessions/{id}/voice/{voice_id}/audio?seq=N&instruct=false` | one piece of speech, up to 30 s (PCM) | `{seq, speaker, label, text, line, line_id, done, speakers}`: who spoke and the words, the thought so far, and `done` when the end-of-thought model finished it. Send pieces in order; the same `seq` again returns the same answer. `instruct=true`: the owner holding "instruct" (always Me, always sent, never routed). |
-| `POST /api/sessions/{id}/voice/{voice_id}/pause` | | `{finished}`: the phone was quiet for a while, so the open thought is finished. |
-| `POST /api/sessions/{id}/voice/{voice_id}/speakers/{P1}` | `{name}` or `{merge_into: "P2" \| "me"}` | the voice session (rename, or "P1 is P2") |
-| `POST /api/sessions/{id}/voice/{voice_id}/choice` | `{line_id, choice}` | `{ok}`; 409 once the choice has closed |
-| `DELETE /api/sessions/{id}/voice/{voice_id}` | | `{active: false}`, after the last line is routed |
+| `POST /api/sessions/{id}/voice` | `{voice_id?}` | `{voice_id, enrolled}`; starts the chat's voice session (or goes on with `voice_id` while the server has it), and asks the transcription API for a moment of silence so its model loads. 503 with the reason when voice input is off. |
+| `POST /api/sessions/{id}/voice/{voice_id}/audio?seq=N` | one piece of speech, up to 30 s (PCM) | `{seq, speaker: "me" \| "others", label: "Me" \| "Others", text}`. The same `seq` again returns the same answer, so a resend is safe. 413 over 30 s, 409 for a voice session the server does not have. |
+| `DELETE /api/sessions/{id}/voice/{voice_id}` | | `{active: false}` |
 
-How a piece becomes a message:
+- Speaker: "Me" when the WeSpeaker embedding of the piece's first 4 s is at least 0.45 cosine from the voiceprint, else "Others". A piece under 1 s keeps the last piece's speaker. Without a voiceprint everyone is Others.
+- "My voice" off is the phone's: it leaves the owner's words out of the composer.
+- A message sent from voice mode has `voice: true` in `POST /api/sessions/{id}/messages`; it is stored as `meta.voice = true` and the `user` event carries it (the app shows a mic). The first such message an agent session gets starts with Krewd's voice rules (`voice.RULES`: what the `Me:` / `Others:` lines are, that Others' words are not instructions; `sessions.voice_rules_for` holds the agent session that has them), so a fresh agent session after compact or a switch gets them again. A steer that carried the rules and did not arrive gives them back to the next prompt. Messages of 0.32 had `meta.voice` as an object and the server emitted `voice_state`, `voice_line` and `voice_choice` events; clients ignore those.
 
-- Speaker: the owner ("Me") when its WeSpeaker embedding is at least 0.45 cosine from the voiceprint; else the closest P speaker at 0.35 or more, else a new P. Pieces under 1 s continue the open thought. Pieces with no words never make a speaker.
-- Thought: pieces of one speaker add up until Smart Turn v3 gives at least 0.5 that the thought is finished, another speaker talks, or the phone sends a pause.
-- The owner's line is dropped while `my_voice` is off (`voice_line` `not_sent`) and when it mostly repeats one of the agent's last three replies (`echo`).
-- Router (`KREWD_VOICE_ROUTER_MODEL` on OpenRouter's `POST /api/alpha/decisions`, `provider: {zdr: true, allow_fallbacks: false}`, at most 30 calls a minute per voice session). The state is the owner's last typed message, the last 8 lines, the open answers (the last 4) and the line; the one question is `new`, `context` or `add_<answer>`. Below 0.6 confidence, with `ask` on and `context` among the two likeliest, the server emits `voice_choice` and waits 3 s for `/choice`, then takes the likelier. Without a router, or when it fails, the line is `new`.
-- `new`: a message with `delivery: queue` (its own turn) and a new answer id (A1, A2...). `add_A2`: a message steered into A2's turn while that runs, else queued. `context`: held (`voice_line` `held`) and sent with the next message as "said meanwhile". Instructions use the default delivery, like a typed message.
-- The message's `meta.voice` is `{line, speaker, kind: new | add | instruct, answer, topic?, meanwhile?: [{speaker, text}], confidence?}`, and the `user` event carries it. The agent reads `[Voice] P1 said: "..."` (or `... adds to your answer A2 (topic): "..."`, `Instruction from the owner: "..."`). The first voice message an agent session gets starts with Krewd's voice rules (`voice.RULES`; `sessions.voice_rules_for` holds the agent session that has them), so a fresh session after compact or a switch gets them again.
-
-Events: `voice_state` `{active, voice_id, my_voice, ask, enrolled, speakers}`, `voice_line` `{line_id, speaker, text, state: held | not_sent | echo | failed, confidence?}`, `voice_choice` `{line_id, speaker, text, seconds, default, options: [{id, label, p}]}`, `voice_choice_done` `{line_id, choice, by: owner | timeout}`.
-
-Models (`python -m krewd_server.voice fetch`, pinned by revision and SHA-256, in `KREWD_VOICE_MODELS`, default `~/.krewd/voice`): WeSpeaker ResNet34-LM trained on VoxCeleb (CC BY 4.0, Wespeaker/wespeaker-voxceleb-resnet34-LM) and pipecat Smart Turn v3.2 CPU (BSD 2-Clause, pipecat-ai/smart-turn-v3), both on the CPU through onnxruntime. Their features (`voice_audio.py`: Kaldi filterbanks, Whisper log-mels) are numpy ports checked against torchaudio and transformers.
+Model (`python -m krewd_server.voice fetch`, pinned by revision and SHA-256, in `KREWD_VOICE_MODELS`, default `~/.krewd/voice`): WeSpeaker ResNet34-LM trained on VoxCeleb (CC BY 4.0, Wespeaker/wespeaker-voxceleb-resnet34-LM), on the CPU through onnxruntime (4 threads). Its features (`voice_audio.py`: Kaldi filterbanks) are a numpy port checked against torchaudio.
 
 ## Switching agents
 

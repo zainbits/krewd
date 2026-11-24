@@ -1,7 +1,6 @@
-"""Audio features for voice input, in numpy only (no torch): Kaldi filterbanks for the speaker model and
-Whisper log-mels for the end-of-thought model. Both match their reference implementations (torchaudio's
-`compliance.kaldi.fbank` and transformers' `WhisperFeatureExtractor`) to float32 rounding; `tests/test_voice.py`
-pins a few values.
+"""Audio for voice input, in numpy only (no torch): Kaldi filterbanks for the speaker model, which match torchaudio's
+`compliance.kaldi.fbank` to float32 rounding (`tests/test_voice.py` pins a few values), and WAV for the transcription
+API.
 
 Audio is 16 kHz mono float32 in [-1, 1].
 """
@@ -55,57 +54,6 @@ def kaldi_fbank(audio: np.ndarray) -> np.ndarray:
     spec = np.abs(np.fft.rfft(frames, n=512, axis=1)) ** 2
     energies = spec.astype(np.float32) @ _KALDI_BANKS.T
     return np.log(np.maximum(energies, np.finfo(np.float32).eps)).astype(np.float32)
-
-
-# Whisper log-mels (Smart Turn's input): 8 s window, 25 ms periodic Hann frames every 10 ms, centred with
-# reflect padding, 80 Slaney mel bins up to 8 kHz, log10, clamped 8 below the peak, scaled to about [-1, 1].
-
-
-def _slaney_mel(f):
-    f = np.asarray(f, dtype=np.float64)
-    lin = 3.0 * f / 200.0
-    return np.where(f >= 1000.0, 15.0 + np.log(np.maximum(f, 1e-10) / 1000.0) * (27.0 / np.log(6.4)), lin)
-
-
-def _slaney_hz(m):
-    m = np.asarray(m, dtype=np.float64)
-    lin = 200.0 * m / 3.0
-    return np.where(m >= 15.0, 1000.0 * np.exp(np.log(6.4) / 27.0 * (m - 15.0)), lin)
-
-
-def _whisper_filters() -> np.ndarray:
-    freqs = _slaney_hz(np.linspace(_slaney_mel(0.0), _slaney_mel(8000.0), 82))
-    fft = np.linspace(0, RATE // 2, 201)
-    diff = np.diff(freqs)
-    slopes = freqs[None, :] - fft[:, None]
-    down = -slopes[:, :-2] / diff[:-1]
-    up = slopes[:, 2:] / diff[1:]
-    banks = np.maximum(0.0, np.minimum(down, up))
-    banks *= 2.0 / (freqs[2:82] - freqs[:80])
-    return banks  # [201, 80], float64 like transformers
-
-
-_WHISPER_FILTERS = _whisper_filters()
-_HANN = 0.5 - 0.5 * np.cos(2 * np.pi * np.arange(400) / 400)  # periodic
-
-
-def whisper_mel(audio: np.ndarray, seconds: int = 8) -> np.ndarray:
-    """[80, 100 * seconds] features of the last `seconds` of `audio`, zero-padded at the end when shorter."""
-    size = seconds * RATE
-    x = audio[-size:].astype(np.float64)
-    x = (x - x.mean()) / np.sqrt(x.var() + 1e-7) if len(x) else x
-    x = np.pad(x, (0, size - len(x)))
-    x = np.pad(x, (200, 200), mode="reflect")
-    n = 1 + (len(x) - 400) // 160
-    idx = np.arange(400)[None, :] + 160 * np.arange(n)[:, None]
-    spec = np.abs(np.fft.rfft(x[idx] * _HANN, n=400, axis=1)) ** 2
-    mel = np.log10(np.maximum(_WHISPER_FILTERS.T @ spec.T, 1e-10))[:, :-1]
-    mel = np.maximum(mel, mel.max() - 8.0)
-    return ((mel + 4.0) / 4.0).astype(np.float32)
-
-
-def rms(audio: np.ndarray) -> float:
-    return float(np.sqrt(np.mean(np.square(audio)))) if len(audio) else 0.0
 
 
 def wav_bytes(audio: np.ndarray) -> bytes:

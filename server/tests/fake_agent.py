@@ -1,4 +1,5 @@
-"""A tiny ACP agent for tests. Prompt words steer it: perm, slow, hold, pause, crash. Supports `_session/steering`."""
+"""A tiny ACP agent for tests. Prompt words steer it: perm, slow, hold, pause, crash. Supports `_session/steering`
+(a steer that says "nosteer" is answered as if the turn had just ended)."""
 
 import asyncio
 import re
@@ -168,11 +169,6 @@ async def run_prompt(request_id: int, sid: str, text: str, params: dict) -> None
     if "Krewd voice input is on in this chat" in text:  # the voice rules came with this prompt
         update(sid, {"sessionUpdate": "agent_message_chunk", "messageId": "m9",
                      "content": {"type": "text", "text": " voice-rules"}})
-    voiced = [line for line in text.splitlines()
-              if line.startswith(("[Voice]", "Said meanwhile")) or (line.startswith("- ") and ': "' in line)]
-    if any(line.startswith("[Voice]") for line in voiced):
-        update(sid, {"sessionUpdate": "agent_message_chunk", "messageId": "m10",
-                     "content": {"type": "text", "text": " voice=" + " / ".join(voiced)}})
     if "moves between agents" in text:
         update(sid, {"sessionUpdate": "agent_message_chunk", "messageId": "m7",
                      "content": {"type": "text", "text": " briefed"}})
@@ -238,8 +234,9 @@ async def main() -> None:
             task.add_done_callback(tasks.discard)
         elif method == "_session/steering":
             sid = params["sessionId"]
-            if sid in running:
-                running[sid].append(" ".join(b.get("text", "") for b in params["prompt"]))
+            said = " ".join(b.get("text", "") for b in params["prompt"])
+            if sid in running and "nosteer" not in said:  # "nosteer": answer as if the turn had just ended
+                running[sid].append(said)
                 send({"jsonrpc": "2.0", "id": rid, "result": {"outcome": "injected"}})
             else:
                 send({"jsonrpc": "2.0", "id": rid, "result": {"outcome": "promptRequired", "reason": "noRunningTurn"}})

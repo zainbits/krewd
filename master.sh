@@ -54,11 +54,11 @@ offer_xvfb() {
     say "${Y}Without Xvfb the agents' Brave opens on the desktop and can take focus there:${N} sudo apt install xvfb xauth"
   fi
 }
-# Voice input's speaker and end-of-thought models (about 35 MB, pinned by checksum; voice.py MODELS).
+# Voice input's speaker model (WeSpeaker, about 27 MB, pinned by checksum; voice.py MODELS).
 fetch_voice_models() {
   [[ -n "$(find_uv)" ]] || return 0
   KREWD_CONFIG_DIR="$CONFIG_DIR" uvrun python -m krewd_server.voice fetch | sed 's/^/  /' \
-    || say "${Y}Voice models could not be downloaded; voice input stays off until ./master.sh setup runs again.${N}"
+    || say "${Y}The voice speaker model could not be downloaded; voice input stays off until ./master.sh setup runs again.${N}"
 }
 
 linux_systemd() { [[ "$(uname)" == Linux ]] && has systemctl && systemctl --user show-environment >/dev/null 2>&1; }
@@ -140,7 +140,7 @@ PY
     fi
   fi
   if [[ -n "$(find_uv)" ]]; then
-    # Voice input: its models, the transcription API and the router key (voice.py; off without KREWD_VOICE_STT_URL).
+    # Voice input: its speaker model and the transcription API (voice.py; off without KREWD_VOICE_STT_URL).
     local line
     while IFS= read -r line; do
       case "$line" in

@@ -34,7 +34,7 @@ from .config import Profile, Settings
 from .logins import LoginError, Logins
 from .profiles import PRESETS, Gateways, ProfileError, check_gateway, set_key, slug, valid_url, write_profiles
 from .routines import Invalid
-from .voice import RULES as VOICE_RULES, Voice, voice_prompt
+from .voice import RULES as VOICE_RULES, Voice
 
 log = logging.getLogger("krewd.hub")
 
@@ -1407,7 +1407,7 @@ class Hub:
             payload["purpose"] = purpose
             payload["meta"] = meta or {}
         elif meta and meta.get("voice"):
-            payload["meta"] = {"voice": meta["voice"]}  # who said it, and how it was routed (voice.py)
+            payload["meta"] = {"voice": True}  # sent from voice mode: the bubble shows a mic
         seq = await self.emit(session_id, "user", payload)
         await self.pool.execute("update messages set event_seq = $2 where id = $1", message_id, seq)
         noted = (notes[0]["note"] or notes[0]["quote"]) if notes else ""
@@ -1467,14 +1467,14 @@ class Hub:
         if row is None:
             return
         outcome = None
+        text, carried_rules = await self._voice_text(rt, row["text"], row["meta"])
         try:
             result = await proc.request(
                 "_session/steering",
                 {
                     "sessionId": rt.agent_session,
                     "prompt": prompt_blocks(
-                        _prompt_text(await self._voice_text(rt, row["text"], row["meta"]), row["tabs"], row["chats"],
-                                     (row["meta"] or {}).get("notes")),
+                        _prompt_text(text, row["tabs"], row["chats"], (row["meta"] or {}).get("notes")),
                         row["attachments"] or [],
                     ),
                     "_meta": {"steering": {"idleBehavior": "promptRequired"}},
@@ -1489,7 +1489,7 @@ class Hub:
                 rt.turn_messages.append(message_id)
         else:  # promptRequired (the turn just ended) or an error: run it as the next prompt
             await self.pool.execute("update messages set state = 'queued' where id = $1 and state = 'steering'", message_id)
-            if (row["meta"] or {}).get("voice"):  # the voice rules it carried did not arrive: the next prompt brings them
+            if carried_rules:  # the voice rules this attempt carried did not arrive: the next prompt brings them
                 await self.pool.execute("update sessions set voice_rules_for = null where id = $1 and voice_rules_for = $2",
                                         rt.id, rt.agent_session)
 
@@ -1503,33 +1503,19 @@ class Hub:
             await self.emit(row["session_id"], "message", db.message_json(row))
         return row
 
-    async def _voice_text(self, rt: Runtime, text: str, meta: dict[str, Any] | None) -> str:
-        """A voice message as the agent reads it; the first one an agent session gets carries Krewd's voice rules."""
-        voice = (meta or {}).get("voice")
-        if not voice:
-            return text
-        out = voice_prompt(text, voice)
-        if rt.agent_session:
-            given = await self.pool.fetchval(
-                """update sessions set voice_rules_for = $2 where id = $1 and voice_rules_for is distinct from $2
-                   returning id""",
-                rt.id, rt.agent_session,
-            )
-            if given:
-                out = VOICE_RULES + "\n\n---\n\n" + out
-        return out
-
-    def message_running(self, session_id: uuid.UUID, message_id: uuid.UUID) -> bool:
-        """True while the turn that started with (or took in) this message runs."""
-        rt = self.runtimes.get(session_id)
-        return bool(rt and rt.running and message_id in rt.turn_messages)
-
-    async def message_status(self, session_id: uuid.UUID, message_id: uuid.UUID) -> str:
-        if self.message_running(session_id, message_id):
-            return "being answered now"
-        state = await self.pool.fetchval("select state from messages where id = $1", message_id)
-        return {"queued": "waiting for its turn", "steering": "waiting for its turn",
-                "cancelled": "cancelled"}.get(state or "", "answered")
+    async def _voice_text(self, rt: Runtime, text: str, meta: dict[str, Any] | None) -> tuple[str, bool]:
+        """A message as the agent reads it, and whether it carries Krewd's voice rules: the first message sent from
+        voice mode that an agent session gets has them in front (voice.RULES)."""
+        if not (meta or {}).get("voice") or not rt.agent_session:
+            return text, False
+        given = await self.pool.fetchval(
+            """update sessions set voice_rules_for = $2 where id = $1 and voice_rules_for is distinct from $2
+               returning id""",
+            rt.id, rt.agent_session,
+        )
+        if not given:
+            return text, False
+        return VOICE_RULES + "\n\n---\n\n" + text, True
 
     def _kick(self, rt: Runtime) -> None:
         rt.wake.set()
@@ -1993,7 +1979,7 @@ class Hub:
             proc = await self._ensure_loaded(rt)
             if rt.cancel_requested:
                 raise _Cancelled()
-            prompt_text = _prompt_text(await self._voice_text(rt, text, meta), tabs, chats, (meta or {}).get("notes"))
+            prompt_text = _prompt_text((await self._voice_text(rt, text, meta))[0], tabs, chats, (meta or {}).get("notes"))
             if fresh:
                 # A new agent session learns which chat it is, for `krewd chat history` and `krewd side`. At the end,
                 # since agents name a chat after the start of its first prompt.
@@ -2023,7 +2009,6 @@ class Hub:
             self.restart_after_turn.discard(rt.engine)
             await self._restart_agent(rt.engine)  # its profile changed during the turn
         await self._flush_text(rt)
-        self.voice.reply(rt.id, rt.assistant_text)
         preview = _first_line(_plain(rt.assistant_text), PREVIEW_MAX) if rt.assistant_text else None
         await self.pool.execute(
             """update sessions set status = $2, usage = coalesce($3, usage),
