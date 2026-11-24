@@ -117,6 +117,8 @@ import app.krewd.data.FilesItem
 import app.krewd.data.LinkItem
 import app.krewd.data.Proposal
 import app.krewd.data.ProposalItem
+import app.krewd.data.VoiceLineItem
+import app.krewd.voice.Voice
 import app.krewd.data.ReplyNote
 import android.widget.Toast
 import androidx.compose.ui.platform.LocalContext
@@ -425,7 +427,40 @@ fun ChatScreen(state: UiState, viewModel: KrewdViewModel) {
                     )
                     val pick = rememberFilePicker { viewModel.attach(session.id, it) }
                     val live = state.live[session.id]
-                    Composer(
+                    val voice by Voice.state.collectAsStateWithLifecycle()
+                    val context = LocalContext.current
+                    var typing by remember(session.id) { mutableStateOf(false) }
+                    val listeningHere = voice.listening && voice.chatId == session.id
+                    val micAsk = androidx.activity.compose.rememberLauncherForActivityResult(
+                        androidx.activity.result.contract.ActivityResultContracts.RequestPermission(),
+                    ) { granted ->
+                        if (granted) {
+                            typing = false
+                            Voice.start(context, session.id)
+                        } else {
+                            Toast.makeText(context, "Voice input needs the microphone", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                    val onMic = {
+                        when {
+                            listeningHere -> typing = false
+                            Voice.hasMic(context) -> { typing = false; Voice.start(context, session.id) }
+                            else -> micAsk.launch(android.Manifest.permission.RECORD_AUDIO)
+                        }
+                    }
+                    if (!listeningHere && voice.chatId == session.id && voice.error != null) {
+                        Text(
+                            "Voice input: ${voice.error}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.padding(start = 12.dp, bottom = 4.dp),
+                        )
+                    }
+                    if (listeningHere && !typing) {
+                        ComposerShell(floatBackdrop, Modifier.fillMaxWidth()) {
+                            VoicePanel(voice, onKeyboard = { typing = true })
+                        }
+                    } else Composer(
                         backdrop = floatBackdrop,
                         sessionId = session.id,
                         initialText = remember(session.id) { viewModel.messageDraft(session.id) },
@@ -452,6 +487,8 @@ fun ChatScreen(state: UiState, viewModel: KrewdViewModel) {
                         onStop = viewModel::stop,
                         onAttach = pick,
                         onRemoveFile = { viewModel.removeAttachment(session.id, it) },
+                        onMic = onMic,
+                        listening = listeningHere,
                     )
                 }
             }
@@ -669,6 +706,8 @@ private fun Composer(
     onStop: () -> Unit,
     onAttach: () -> Unit,
     onRemoveFile: (Long) -> Unit,
+    onMic: () -> Unit,
+    listening: Boolean,
     modifier: Modifier = Modifier,
 ) {
     // Unsent text is kept per chat on the phone, so leaving the chat or restarting the app loses nothing.
@@ -732,6 +771,9 @@ private fun Composer(
             )
             Row(verticalAlignment = Alignment.CenterVertically) {
                 StretchIconButton(onClick = onAttach, icon = R.drawable.ic_add_24, contentDescription = "Attach files")
+                // Voice input: start listening here, or (while it listens) back to the voice panel.
+                StretchIconButton(onClick = onMic, icon = R.drawable.ic_mic_24,
+                    contentDescription = if (listening) "Back to listening" else "Voice input")
                 if (steps != null) {
                     Spacer(Modifier.width(2.dp))
                     Surface(onClick = onSteps, shape = RoundedCornerShape(12.dp), color = colors.surfaceContainerHighest) {
@@ -1024,6 +1066,7 @@ private fun ChatRow(
             HandedFiles(item.files, loads, viewModel::openSharedFile, viewModel::pauseSharedFile, viewModel::cancelSharedFile)
         }
         is SwitchItem -> SwitchRow(item)
+        is VoiceLineItem -> VoiceLineRow(item)
         is NoticeItem -> Text(
             item.text,
             style = MaterialTheme.typography.bodySmall,
@@ -1063,6 +1106,7 @@ private fun UserRow(
                     }
                 }
                 if (item.notes.isNotEmpty()) SentNotes(item.notes, onBubble, onJump)
+                item.voice?.let { VoiceHeader(it, onBubble) }
                 if (item.text.isNotBlank()) {
                     val ranges = remember(item.text, commands) { commandRanges(item.text, commands) }
                     var laid by remember { mutableStateOf<TextLayoutResult?>(null) }

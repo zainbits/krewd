@@ -26,6 +26,7 @@ from .hub import Conflict, Hub, NotFound, TabTaken
 from .locations import LOCATION_SCRIPT, Invalid as LocationInvalid, Locations
 from .profiles import ProfileError
 from .routines import Invalid
+from .voice import ENROLL_MAX_BYTES, MAX_PIECE_BYTES, VoiceError
 
 LONG_POLL_MAX_SECONDS = 30
 
@@ -92,6 +93,27 @@ class ProposalSend(BaseModel):
     config: dict[str, str] | None = None
     returns: bool | None = None
     chats: list[ChatRef] = Field(default_factory=list, max_length=5)
+
+
+class VoiceStart(BaseModel):
+    my_voice: bool = True
+    ask: bool = True
+    voice_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{32}$")
+
+
+class VoiceChange(BaseModel):
+    my_voice: bool | None = None
+    ask: bool | None = None
+
+
+class VoiceSpeaker(BaseModel):
+    name: str | None = Field(default=None, max_length=30)
+    merge_into: str | None = Field(default=None, pattern=r"^(me|P[0-9]{1,3})$")
+
+
+class VoiceChoice(BaseModel):
+    line_id: str = Field(max_length=40)
+    choice: str = Field(max_length=40)
 
 
 class Message(WithAttachments):
@@ -366,6 +388,10 @@ def create_app(hub: Hub, token: str, lifespan_hub: bool = True) -> FastAPI:
     @app.exception_handler(Invalid)
     async def invalid(_, exc: Invalid):
         return JSONResponse(status_code=422, content={"detail": str(exc)})
+
+    @app.exception_handler(VoiceError)
+    async def voice_error(_, exc: VoiceError):
+        return JSONResponse(status_code=exc.status, content={"detail": str(exc)})
 
     @app.exception_handler(Conflict)
     async def conflict(_, exc: Conflict):
@@ -710,6 +736,65 @@ def create_app(hub: Hub, token: str, lifespan_hub: bool = True) -> FastAPI:
             notes=[n.model_dump() for n in body.notes],
         )
         return {"ok": True, "message": message}
+
+    # voice input (voice.py): the phone sends 16 kHz mono 16-bit PCM pieces in order, numbered per voice session
+
+    async def _pcm(request: Request, limit: int) -> bytes:
+        size = int(request.headers.get("content-length") or 0)
+        if size > limit:
+            raise VoiceError("audio too long", 413)
+        out = bytearray()
+        async for chunk in request.stream():
+            out += chunk
+            if len(out) > limit:
+                raise VoiceError("audio too long", 413)
+        if len(out) % 2:
+            raise VoiceError("audio must be 16-bit PCM", 422)
+        return bytes(out)
+
+    @app.get("/api/voice", dependencies=auth)
+    async def voice_status() -> dict[str, Any]:
+        return hub.voice.status()
+
+    @app.post("/api/voice/voiceprint", dependencies=auth)
+    async def voice_enroll(request: Request) -> dict[str, Any]:
+        return await hub.voice.enroll(await _pcm(request, ENROLL_MAX_BYTES))
+
+    @app.delete("/api/voice/voiceprint", dependencies=auth)
+    async def voice_forget() -> dict[str, Any]:
+        hub.voice.forget_voiceprint()
+        return {"enrolled": False}
+
+    @app.post("/api/sessions/{session_id}/voice", dependencies=auth)
+    async def voice_start(session_id: uuid.UUID, body: VoiceStart) -> dict[str, Any]:
+        return await hub.voice.start_session(session_id, body.my_voice, body.voice_id, body.ask)
+
+    @app.patch("/api/sessions/{session_id}/voice/{voice_id}", dependencies=auth)
+    async def voice_change(session_id: uuid.UUID, voice_id: str, body: VoiceChange) -> dict[str, Any]:
+        return await hub.voice.change(session_id, voice_id, body.my_voice, body.ask)
+
+    @app.post("/api/sessions/{session_id}/voice/{voice_id}/audio", dependencies=auth)
+    async def voice_audio(session_id: uuid.UUID, voice_id: str, request: Request,
+                          seq: int = Query(ge=0), instruct: bool = False) -> dict[str, Any]:
+        return await hub.voice.piece(session_id, voice_id, seq, await _pcm(request, MAX_PIECE_BYTES), instruct)
+
+    @app.post("/api/sessions/{session_id}/voice/{voice_id}/pause", dependencies=auth)
+    async def voice_pause(session_id: uuid.UUID, voice_id: str) -> dict[str, Any]:
+        return await hub.voice.pause(session_id, voice_id)
+
+    @app.post("/api/sessions/{session_id}/voice/{voice_id}/speakers/{speaker}", dependencies=auth)
+    async def voice_speaker(session_id: uuid.UUID, voice_id: str, speaker: str, body: VoiceSpeaker) -> dict[str, Any]:
+        return await hub.voice.rename(session_id, voice_id, speaker, body.name, body.merge_into)
+
+    @app.post("/api/sessions/{session_id}/voice/{voice_id}/choice", dependencies=auth)
+    async def voice_choice(session_id: uuid.UUID, voice_id: str, body: VoiceChoice) -> dict[str, Any]:
+        hub.voice.choose(session_id, voice_id, body.line_id, body.choice)
+        return {"ok": True}
+
+    @app.delete("/api/sessions/{session_id}/voice/{voice_id}", dependencies=auth)
+    async def voice_stop(session_id: uuid.UUID, voice_id: str) -> dict[str, Any]:
+        await hub.voice.stop(session_id, voice_id)
+        return {"active": False}
 
     @app.get("/api/sessions/{session_id}/links", dependencies=auth)
     async def links(session_id: uuid.UUID) -> dict[str, Any]:

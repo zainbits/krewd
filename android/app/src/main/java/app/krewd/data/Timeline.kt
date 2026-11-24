@@ -45,7 +45,43 @@ data class UserItem(
     val fromKind: String? = null,
     /** Margin notes on parts of earlier replies, shown above the text. */
     val notes: List<ReplyNote> = emptyList(),
+    /** Heard by voice input, not typed: who said it and how Krewd routed it. */
+    val voice: VoiceMeta? = null,
 ) : ChatItem
+
+/**
+ * A voice line that became a message: [speaker] (Me, P1, a name), [kind] new (its own answer [answer]), add (adds
+ * to answer [answer] about [topic]) or instruct (the owner to the agent), and the lines said meanwhile.
+ */
+data class VoiceMeta(
+    val speaker: String,
+    val kind: String,
+    val answer: String?,
+    val topic: String?,
+    val meanwhile: List<Pair<String, String>>,
+) {
+    companion object {
+        fun from(o: org.json.JSONObject?): VoiceMeta? {
+            o ?: return null
+            val m = o.optJSONArray("meanwhile")
+            return VoiceMeta(
+                speaker = o.optString("speaker", "?"),
+                kind = o.optString("kind", "new"),
+                answer = o.optStringOrNull("answer"),
+                topic = o.optStringOrNull("topic"),
+                meanwhile = if (m == null) emptyList() else (0 until m.length()).map {
+                    m.getJSONObject(it).let { x -> x.optString("speaker") to x.optString("text") }
+                },
+            )
+        }
+    }
+}
+
+/**
+ * A voice line that did not become a message: [state] held (no reply needed; it goes with the next message), not_sent
+ * (the owner's own, while "My voice" is off), echo (the owner reading the reply out) or failed.
+ */
+data class VoiceLineItem(override val key: String, val speaker: String, val text: String, val state: String) : ChatItem
 
 /** This chat started a side session or sub-agent, or sent a message to another chat ([kind] side, subagent, prompt). */
 data class LinkItem(override val key: String, val kind: String, val chatId: String, val title: String, val returns: Boolean) : ChatItem
@@ -130,6 +166,7 @@ class Timeline {
                     ok = p.optJSONObject("meta")?.optBoolean("ok", true) ?: true,
                     fromKind = p.optJSONObject("meta")?.optStringOrNull("kind"),
                     notes = ReplyNote.list(p.optJSONArray("notes")),
+                    voice = VoiceMeta.from(p.optJSONObject("meta")?.optJSONObject("voice")),
                 )
                 add(item)
                 if (messageId != null) messages[messageId] = item.key
@@ -140,6 +177,8 @@ class Timeline {
                 val item = items[index[key] ?: return false] as? UserItem ?: return false
                 put(key, item.copy(state = p.optString("state"), how = p.optStringOrNull("delivered_how")))
             }
+            "voice_line" -> add(VoiceLineItem("voice-" + p.optString("line_id", event.seq.toString()),
+                p.optString("speaker"), p.optString("text"), p.optString("state")))
             "text" -> {
                 val key = "text-" + p.optString("message_id", event.seq.toString())
                 val existing = index[key]?.let { items[it] as? TextItem }

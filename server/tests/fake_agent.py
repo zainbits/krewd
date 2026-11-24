@@ -165,6 +165,14 @@ async def run_prompt(request_id: int, sid: str, text: str, params: dict) -> None
         quotes = [line[2:] for line in text.splitlines() if line.startswith("> ")]
         update(sid, {"sessionUpdate": "agent_message_chunk", "messageId": "m8",
                      "content": {"type": "text", "text": " noted=" + "|".join(quotes)}})
+    if "Krewd voice input is on in this chat" in text:  # the voice rules came with this prompt
+        update(sid, {"sessionUpdate": "agent_message_chunk", "messageId": "m9",
+                     "content": {"type": "text", "text": " voice-rules"}})
+    voiced = [line for line in text.splitlines()
+              if line.startswith(("[Voice]", "Said meanwhile")) or (line.startswith("- ") and ': "' in line)]
+    if any(line.startswith("[Voice]") for line in voiced):
+        update(sid, {"sessionUpdate": "agent_message_chunk", "messageId": "m10",
+                     "content": {"type": "text", "text": " voice=" + " / ".join(voiced)}})
     if "moves between agents" in text:
         update(sid, {"sessionUpdate": "agent_message_chunk", "messageId": "m7",
                      "content": {"type": "text", "text": " briefed"}})

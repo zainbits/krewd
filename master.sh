@@ -54,6 +54,13 @@ offer_xvfb() {
     say "${Y}Without Xvfb the agents' Brave opens on the desktop and can take focus there:${N} sudo apt install xvfb xauth"
   fi
 }
+# Voice input's speaker and end-of-thought models (about 35 MB, pinned by checksum; voice.py MODELS).
+fetch_voice_models() {
+  [[ -n "$(find_uv)" ]] || return 0
+  KREWD_CONFIG_DIR="$CONFIG_DIR" uvrun python -m krewd_server.voice fetch | sed 's/^/  /' \
+    || say "${Y}Voice models could not be downloaded; voice input stays off until ./master.sh setup runs again.${N}"
+}
+
 linux_systemd() { [[ "$(uname)" == Linux ]] && has systemctl && systemctl --user show-environment >/dev/null 2>&1; }
 
 # ---------------------------------------------------------------- doctor
@@ -131,6 +138,17 @@ PY
     else
       bad "sign-ins and profiles could not be checked" "cd $REPO/server && uv run python -m krewd_server.profiles check"
     fi
+  fi
+  if [[ -n "$(find_uv)" ]]; then
+    # Voice input: its models, the transcription API and the router key (voice.py; off without KREWD_VOICE_STT_URL).
+    local line
+    while IFS= read -r line; do
+      case "$line" in
+        "OK    "*) ok "${line#OK    }" ;;
+        "WARN  "*) warn "${line#WARN  }" "AGENTS.md, Voice input" ;;
+        "INFO  "*) say "  info  ${line#INFO  }" ;;
+      esac
+    done < <(KREWD_CONFIG_DIR="$CONFIG_DIR" uvrun python -m krewd_server.voice check 2>/dev/null)
   fi
   if [[ -n "$(conf KREWD_DATABASE_URL '')" && -n "$(find_uv)" ]]; then
     local db; db="$(KREWD_CONFIG_DIR="$CONFIG_DIR" uvrun python - <<'PY' 2>&1
@@ -269,6 +287,7 @@ PY
   chmod 600 "$ENV_FILE"
   [[ -f "$CONFIG_DIR/engines.toml" ]] || { cp "$REPO/deploy/engines.example.toml" "$CONFIG_DIR/engines.toml"; say "Created engines.toml (Claude Code)."; }
   if [[ -n "$(find_uv)" ]]; then (cd "$REPO/server" && "$(find_uv)" sync --frozen --quiet) && say "Server environment ready."; else say "Install uv first, then run setup again."; fi
+  fetch_voice_models
   mkdir -p "$(conf KREWD_BROWSER_PROFILE "$HOME/.local/share/krewd/agent-brave")"
   offer_xvfb
   tidy_old
@@ -343,6 +362,7 @@ update() {
 
 update_finish() {
   (cd "$REPO/server" && "$(find_uv)" sync --frozen --quiet) || return 1
+  fetch_voice_models
   offer_xvfb
   tidy_old
   if linux_systemd; then

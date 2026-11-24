@@ -61,6 +61,28 @@ class Engine:
 
 
 @dataclass(frozen=True)
+class VoiceSettings:
+    """Voice input (see voice.py). Without a transcription URL, voice input is off and the app says why."""
+
+    stt_url: str = ""  # an OpenAI-compatible API base, e.g. http://127.0.0.1:8780/v1 (POST {stt_url}/audio/transcriptions)
+    stt_model: str = ""
+    stt_fields: tuple[tuple[str, str], ...] = ()  # extra form fields for that API, e.g. store=false
+    router_url: str = "https://openrouter.ai/api/alpha/decisions"
+    router_model: str = ""  # a decision model; none: every line becomes a message
+    router_key: str = "OPENROUTER_API_KEY"  # the variable that holds the router's key, in keys.env or the environment
+    key_file: Path = CONFIG_DIR / "keys.env"
+    models_dir: Path = Path.home() / ".krewd" / "voice"  # the speaker and end-of-thought models (`voice fetch`)
+    voiceprint_file: Path = CONFIG_DIR / "voiceprint.json"
+
+    @property
+    def router_on(self) -> bool:
+        return bool(self.router_model)
+
+    def read_key(self) -> str | None:
+        return Profile(id="voice", name="voice", key=self.router_key, key_file=self.key_file).read_key()
+
+
+@dataclass(frozen=True)
 class Settings:
     database_url: str
     host: str
@@ -94,6 +116,7 @@ class Settings:
     # Where the agents keep their session transcripts (storage report and cleanup). None: their defaults.
     claude_dir: Path | None = None
     codex_dir: Path | None = None
+    voice: "VoiceSettings" = field(default_factory=lambda: VoiceSettings())
 
     @property
     def shared(self) -> list[Path]:
@@ -212,6 +235,24 @@ def load_settings() -> Settings:
         passkey_rp_id=os.environ.get("KREWD_PASSKEY_RP_ID", "").strip().lower() or None,
         passkey_certs=tuple(c.strip().replace(":", "").lower() for c in os.environ.get("KREWD_PASSKEY_CERTS", "").split(",")
                             if c.strip()),
+        voice=load_voice_settings(Path(os.path.expanduser(os.environ.get("KREWD_DATA_DIR", "~/.krewd")))),
+    )
+
+
+def load_voice_settings(data_dir: Path) -> VoiceSettings:
+    fields = []
+    for part in os.environ.get("KREWD_VOICE_STT_FIELDS", "").split(","):
+        name, sep, value = part.partition("=")
+        if sep and name.strip():
+            fields.append((name.strip(), value.strip()))
+    return VoiceSettings(
+        stt_url=os.environ.get("KREWD_VOICE_STT_URL", "").strip().rstrip("/"),
+        stt_model=os.environ.get("KREWD_VOICE_STT_MODEL", "").strip(),
+        stt_fields=tuple(fields),
+        router_url=os.environ.get("KREWD_VOICE_ROUTER_URL", "https://openrouter.ai/api/alpha/decisions").strip(),
+        router_model=os.environ.get("KREWD_VOICE_ROUTER_MODEL", "").strip(),
+        router_key=os.environ.get("KREWD_VOICE_ROUTER_KEY", "OPENROUTER_API_KEY").strip() or "OPENROUTER_API_KEY",
+        models_dir=Path(os.path.expanduser(os.environ.get("KREWD_VOICE_MODELS", str(data_dir / "voice")))),
     )
 
 

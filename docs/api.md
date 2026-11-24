@@ -98,6 +98,36 @@ Every message is stored before anything else happens, so it survives the phone g
 Clients replay a task with `/sessions/{id}/events`, then follow `/api/events` from `last_seq`. Events are durable, so a client can disconnect at any time and continue from the last seq it saw.
 
 
+## Voice input
+
+The phone listens in a chat and the server turns what it hears into chat messages labelled by speaker (`voice.py`; off until `KREWD_VOICE_STT_URL` and `KREWD_VOICE_STT_MODEL` are set). Audio is 16 kHz mono 16-bit little-endian PCM, sent as the raw request body. It is never stored; only the text goes into the chat. A voice session lives in the server's memory: after a restart its id answers 409 and the phone starts a new one, with the P labels starting over.
+
+| Method and path | Body | Returns |
+|---|---|---|
+| `GET /api/voice` | | `{available, problems, enrolled, enrolled_at, router, transcription, active}` |
+| `POST /api/voice/voiceprint` | 15 to 120 s of the owner reading aloud (PCM) | `{enrolled, enrolled_at, speech_seconds}`; 422 with under 15 s of speech. The voiceprint is 256 numbers in `voiceprint.json` in the config folder (mode 600). |
+| `DELETE /api/voice/voiceprint` | | `{enrolled: false}` |
+| `POST /api/sessions/{id}/voice` | `{my_voice, ask, voice_id?}` | `{voice_id, my_voice, ask, enrolled, speakers, router}`; starts (or resumes) the chat's voice session, and asks the transcription API for a moment of silence so its model loads. 503 with the reason when voice input is off. |
+| `PATCH /api/sessions/{id}/voice/{voice_id}` | `{my_voice?, ask?}` | the voice session |
+| `POST /api/sessions/{id}/voice/{voice_id}/audio?seq=N&instruct=false` | one piece of speech, up to 30 s (PCM) | `{seq, speaker, label, text, line, line_id, done, speakers}`: who spoke and the words, the thought so far, and `done` when the end-of-thought model finished it. Send pieces in order; the same `seq` again returns the same answer. `instruct=true`: the owner holding "instruct" (always Me, always sent, never routed). |
+| `POST /api/sessions/{id}/voice/{voice_id}/pause` | | `{finished}`: the phone was quiet for a while, so the open thought is finished. |
+| `POST /api/sessions/{id}/voice/{voice_id}/speakers/{P1}` | `{name}` or `{merge_into: "P2" \| "me"}` | the voice session (rename, or "P1 is P2") |
+| `POST /api/sessions/{id}/voice/{voice_id}/choice` | `{line_id, choice}` | `{ok}`; 409 once the choice has closed |
+| `DELETE /api/sessions/{id}/voice/{voice_id}` | | `{active: false}`, after the last line is routed |
+
+How a piece becomes a message:
+
+- Speaker: the owner ("Me") when its WeSpeaker embedding is at least 0.45 cosine from the voiceprint; else the closest P speaker at 0.35 or more, else a new P. Pieces under 1 s continue the open thought. Pieces with no words never make a speaker.
+- Thought: pieces of one speaker add up until Smart Turn v3 gives at least 0.5 that the thought is finished, another speaker talks, or the phone sends a pause.
+- The owner's line is dropped while `my_voice` is off (`voice_line` `not_sent`) and when it mostly repeats one of the agent's last three replies (`echo`).
+- Router (`KREWD_VOICE_ROUTER_MODEL` on OpenRouter's `POST /api/alpha/decisions`, `provider: {zdr: true, allow_fallbacks: false}`, at most 30 calls a minute per voice session). The state is the owner's last typed message, the last 8 lines, the open answers (the last 4) and the line; the one question is `new`, `context` or `add_<answer>`. Below 0.6 confidence, with `ask` on and `context` among the two likeliest, the server emits `voice_choice` and waits 3 s for `/choice`, then takes the likelier. Without a router, or when it fails, the line is `new`.
+- `new`: a message with `delivery: queue` (its own turn) and a new answer id (A1, A2...). `add_A2`: a message steered into A2's turn while that runs, else queued. `context`: held (`voice_line` `held`) and sent with the next message as "said meanwhile". Instructions use the default delivery, like a typed message.
+- The message's `meta.voice` is `{line, speaker, kind: new | add | instruct, answer, topic?, meanwhile?: [{speaker, text}], confidence?}`, and the `user` event carries it. The agent reads `[Voice] P1 said: "..."` (or `... adds to your answer A2 (topic): "..."`, `Instruction from the owner: "..."`). The first voice message an agent session gets starts with Krewd's voice rules (`voice.RULES`; `sessions.voice_rules_for` holds the agent session that has them), so a fresh session after compact or a switch gets them again.
+
+Events: `voice_state` `{active, voice_id, my_voice, ask, enrolled, speakers}`, `voice_line` `{line_id, speaker, text, state: held | not_sent | echo | failed, confidence?}`, `voice_choice` `{line_id, speaker, text, seconds, default, options: [{id, label, p}]}`, `voice_choice_done` `{line_id, choice, by: owner | timeout}`.
+
+Models (`python -m krewd_server.voice fetch`, pinned by revision and SHA-256, in `KREWD_VOICE_MODELS`, default `~/.krewd/voice`): WeSpeaker ResNet34-LM trained on VoxCeleb (CC BY 4.0, Wespeaker/wespeaker-voxceleb-resnet34-LM) and pipecat Smart Turn v3.2 CPU (BSD 2-Clause, pipecat-ai/smart-turn-v3), both on the CPU through onnxruntime. Their features (`voice_audio.py`: Kaldi filterbanks, Whisper log-mels) are numpy ports checked against torchaudio and transformers.
+
 ## Switching agents
 
 One chat can move between agents (Claude Code, Codex, any ACP agent) and stays one chat. Each agent keeps its own session and settings in the chat (`session_agents`), with the last event it saw. On a switch the current agent first writes a handover (skipped when it has no context yet); Krewd parks its session, brings in the target agent's own session (or a new one), and puts a briefing in front of the next message: the handovers written since that agent last saw the chat, the previous agents' session ids, and `krewd chat history <chat id>` for exact messages. A returning agent resumes its own session and hears only what it missed. The `switch` event `{from, to, from_name, to_name, from_session, summary}` marks it in the timeline. A routine's chat and its routine always use the same agent: changing the routine's agent switches its chat, and switching the chat changes the routine.

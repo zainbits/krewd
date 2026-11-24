@@ -505,6 +505,52 @@ class KrewdApi(
     private fun tabsJson(tabs: List<BrowserTab>) =
         JSONArray(tabs.map { JSONObject().put("id", it.id).put("title", it.title).put("url", it.url) })
 
+    // Voice input (voice.py on the server): pieces of 16 kHz mono 16-bit PCM, numbered per voice session.
+
+    fun voiceStatus(): JSONObject = obj("GET", "/api/voice")
+
+    fun voiceStart(id: String, myVoice: Boolean, ask: Boolean, voiceId: String?): JSONObject {
+        val body = JSONObject().put("my_voice", myVoice).put("ask", ask)
+        if (voiceId != null) body.put("voice_id", voiceId)
+        return obj("POST", "/api/sessions/$id/voice", body)
+    }
+
+    fun voiceChange(id: String, voiceId: String, myVoice: Boolean? = null, ask: Boolean? = null): JSONObject {
+        val body = JSONObject()
+        if (myVoice != null) body.put("my_voice", myVoice)
+        if (ask != null) body.put("ask", ask)
+        return obj("PATCH", "/api/sessions/$id/voice/$voiceId", body)
+    }
+
+    /** One piece of speech; the answer has who spoke and the words. Waits while the server's model loads. */
+    fun voiceAudio(id: String, voiceId: String, seq: Long, pcm: ByteArray, instruct: Boolean): JSONObject =
+        JSONObject(call("POST", "/api/sessions/$id/voice/$voiceId/audio?seq=$seq&instruct=$instruct", null,
+            readTimeoutMs = 200_000, raw = pcm))
+
+    fun voicePause(id: String, voiceId: String): JSONObject = obj("POST", "/api/sessions/$id/voice/$voiceId/pause", JSONObject())
+
+    fun voiceSpeaker(id: String, voiceId: String, speaker: String, name: String?, mergeInto: String?): JSONObject {
+        val body = JSONObject()
+        if (name != null) body.put("name", name)
+        if (mergeInto != null) body.put("merge_into", mergeInto)
+        return obj("POST", "/api/sessions/$id/voice/$voiceId/speakers/$speaker", body)
+    }
+
+    fun voiceChoice(id: String, voiceId: String, lineId: String, choice: String) {
+        obj("POST", "/api/sessions/$id/voice/$voiceId/choice", JSONObject().put("line_id", lineId).put("choice", choice))
+    }
+
+    fun voiceStop(id: String, voiceId: String) {
+        call("DELETE", "/api/sessions/$id/voice/$voiceId", null, readTimeoutMs = 30_000)
+    }
+
+    fun voiceEnroll(pcm: ByteArray): JSONObject =
+        JSONObject(call("POST", "/api/voice/voiceprint", null, readTimeoutMs = 200_000, raw = pcm))
+
+    fun voiceForget() {
+        call("DELETE", "/api/voice/voiceprint", null)
+    }
+
     /** Emergency restart of the server and its agents; it is back after about 10 to 15 seconds. */
     fun restartServer() {
         obj("POST", "/api/admin/restart", JSONObject())
@@ -783,6 +829,7 @@ class KrewdApi(
         headers: Map<String, String> = emptyMap(),
         retried: Boolean = false,
         poll: Boolean = false,
+        raw: ByteArray? = null,
     ): String {
         val conn = open(baseUrl + path)
         if (poll) polling = conn
@@ -794,7 +841,12 @@ class KrewdApi(
             if (auth) conn.setRequestProperty("Authorization", "Bearer ${bearer()}")
             headers.forEach { (k, v) -> conn.setRequestProperty(k, v) }
             val payload = text ?: body?.toString()
-            if (payload != null) {
+            if (raw != null) {
+                conn.doOutput = true
+                conn.setRequestProperty("Content-Type", "application/octet-stream")
+                conn.setFixedLengthStreamingMode(raw.size)
+                conn.outputStream.use { it.write(raw) }
+            } else if (payload != null) {
                 conn.doOutput = true
                 conn.setRequestProperty("Content-Type", "application/json")
                 conn.outputStream.use { it.write(payload.toByteArray()) }
@@ -804,7 +856,7 @@ class KrewdApi(
                 // The session ran out (or the server restarted): get a new one with the phone's key, once.
                 creds.session = null
                 conn.errorStream?.use { it.readBytes() } // read to the end, so the connection is reused
-                return call(method, path, body, connectTimeoutMs, readTimeoutMs, auth, text, headers, retried = true, poll = poll)
+                return call(method, path, body, connectTimeoutMs, readTimeoutMs, auth, text, headers, retried = true, poll = poll, raw = raw)
             }
             val stream = if (code in 200..299) conn.inputStream else conn.errorStream
             val text = stream?.bufferedReader()?.use { it.readText() }.orEmpty()

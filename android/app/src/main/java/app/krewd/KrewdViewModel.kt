@@ -70,6 +70,7 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
+import app.krewd.voice.Voice
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -262,6 +263,8 @@ class KrewdViewModel(private val app: Application) {
     init {
         // The app's own picks are kept on the server too, so a new phone starts where the old one was.
         prefs.onChange = { key, value -> api?.let { client -> scope.launch(Dispatchers.IO) { runCatching { client.setPref(key, value) } } } }
+        // Voice input sends through the same connection, and waits while the app is offline.
+        Voice.bind { apiFlow.filterNotNull().first() }
     }
     private var loop: Job? = null
     private var timeline: Timeline? = null
@@ -575,6 +578,7 @@ class KrewdViewModel(private val app: Application) {
 
     private fun handle(event: Event) {
         val sid = event.sessionId
+        if (event.kind.startsWith("voice_")) Voice.onEvent(sid, event.kind, event.payload)
         when (event.kind) {
             "session" -> {
                 val session = SessionInfo.from(event.payload)
