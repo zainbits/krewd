@@ -2,7 +2,8 @@ package app.krewd.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -41,6 +42,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
@@ -201,16 +203,21 @@ private fun HoldToInstruct(down: Boolean, enabled: Boolean) {
         shape = RoundedCornerShape(22.dp),
         color = if (down) colors.primary else colors.secondaryContainer,
         contentColor = if (down) colors.onPrimary else colors.onSecondaryContainer,
+        // Caught in the Initial pass, before the liquid glass around the panel takes the touch for its stretch.
         modifier = Modifier.fillMaxWidth().height(48.dp).pointerInput(enabled) {
             if (!enabled) return@pointerInput
-            detectTapGestures(onPress = {
+            awaitEachGesture {
+                awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial).consume()
                 Voice.instruct(true)
                 try {
-                    tryAwaitRelease()
+                    do {
+                        val e = awaitPointerEvent(PointerEventPass.Initial)
+                        e.changes.forEach { it.consume() }
+                    } while (e.changes.any { it.pressed })
                 } finally {
                     Voice.instruct(false)
                 }
-            })
+            }
         },
     ) {
         Row(horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
