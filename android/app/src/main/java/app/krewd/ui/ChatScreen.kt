@@ -370,18 +370,6 @@ fun ChatScreen(state: UiState, viewModel: KrewdViewModel) {
                 }
             }
         }
-        if (sideOpen && session != null) {
-            NewTaskSheet(state, viewModel, session.engine, onDismiss = { sideOpen = false }, onOpenSettings = {}, parent = session,
-                inWindow = true, backdrop = if (glassOn) backdrop else null)
-        }
-        reviewing?.let { id ->
-            val proposal = state.proposals.firstOrNull { it.id == id }
-                ?: (state.timeline.firstOrNull { it is ProposalItem && it.proposal.id == id } as? ProposalItem)?.proposal
-            if (proposal != null) {
-                NewTaskSheet(state, viewModel, proposal.engine ?: session?.engine, onDismiss = { reviewing = null }, onOpenSettings = {}, proposal = proposal,
-                    inWindow = true, backdrop = if (glassOn) backdrop else null)
-            }
-        }
 
         // The composer's layer: the floating layer plus the composer, what the cards over it show.
         Box(Modifier.fillMaxSize().then(if (glassOn) Modifier.glassSource(composerBackdrop, under = floatBackdrop) else Modifier)) {
@@ -533,6 +521,20 @@ fun ChatScreen(state: UiState, viewModel: KrewdViewModel) {
         }
         peek?.let { (file, chip) ->
             FilePeekCard(file, chip, backdrop = if (glassOn) composerBackdrop else null, onClose = { peek = null })
+        }
+        // Sheets come last, over the composer and its cards: drawn before them, the composer covered the sheet's
+        // bottom (its Send button) whenever the sheet was tall.
+        if (sideOpen && session != null) {
+            NewTaskSheet(state, viewModel, session.engine, onDismiss = { sideOpen = false }, onOpenSettings = {}, parent = session,
+                inWindow = true, backdrop = if (glassOn) backdrop else null)
+        }
+        reviewing?.let { id ->
+            val proposal = state.proposals.firstOrNull { it.id == id }
+                ?: (state.timeline.firstOrNull { it is ProposalItem && it.proposal.id == id } as? ProposalItem)?.proposal
+            if (proposal != null) {
+                NewTaskSheet(state, viewModel, proposal.engine ?: session?.engine, onDismiss = { reviewing = null }, onOpenSettings = {}, proposal = proposal,
+                    inWindow = true, backdrop = if (glassOn) backdrop else null)
+            }
         }
     }
 }
