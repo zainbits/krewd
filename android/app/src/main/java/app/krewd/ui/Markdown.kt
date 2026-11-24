@@ -3,7 +3,8 @@
  * and autolinks) and drawn with Compose Material 3.
  *
  * Renders headings, paragraphs, bullet and ordered lists (nested, tight or loose), block quotes,
- * thematic breaks, fenced and indented code blocks (language label, Wrap toggle, Copy button),
+ * thematic breaks, fenced and indented code blocks (language label, Wrap toggle, Copy button), Mermaid diagrams
+ * (```mermaid blocks drawn as pictures, Mermaid.kt),
  * GFM tables (aligned, horizontally scrollable columns), HTML as plain text, and inline emphasis,
  * strong, strikethrough, code spans, links, image alt text and line breaks. Partial (streaming)
  * Markdown is fine: commonmark always yields a valid tree for any prefix of a document.
@@ -348,10 +349,16 @@ private fun Block(node: Node, style: MdStyle, depth: Int) {
         is ListBlock -> ListView(node, style, depth)
         is BlockQuote -> Quote(node, style, depth)
         is ThematicBreak -> HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-        is FencedCodeBlock -> CodeBlock(
-            code = node.literal.orEmpty().removeSuffix("\n"),
-            language = node.info?.trim()?.substringBefore(' ')?.takeIf { it.isNotEmpty() },
-        )
+        is FencedCodeBlock -> {
+            val code = node.literal.orEmpty().removeSuffix("\n")
+            val language = node.info?.trim()?.substringBefore(' ')?.takeIf { it.isNotEmpty() }
+            // A diagram is drawn once its fence is closed; while it streams in it shows as code.
+            if (language.equals("mermaid", ignoreCase = true) && node.closingFenceLength != null && code.isNotBlank()) {
+                MermaidBlock(code)
+            } else {
+                CodeBlock(code = code, language = language)
+            }
+        }
         is IndentedCodeBlock -> CodeBlock(code = node.literal.orEmpty().removeSuffix("\n"), language = null)
         is TableBlock -> Table(node, style)
         is HtmlBlock -> Text(node.literal.orEmpty().trimEnd(), style = body, color = onSurface)
@@ -471,7 +478,7 @@ private fun CodeBlock(code: String, language: String?) {
 }
 
 @Composable
-private fun BarButton(label: String, active: Boolean, onClick: () -> Unit) {
+internal fun BarButton(label: String, active: Boolean, onClick: () -> Unit) {
     Text(
         text = label,
         style = MaterialTheme.typography.labelMedium,

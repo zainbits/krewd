@@ -1653,10 +1653,11 @@ class KrewdViewModel(private val app: Application) {
     suspend fun image(ref: ImageRef, maxSide: Int): androidx.compose.ui.graphics.ImageBitmap? {
         val key = "${ref.key}@$maxSide"
         images.get(key)?.let { return it }
-        if (ref !is ImageRef.Local && api == null) return null
+        if (ref !is ImageRef.Local && ref !is ImageRef.Diagram && api == null) return null
         val bitmap = withContext(Dispatchers.IO) {
             val source = when (ref) {
                 is ImageRef.Local -> android.graphics.ImageDecoder.createSource(app.contentResolver, Uri.parse(ref.uri))
+                is ImageRef.Diagram -> android.graphics.ImageDecoder.createSource(java.io.File(ref.path))
                 else -> android.graphics.ImageDecoder.createSource(java.nio.ByteBuffer.wrap(imageBytes(ref)))
             }
             try {
@@ -1684,12 +1685,13 @@ class KrewdViewModel(private val app: Application) {
         if (ref is ImageRef.Local) {
             return app.contentResolver.openInputStream(Uri.parse(ref.uri))?.use { it.readBytes() } ?: error("Could not read the picture")
         }
+        if (ref is ImageRef.Diagram) return java.io.File(ref.path).readBytes()
         imageFiles.get(ref.key)?.let { return it }
         val client = api ?: error("Not connected to Krewd")
         val bytes = when (ref) {
             is ImageRef.Tool -> client.toolImage(ref.file)
             is ImageRef.Sent -> client.attachment(ref.file.path.substringAfterLast('/'))
-            is ImageRef.Local -> error("unreachable")
+            is ImageRef.Local, is ImageRef.Diagram -> error("unreachable")
         }
         imageFiles.put(ref.key, bytes)
         return bytes
@@ -1761,6 +1763,7 @@ class KrewdViewModel(private val app: Application) {
             is ImageRef.Local -> ref.mime
             is ImageRef.Sent -> ref.file.mime
             is ImageRef.Tool -> null
+            is ImageRef.Diagram -> "image/png"
         }?.takeIf { it.startsWith("image/") }
         if (known != null) return known
         val ext = ref.name.substringAfterLast('.', "").lowercase()

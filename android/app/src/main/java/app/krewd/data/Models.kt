@@ -56,6 +56,12 @@ sealed class ImageRef {
         override val name get() = file.name
     }
 
+    /** A Mermaid diagram the app drew (ui/Mermaid.kt), a PNG in its cache folder. */
+    data class Diagram(val path: String) : ImageRef() {
+        override val key get() = "diagram:$path"
+        override val name get() = "diagram-" + path.substringAfterLast('/').take(12) + ".png"
+    }
+
     data class Tool(val file: String) : ImageRef() {
         override val key get() = "tool:$file"
         override val name get() = file
