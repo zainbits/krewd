@@ -250,23 +250,22 @@ private const val ENROLL_TEXT = "Read this aloud at your normal pace, the way yo
     "few questions, and explain the next steps clearly. If something is unclear, I say so and find out. " +
     "Numbers, names and dates matter, so I repeat them back: seven, fourteen, twenty-one, Monday and Friday."
 
-/** Records about 30 s of the owner reading, for their voiceprint ("Me"). Listening has to stop for it. */
+/** Records about 30 s of the owner reading, for their voiceprint ("Me"); Cancel always closes it. */
 @Composable
 private fun EnrollDialog(listening: Boolean, onClose: () -> Unit) {
-    val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    var job by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
+    val close = { job?.cancel(); onClose() }
     var progress by remember { mutableFloatStateOf(-1f) }
     var level by remember { mutableFloatStateOf(0f) }
     var result by remember { mutableStateOf<String?>(null) }
-    var stopping by remember { mutableStateOf(false) }
     AlertDialog(
-        onDismissRequest = { if (progress < 0f || result != null) onClose() },
+        onDismissRequest = close,
         title = { Text("Set up My voice") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                if (listening) Text("Listening stops while you record. Start it again after.", style = MaterialTheme.typography.bodySmall)
+                if (listening) Text("Listening pauses while you record; nothing you read goes to the chat.", style = MaterialTheme.typography.bodySmall)
                 Text(ENROLL_TEXT, style = MaterialTheme.typography.bodyMedium)
-                if (stopping) Text("Stopping listening first…", style = MaterialTheme.typography.bodySmall)
                 if (progress >= 0f) {
                     LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth())
                     Level(level)
@@ -284,13 +283,10 @@ private fun EnrollDialog(listening: Boolean, onClose: () -> Unit) {
                     onClose()
                     return@TextButton
                 }
-                if (listening) Voice.stop(context)
                 progress = 0f
                 result = null
-                scope.launch {
-                    stopping = listening
-                    val out = Voice.enroll(30) { p, l -> stopping = false; progress = p; level = l }
-                    stopping = false
+                job = scope.launch {
+                    val out = Voice.enroll(30) { p, l -> progress = p; level = l }
                     result = out.fold(
                         onSuccess = { "Done: ${it.optDouble("speech_seconds", 0.0).toInt()} s of your voice heard." },
                         onFailure = { "Could not set it up: ${it.message}" },
@@ -298,7 +294,7 @@ private fun EnrollDialog(listening: Boolean, onClose: () -> Unit) {
                 }
             }) { Text(if (result != null) "Close" else "Record 30 s") }
         },
-        dismissButton = { if (progress < 0f) TextButton(onClick = onClose) { Text("Cancel") } },
+        dismissButton = { if (result == null) TextButton(onClick = close) { Text("Cancel") } },
     )
 }
 

@@ -157,33 +157,54 @@ object Voice {
 
     // Recording the owner's voiceprint: about 30 s of them reading aloud, sent once, never kept on the phone.
 
+    /**
+     * Records [seconds] of the owner reading and sends it. While a chat listens, the frames come from its mic (the
+     * reading is not sent to the chat); otherwise from a recorder of its own. Fails instead of hanging when the mic
+     * gives nothing.
+     */
     @SuppressLint("MissingPermission") // the sheet asks for the microphone first
     suspend fun enroll(seconds: Int, progress: (Float, Float) -> Unit): Result<JSONObject> = withContext(Dispatchers.IO) {
         runCatching {
-            // Listening has to let go of the mic first: it sends its last words, then ends (seconds, at most a minute).
-            withTimeoutOrNull(70_000) { while (listener != null) delay(200) }
-                ?: throw IllegalStateException("Listening did not stop; stop it and try again")
-            delay(300)
-            val rec = recorder()
-            val out = java.io.ByteArrayOutputStream(seconds * RATE * 2)
-            val frame = ShortArray(FRAME)
+            val total = seconds * RATE
+            val out = java.io.ByteArrayOutputStream(total * 2)
             val bytes = java.nio.ByteBuffer.allocate(FRAME * 2).order(java.nio.ByteOrder.LITTLE_ENDIAN)
-            try {
-                rec.startRecording()
-                val total = seconds * RATE
-                var got = 0
-                while (got < total && kotlinx.coroutines.currentCoroutineContext()[Job]?.isActive != false) {
-                    val n = rec.read(frame, 0, FRAME)
-                    if (n <= 0) continue
-                    bytes.clear()
-                    for (i in 0 until n) bytes.putShort(frame[i])
-                    out.write(bytes.array(), 0, n * 2)
-                    got += n
-                    progress(got / total.toFloat(), rms(frame, n).toFloat() / 6000f)
+            var got = 0
+            fun take(frame: ShortArray, n: Int): Boolean {
+                bytes.clear()
+                for (i in 0 until n) bytes.putShort(frame[i])
+                out.write(bytes.array(), 0, n * 2)
+                got += n
+                progress(min(1f, got / total.toFloat()), rms(frame, n).toFloat() / 6000f)
+                return got >= total
+            }
+            val l = listener
+            if (l != null) {
+                val done = kotlinx.coroutines.CompletableDeferred<Unit>()
+                l.tap = { frame, n -> if (!done.isCompleted && take(frame, n)) done.complete(Unit) }
+                try {
+                    withTimeoutOrNull((seconds + 10) * 1000L) { done.await() }
+                        ?: throw IllegalStateException("The microphone gave no sound")
+                } finally {
+                    l.tap = null
                 }
-            } finally {
-                rec.stop()
-                rec.release()
+            } else {
+                val rec = recorder()
+                val frame = ShortArray(FRAME)
+                val deadline = SystemClock.elapsedRealtime() + (seconds + 10) * 1000L
+                try {
+                    rec.startRecording()
+                    check(rec.recordingState == AudioRecord.RECORDSTATE_RECORDING) { "The microphone is busy" }
+                    while (true) {
+                        kotlinx.coroutines.currentCoroutineContext()[Job]?.let { if (!it.isActive) throw kotlinx.coroutines.CancellationException() }
+                        check(SystemClock.elapsedRealtime() < deadline) { "The microphone gave no sound" }
+                        val n = rec.read(frame, 0, FRAME)
+                        check(n >= 0) { "The microphone failed ($n)" }
+                        if (n > 0 && take(frame, n)) break
+                    }
+                } finally {
+                    runCatching { rec.stop() }
+                    rec.release()
+                }
             }
             val result = connection().voiceEnroll(out.toByteArray())
             _state.update { it.copy(enrolled = true) }
@@ -277,6 +298,8 @@ internal class Listener(private val context: Context, val chatId: String, privat
     private val seq = AtomicLong(System.currentTimeMillis()) // unique and rising across restarts of the app
     @Volatile var voiceId: String? = null
     @Volatile var instructing = false
+    /** Set while Set up My voice records from this mic: frames go there instead of to the chat. */
+    @Volatile var tap: ((ShortArray, Int) -> Unit)? = null
     @Volatile private var running = true
     @Volatile private var lastSpeech = SystemClock.elapsedRealtime()
     private var thread: Thread? = null
@@ -296,12 +319,12 @@ internal class Listener(private val context: Context, val chatId: String, privat
         Voice.set { it.copy(stopping = true, instructing = false, choice = null) }
         scope.launch {
             withContext(Dispatchers.IO) { thread?.join(2_000) }
-            val drained = withTimeoutOrNull(60_000) {
+            val drained = withTimeoutOrNull(30_000) {
                 while (pending().isNotEmpty()) delay(200)
                 true
             }
             if (drained == null) {
-                Log.w(Voice.TAG, "voice: ${pending().size} pieces not sent within a minute after Stop; deleted")
+                Log.w(Voice.TAG, "voice: ${pending().size} pieces not sent within 30 s after Stop; deleted")
             }
             dir.listFiles()?.forEach { it.delete() }
             voiceId?.let { vid -> runCatching { Voice.connection().voiceStop(chatId, vid) } }
@@ -347,8 +370,13 @@ internal class Listener(private val context: Context, val chatId: String, privat
                     break
                 }
                 if (n == 0) continue
-                val speech = cutter.feed(frame, n, instructing)
                 val now = SystemClock.elapsedRealtime()
+                tap?.let { t ->
+                    t(frame, n)
+                    lastSpeech = now
+                    continue
+                }
+                val speech = cutter.feed(frame, n, instructing)
                 if (speech) lastSpeech = now
                 if (now - lastLevel > 100) {
                     lastLevel = now

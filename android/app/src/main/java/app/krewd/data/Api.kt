@@ -525,7 +525,7 @@ class KrewdApi(
     /** One piece of speech; the answer has who spoke and the words. Waits while the server's model loads. */
     fun voiceAudio(id: String, voiceId: String, seq: Long, pcm: ByteArray, instruct: Boolean): JSONObject =
         JSONObject(call("POST", "/api/sessions/$id/voice/$voiceId/audio?seq=$seq&instruct=$instruct", null,
-            readTimeoutMs = 200_000, raw = pcm))
+            readTimeoutMs = 45_000, raw = pcm)) // a dead route fails soon; a resend of the same seq is safe
 
     fun voicePause(id: String, voiceId: String): JSONObject = obj("POST", "/api/sessions/$id/voice/$voiceId/pause", JSONObject())
 
@@ -545,7 +545,7 @@ class KrewdApi(
     }
 
     fun voiceEnroll(pcm: ByteArray): JSONObject =
-        JSONObject(call("POST", "/api/voice/voiceprint", null, readTimeoutMs = 200_000, raw = pcm))
+        JSONObject(call("POST", "/api/voice/voiceprint", null, readTimeoutMs = 60_000, raw = pcm))
 
     fun voiceForget() {
         call("DELETE", "/api/voice/voiceprint", null)
