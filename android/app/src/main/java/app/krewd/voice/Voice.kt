@@ -160,7 +160,10 @@ object Voice {
     @SuppressLint("MissingPermission") // the sheet asks for the microphone first
     suspend fun enroll(seconds: Int, progress: (Float, Float) -> Unit): Result<JSONObject> = withContext(Dispatchers.IO) {
         runCatching {
-            check(listener == null) { "Stop listening first" }
+            // Listening has to let go of the mic first: it sends its last words, then ends (seconds, at most a minute).
+            withTimeoutOrNull(70_000) { while (listener != null) delay(200) }
+                ?: throw IllegalStateException("Listening did not stop; stop it and try again")
+            delay(300)
             val rec = recorder()
             val out = java.io.ByteArrayOutputStream(seconds * RATE * 2)
             val frame = ShortArray(FRAME)
@@ -185,7 +188,7 @@ object Voice {
             val result = connection().voiceEnroll(out.toByteArray())
             _state.update { it.copy(enrolled = true) }
             result
-        }
+        }.onFailure { Log.w(TAG, "voice: setting up My voice failed: $it") }
     }
 
     suspend fun forgetVoiceprint(): Result<Unit> = withContext(Dispatchers.IO) {

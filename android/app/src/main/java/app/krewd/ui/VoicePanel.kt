@@ -258,6 +258,7 @@ private fun EnrollDialog(listening: Boolean, onClose: () -> Unit) {
     var progress by remember { mutableFloatStateOf(-1f) }
     var level by remember { mutableFloatStateOf(0f) }
     var result by remember { mutableStateOf<String?>(null) }
+    var stopping by remember { mutableStateOf(false) }
     AlertDialog(
         onDismissRequest = { if (progress < 0f || result != null) onClose() },
         title = { Text("Set up My voice") },
@@ -265,6 +266,7 @@ private fun EnrollDialog(listening: Boolean, onClose: () -> Unit) {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 if (listening) Text("Listening stops while you record. Start it again after.", style = MaterialTheme.typography.bodySmall)
                 Text(ENROLL_TEXT, style = MaterialTheme.typography.bodyMedium)
+                if (stopping) Text("Stopping listening first…", style = MaterialTheme.typography.bodySmall)
                 if (progress >= 0f) {
                     LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth())
                     Level(level)
@@ -284,9 +286,11 @@ private fun EnrollDialog(listening: Boolean, onClose: () -> Unit) {
                 }
                 if (listening) Voice.stop(context)
                 progress = 0f
+                result = null
                 scope.launch {
-                    if (listening) delay(1_500) // the mic is released once the last words are sent
-                    val out = Voice.enroll(30) { p, l -> progress = p; level = l }
+                    stopping = listening
+                    val out = Voice.enroll(30) { p, l -> stopping = false; progress = p; level = l }
+                    stopping = false
                     result = out.fold(
                         onSuccess = { "Done: ${it.optDouble("speech_seconds", 0.0).toInt()} s of your voice heard." },
                         onFailure = { "Could not set it up: ${it.message}" },
