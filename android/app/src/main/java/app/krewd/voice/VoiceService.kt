@@ -10,39 +10,58 @@ import android.content.pm.ServiceInfo
 import android.os.IBinder
 import app.krewd.MainActivity
 import app.krewd.R
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.launch
 
 /**
- * The microphone's foreground service: it runs the [Listener] of the chat that listens, with a "Listening" notification
- * (tap: open the chat; Stop). Android lets a microphone service start only while the app is in front, which is
- * where the owner taps the mic.
+ * The microphone's foreground service: it runs the [Listener] of the chat in voice mode, with a "Listening" (Mute)
+ * or "Muted" notification; tapping it opens the chat, where the owner unmutes or leaves voice mode. Android lets a
+ * microphone service start only while the app is in front, which is where the owner taps the mic.
  */
 class VoiceService : Service() {
     private var listener: Listener? = null
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private var watch: Job? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_STOP) {
-            val l = listener
-            if (l == null) {
-                finish(null)
-            } else {
-                post(l.chatId, "Sending the last words…")
-                l.stop(null)
+        when (intent?.action) {
+            ACTION_LEAVE -> {
+                val l = listener
+                if (l == null) finish(null) else l.stop(null)
+                return START_NOT_STICKY
             }
-            return START_NOT_STICKY
+            ACTION_MUTE -> {
+                listener?.mute()
+                return START_NOT_STICKY
+            }
         }
         val chat = intent?.getStringExtra(EXTRA_CHAT)
         if (chat == null) {
             if (listener == null) stopSelf()
             return START_NOT_STICKY
         }
-        startForeground(NOTIFICATION_ID, notification(chat, "Listening"), ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
+        startForeground(NOTIFICATION_ID, notification(chat, muted = false), ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
         val current = listener
         if (current?.chatId == chat) return START_NOT_STICKY
         current?.stop(null)
-        val l = Listener(applicationContext, chat) { reason -> finish(reason, chat) }
+        val l = Listener(applicationContext, chat) { reason -> scope.launch { finish(reason, chat) } }
         listener = l
         Voice.listener = l
         l.start()
+        watch?.cancel()
+        watch = scope.launch {
+            Voice.state.map { it.chatId to it.muted }.distinctUntilChanged().collect { (id, muted) ->
+                if (id == chat && listener === l) {
+                    getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification(chat, muted))
+                }
+            }
+        }
         return START_NOT_STICKY
     }
 
@@ -50,20 +69,20 @@ class VoiceService : Service() {
         if (chat != null && listener?.chatId != chat) return // a newer chat took over
         listener = null
         Voice.listener = null
-        Voice.set { VoiceUi(enrolled = it.enrolled, available = it.available, chatId = if (reason != null) it.chatId else null, error = reason) }
+        watch?.cancel()
+        Voice.set {
+            VoiceUi(enrolled = it.enrolled, available = it.available, myVoice = it.myVoice,
+                chatId = if (reason != null) it.chatId else null, error = reason)
+        }
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
 
-    private fun post(chat: String, text: String) {
-        getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification(chat, text))
-    }
-
-    private fun notification(chat: String, text: String): Notification {
+    private fun notification(chat: String, muted: Boolean): Notification {
         val manager = getSystemService(NotificationManager::class.java)
         manager.createNotificationChannel(
             NotificationChannel(CHANNEL, "Voice input", NotificationManager.IMPORTANCE_LOW).apply {
-                description = "Shown while Krewd listens in a chat"
+                description = "Shown while a chat is in voice mode"
                 setShowBadge(false)
             },
         )
@@ -73,22 +92,30 @@ class VoiceService : Service() {
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
-        val stop = PendingIntent.getService(
-            this, 1, Intent(this, VoiceService::class.java).setAction(ACTION_STOP), PendingIntent.FLAG_IMMUTABLE,
-        )
-        return Notification.Builder(this, CHANNEL)
-            .setSmallIcon(R.drawable.ic_mic_24)
+        val builder = Notification.Builder(this, CHANNEL)
+            .setSmallIcon(if (muted) R.drawable.ic_mic_off_24 else R.drawable.ic_mic_24)
             .setContentTitle("Krewd")
-            .setContentText(text)
+            .setContentText(if (muted) "Muted" else "Listening")
             .setContentIntent(open)
             .setOngoing(true)
             .setCategory(Notification.CATEGORY_SERVICE)
-            .addAction(Notification.Action.Builder(null, "Stop", stop).build())
-            .build()
+        if (!muted) {
+            val mute = PendingIntent.getService(
+                this, 1, Intent(this, VoiceService::class.java).setAction(ACTION_MUTE), PendingIntent.FLAG_IMMUTABLE,
+            )
+            builder.addAction(Notification.Action.Builder(null, "Mute", mute).build())
+        }
+        return builder.build()
     }
 
     override fun onDestroy() {
-        listener?.stop(null)
+        if (listener != null) { // the system ended the service: voice mode is off
+            listener?.stop(null)
+            listener = null
+            Voice.listener = null
+            Voice.set { VoiceUi(enrolled = it.enrolled, available = it.available, myVoice = it.myVoice) }
+        }
+        scope.cancel()
         super.onDestroy()
     }
 
@@ -96,7 +123,8 @@ class VoiceService : Service() {
 
     companion object {
         const val EXTRA_CHAT = "chat"
-        const val ACTION_STOP = "app.krewd.voice.STOP"
+        const val ACTION_LEAVE = "app.krewd.voice.LEAVE"
+        const val ACTION_MUTE = "app.krewd.voice.MUTE"
         const val CHANNEL = "voice"
         const val NOTIFICATION_ID = 0x766f6963
     }

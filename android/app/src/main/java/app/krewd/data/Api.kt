@@ -489,9 +489,10 @@ class KrewdApi(
      */
     fun send(
         id: String, text: String, attachments: List<String>, tabs: List<BrowserTab>, delivery: String?, clientId: String,
-        chats: List<ChatRef> = emptyList(), notes: List<ReplyNote> = emptyList(),
+        chats: List<ChatRef> = emptyList(), notes: List<ReplyNote> = emptyList(), voice: Boolean = false,
     ): JSONObject {
         val body = JSONObject().put("text", text).put("client_id", clientId)
+        if (voice) body.put("voice", true) // sent from voice mode: the agent gets Krewd's voice rules once
         if (notes.isNotEmpty()) body.put("notes", JSONArray(notes.map { it.toJson() }))
         if (attachments.isNotEmpty()) body.put("attachments", JSONArray(attachments))
         if (tabs.isNotEmpty()) body.put("tabs", tabsJson(tabs))
@@ -509,36 +510,13 @@ class KrewdApi(
 
     fun voiceStatus(): JSONObject = obj("GET", "/api/voice")
 
-    fun voiceStart(id: String, myVoice: Boolean, ask: Boolean, voiceId: String?): JSONObject {
-        val body = JSONObject().put("my_voice", myVoice).put("ask", ask)
-        if (voiceId != null) body.put("voice_id", voiceId)
-        return obj("POST", "/api/sessions/$id/voice", body)
-    }
+    /** Starts the chat's voice session (it also wakes the server's transcription model): `{voice_id, enrolled}`. */
+    fun voiceStart(id: String): JSONObject = obj("POST", "/api/sessions/$id/voice", JSONObject())
 
-    fun voiceChange(id: String, voiceId: String, myVoice: Boolean? = null, ask: Boolean? = null): JSONObject {
-        val body = JSONObject()
-        if (myVoice != null) body.put("my_voice", myVoice)
-        if (ask != null) body.put("ask", ask)
-        return obj("PATCH", "/api/sessions/$id/voice/$voiceId", body)
-    }
-
-    /** One piece of speech; the answer has who spoke and the words. Waits while the server's model loads. */
-    fun voiceAudio(id: String, voiceId: String, seq: Long, pcm: ByteArray, instruct: Boolean): JSONObject =
-        JSONObject(call("POST", "/api/sessions/$id/voice/$voiceId/audio?seq=$seq&instruct=$instruct", null,
+    /** One piece of speech; the answer has who spoke (Me or Others) and the words. Waits while the server's model loads. */
+    fun voiceAudio(id: String, voiceId: String, seq: Long, pcm: ByteArray): JSONObject =
+        JSONObject(call("POST", "/api/sessions/$id/voice/$voiceId/audio?seq=$seq", null,
             readTimeoutMs = 45_000, raw = pcm)) // a dead route fails soon; a resend of the same seq is safe
-
-    fun voicePause(id: String, voiceId: String): JSONObject = obj("POST", "/api/sessions/$id/voice/$voiceId/pause", JSONObject())
-
-    fun voiceSpeaker(id: String, voiceId: String, speaker: String, name: String?, mergeInto: String?): JSONObject {
-        val body = JSONObject()
-        if (name != null) body.put("name", name)
-        if (mergeInto != null) body.put("merge_into", mergeInto)
-        return obj("POST", "/api/sessions/$id/voice/$voiceId/speakers/$speaker", body)
-    }
-
-    fun voiceChoice(id: String, voiceId: String, lineId: String, choice: String) {
-        obj("POST", "/api/sessions/$id/voice/$voiceId/choice", JSONObject().put("line_id", lineId).put("choice", choice))
-    }
 
     fun voiceStop(id: String, voiceId: String) {
         call("DELETE", "/api/sessions/$id/voice/$voiceId", null, readTimeoutMs = 30_000)

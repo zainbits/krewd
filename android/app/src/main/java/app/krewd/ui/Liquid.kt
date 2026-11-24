@@ -243,10 +243,13 @@ fun StretchIconButton(
     contentDescription: String?,
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
+    /** Drawn in the accent colour (a mode that is on, such as voice mode). */
+    active: Boolean = false,
 ) {
+    val tint = if (active) MaterialTheme.colorScheme.primary else androidx.compose.material3.LocalContentColor.current
     if (!LocalKrewdGlass.current.on) {
         IconButton(onClick = onClick, enabled = enabled, modifier = modifier) {
-            Icon(painterResource(icon), contentDescription = contentDescription)
+            Icon(painterResource(icon), contentDescription = contentDescription, tint = tint)
         }
         return
     }
@@ -263,7 +266,7 @@ fun StretchIconButton(
         contentAlignment = Alignment.Center,
     ) {
         Box(Modifier.matchParentSize().glassPullContent(pull), contentAlignment = Alignment.Center) {
-            Icon(painterResource(icon), contentDescription = null)
+            Icon(painterResource(icon), contentDescription = null, tint = tint)
         }
     }
 }

@@ -67,6 +67,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -117,7 +118,6 @@ import app.krewd.data.FilesItem
 import app.krewd.data.LinkItem
 import app.krewd.data.Proposal
 import app.krewd.data.ProposalItem
-import app.krewd.data.VoiceLineItem
 import app.krewd.voice.Voice
 import app.krewd.data.ReplyNote
 import android.widget.Toast
@@ -417,22 +417,21 @@ fun ChatScreen(state: UiState, viewModel: KrewdViewModel) {
                     val live = state.live[session.id]
                     val voice by Voice.state.collectAsStateWithLifecycle()
                     val context = LocalContext.current
-                    var typing by remember(session.id) { mutableStateOf(false) }
                     val listeningHere = voice.listening && voice.chatId == session.id
                     val micAsk = androidx.activity.compose.rememberLauncherForActivityResult(
                         androidx.activity.result.contract.ActivityResultContracts.RequestPermission(),
                     ) { granted ->
                         if (granted) {
-                            typing = false
                             Voice.start(context, session.id)
                         } else {
                             Toast.makeText(context, "Voice input needs the microphone", Toast.LENGTH_SHORT).show()
                         }
                     }
+                    // The composer's mic: voice mode on, or (tapped again) off.
                     val onMic = {
                         when {
-                            listeningHere -> typing = false
-                            Voice.hasMic(context) -> { typing = false; Voice.start(context, session.id) }
+                            listeningHere -> Voice.leave(context)
+                            Voice.hasMic(context) -> Voice.start(context, session.id)
                             else -> micAsk.launch(android.Manifest.permission.RECORD_AUDIO)
                         }
                     }
@@ -444,11 +443,10 @@ fun ChatScreen(state: UiState, viewModel: KrewdViewModel) {
                             modifier = Modifier.padding(start = 12.dp, bottom = 4.dp),
                         )
                     }
-                    if (listeningHere && !typing) {
-                        ComposerShell(floatBackdrop, Modifier.fillMaxWidth()) {
-                            VoicePanel(voice, onKeyboard = { typing = true })
-                        }
-                    } else Composer(
+                    if (listeningHere) {
+                        ComposerShell(floatBackdrop, Modifier.fillMaxWidth().padding(bottom = 6.dp)) { VoiceBar(voice) }
+                    }
+                    Composer(
                         backdrop = floatBackdrop,
                         sessionId = session.id,
                         initialText = remember(session.id) { viewModel.messageDraft(session.id) },
@@ -471,12 +469,16 @@ fun ChatScreen(state: UiState, viewModel: KrewdViewModel) {
                         },
                         engines = state.engines,
                         onMention = { viewModel.addDraftChat(session.id, it) },
-                        onSend = viewModel::send,
+                        onSend = { text, how, voiced -> viewModel.send(text, how, voiced, session.id) },
                         onStop = viewModel::stop,
                         onAttach = pick,
                         onRemoveFile = { viewModel.removeAttachment(session.id, it) },
                         onMic = onMic,
-                        listening = listeningHere,
+                        voiceMode = listeningHere,
+                        voiceWaiting = listeningHere && voice.waiting > 0,
+                        voiceSettling = listeningHere && voice.settling,
+                        attachHeard = { viewModel.attachComposer(session.id, it) },
+                        detachHeard = { viewModel.detachComposer(session.id) },
                     )
                 }
             }
@@ -704,12 +706,19 @@ private fun Composer(
     mentions: (String) -> List<MentionCandidate>,
     engines: List<app.krewd.data.EngineInfo>,
     onMention: (ChatRef) -> Unit,
-    onSend: (String, String?) -> Unit,
+    /** The text, the delivery while a turn runs (else null) and whether it is sent from voice mode. */
+    onSend: (String, String?, Boolean) -> Unit,
     onStop: () -> Unit,
     onAttach: () -> Unit,
     onRemoveFile: (Long) -> Unit,
     onMic: () -> Unit,
-    listening: Boolean,
+    /** Voice mode: what is heard is added to the text; Send waits for the last words first. */
+    voiceMode: Boolean,
+    /** Words are being said or transcribed: Send stays possible while the text is still empty. */
+    voiceWaiting: Boolean,
+    voiceSettling: Boolean,
+    attachHeard: ((label: String, text: String) -> Unit) -> Unit,
+    detachHeard: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     // Unsent text is kept per chat on the phone, so leaving the chat or restarting the app loses nothing.
@@ -720,6 +729,23 @@ private fun Composer(
         if (next.text != value.text) onDraft(next.text)
         value = next
     }
+    // Words voice input hears go in at the end (the cursor follows when it was at the end), and are saved with the
+    // draft like typed text.
+    DisposableEffect(sessionId) {
+        // The saved draft is the newest text: words heard while this composer was gone (or its state was being
+        // restored after the activity was recreated) are only there.
+        if (initialText != value.text) value = TextFieldValue(initialText, TextRange(initialText.length))
+        attachHeard { label, words ->
+            val joined = Voice.joinLine(value.text, label, words)
+            val sel = value.selection
+            val atEnd = sel.collapsed && sel.start >= value.text.length
+            edit(if (atEnd) TextFieldValue(joined, TextRange(joined.length))
+                 else value.copy(text = joined, selection = TextRange(minOf(sel.start, joined.length), minOf(sel.end, joined.length))))
+        }
+        onDispose { detachHeard() }
+    }
+    val sendScope = rememberCoroutineScope()
+    var voiceSending by remember(sessionId) { mutableStateOf(false) }
     val text = value.text
     val mention = if (value.selection.collapsed) mentionQuery(text, value.selection.start) else null
     val query = if (value.selection.collapsed && mention == null) commandQuery(text, value.selection.start) else null
@@ -732,7 +758,7 @@ private fun Composer(
     val uploading = files.any { it.uploading }
     // A file the server refused must be removed first; files still uploading go with the message when done.
     val refused = files.any { it.error != null }
-    val hasDraft = text.isNotBlank() || files.isNotEmpty() || hasTabs
+    val hasDraft = text.isNotBlank() || files.isNotEmpty() || hasTabs || voiceWaiting
     val colors = MaterialTheme.colorScheme
     ComposerShell(backdrop, modifier.fillMaxWidth()) {
         val textColor = colors.onSurface
@@ -762,7 +788,11 @@ private fun Composer(
                     Box {
                         if (text.isEmpty()) {
                             Text(
-                                if (busy) "Steer the agent…" else "Reply to Krewd · @ adds a chat",
+                                when {
+                                    voiceMode -> "What is heard comes here · edit, then Send"
+                                    busy -> "Steer the agent…"
+                                    else -> "Reply to Krewd · @ adds a chat"
+                                },
                                 style = MaterialTheme.typography.bodyLarge,
                                 color = hintColor,
                             )
@@ -773,9 +803,9 @@ private fun Composer(
             )
             Row(verticalAlignment = Alignment.CenterVertically) {
                 StretchIconButton(onClick = onAttach, icon = R.drawable.ic_add_24, contentDescription = "Attach files")
-                // Voice input: start listening here, or (while it listens) back to the voice panel.
-                StretchIconButton(onClick = onMic, icon = R.drawable.ic_mic_24,
-                    contentDescription = if (listening) "Back to listening" else "Voice input")
+                // Voice mode: on here, or (tapped again) off.
+                StretchIconButton(onClick = onMic, icon = R.drawable.ic_mic_24, active = voiceMode,
+                    contentDescription = if (voiceMode) "Leave voice mode" else "Voice mode")
                 if (steps != null) {
                     Spacer(Modifier.width(2.dp))
                     Surface(onClick = onSteps, shape = RoundedCornerShape(12.dp), color = colors.surfaceContainerHighest) {
@@ -812,14 +842,31 @@ private fun Composer(
                     Spacer(Modifier.width(6.dp))
                 }
                 val stop = busy && !hasDraft
-                val enabled = stop || ((text.isNotBlank() || files.isNotEmpty() || hasTabs) && !refused)
+                val enabled = stop || ((text.isNotBlank() || files.isNotEmpty() || hasTabs || voiceWaiting) && !refused &&
+                    !voiceSettling && !voiceSending)
                 // A solid round button that stretches like the glass pieces (no glass of its own).
                 KrewdIconPill(
                     onClick = {
                         if (stop) {
                             onStop()
+                        } else if (voiceMode) {
+                            // The last words first (at most ~10 s), so what was just said goes in too.
+                            val how = if (busy) delivery.id else null
+                            voiceSending = true
+                            sendScope.launch {
+                                try {
+                                    Voice.settle(sessionId)
+                                    val whole = value.text.trim()
+                                    if (whole.isNotEmpty() || files.isNotEmpty() || hasTabs) {
+                                        onSend(whole, how, true)
+                                        value = TextFieldValue("") // send() also forgets the saved draft
+                                    }
+                                } finally {
+                                    voiceSending = false
+                                }
+                            }
                         } else {
-                            onSend(text.trim(), if (busy) delivery.id else null)
+                            onSend(text.trim(), if (busy) delivery.id else null, false)
                             value = TextFieldValue("") // send() also forgets the saved draft
                         }
                     },
@@ -1068,7 +1115,6 @@ private fun ChatRow(
             HandedFiles(item.files, loads, viewModel::openSharedFile, viewModel::pauseSharedFile, viewModel::cancelSharedFile)
         }
         is SwitchItem -> SwitchRow(item)
-        is VoiceLineItem -> VoiceLineRow(item)
         is NoticeItem -> Text(
             item.text,
             style = MaterialTheme.typography.bodySmall,
@@ -1108,7 +1154,7 @@ private fun UserRow(
                     }
                 }
                 if (item.notes.isNotEmpty()) SentNotes(item.notes, onBubble, onJump)
-                item.voice?.let { VoiceHeader(it, onBubble) }
+                if (item.voice) VoiceMark(onBubble)
                 if (item.text.isNotBlank()) {
                     val ranges = remember(item.text, commands) { commandRanges(item.text, commands) }
                     var laid by remember { mutableStateOf<TextLayoutResult?>(null) }

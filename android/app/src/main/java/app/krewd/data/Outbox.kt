@@ -24,6 +24,8 @@ data class OutgoingMessage(
     val chats: List<ChatRef> = emptyList(),
     val notes: List<ReplyNote> = emptyList(),
     val sent: Boolean = false,
+    /** Sent from voice mode (heard lines in the composer). */
+    val voice: Boolean = false,
 ) {
     val ready: Boolean get() = files.all { it.uploadId != null }
 }
@@ -85,6 +87,7 @@ class OutboxStore(private val context: Context) {
         .put("tabs", JSONArray(m.tabs.map { JSONObject().put("id", it.id).put("title", it.title).put("url", it.url) }))
         .put("delivery", m.delivery ?: JSONObject.NULL).put("failed", m.failed)
         .put("chats", JSONArray(m.chats.map { it.toJson() })).put("notes", JSONArray(m.notes.map { it.toJson() }))
+        .put("voice", m.voice)
 
     private fun messageFrom(o: JSONObject) = OutgoingMessage(
         clientId = o.getString("client_id"),
@@ -96,6 +99,7 @@ class OutboxStore(private val context: Context) {
         failed = o.optBoolean("failed"),
         chats = ChatRef.list(o.optJSONArray("chats")),
         notes = ReplyNote.list(o.optJSONArray("notes")),
+        voice = o.optBoolean("voice"),
     )
 
     private fun fileJson(f: PendingFile) = JSONObject().put("local_id", f.localId).put("name", f.name)

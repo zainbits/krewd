@@ -263,8 +263,11 @@ class KrewdViewModel(private val app: Application) {
     init {
         // The app's own picks are kept on the server too, so a new phone starts where the old one was.
         prefs.onChange = { key, value -> api?.let { client -> scope.launch(Dispatchers.IO) { runCatching { client.setPref(key, value) } } } }
-        // Voice input sends through the same connection, and waits while the app is offline.
-        Voice.bind { apiFlow.filterNotNull().first() }
+        // Voice input sends through the same connection, and waits while the app is offline; what it hears goes into
+        // the chat's composer draft.
+        Voice.bind({ apiFlow.filterNotNull().first() }) { chat, label, text ->
+            scope.launch(Dispatchers.Main) { addHeard(chat, label, text) }
+        }
     }
     private var loop: Job? = null
     private var timeline: Timeline? = null
@@ -578,7 +581,6 @@ class KrewdViewModel(private val app: Application) {
 
     private fun handle(event: Event) {
         val sid = event.sessionId
-        if (event.kind.startsWith("voice_")) Voice.onEvent(sid, event.kind, event.payload)
         when (event.kind) {
             "session" -> {
                 val session = SessionInfo.from(event.payload)
@@ -1085,6 +1087,27 @@ class KrewdViewModel(private val app: Application) {
 
     fun setMessageDraft(sessionId: String, text: String) = prefs.setTextDraft(sessionId, text)
 
+    /** The composer on screen and where heard words go into it, so they land where the owner is typing. */
+    private var composerSink: Pair<String, (String, String) -> Unit>? = null
+
+    fun attachComposer(sessionId: String, sink: (label: String, text: String) -> Unit) {
+        composerSink = sessionId to sink
+    }
+
+    fun detachComposer(sessionId: String) {
+        if (composerSink?.first == sessionId) composerSink = null
+    }
+
+    /** Words voice input heard in [sessionId] (main thread): into its composer when on screen, else its saved draft. */
+    private fun addHeard(sessionId: String, label: String, text: String) {
+        val sink = composerSink
+        if (sink != null && sink.first == sessionId) {
+            sink.second(label, text)
+        } else {
+            prefs.setTextDraft(sessionId, Voice.joinLine(prefs.textDraft(sessionId), label, text))
+        }
+    }
+
     fun pipSize(wide: Boolean): Float = prefs.pipSize(wide)
 
     fun setPipSize(wide: Boolean, dp: Float) = prefs.setPipSize(wide, dp)
@@ -1120,8 +1143,8 @@ class KrewdViewModel(private val app: Application) {
      * retries with the same client id, so it is never stored twice. Only a refusal by the server marks it
      * "Not sent" for [resend].
      */
-    fun send(text: String, delivery: String?) {
-        val id = _state.value.openSessionId ?: return
+    fun send(text: String, delivery: String?, voice: Boolean = false, sessionId: String? = null) {
+        val id = sessionId ?: _state.value.openSessionId ?: return
         val message = OutgoingMessage(
             clientId = UUID.randomUUID().toString(),
             sessionId = id,
@@ -1131,6 +1154,7 @@ class KrewdViewModel(private val app: Application) {
             delivery = delivery,
             chats = _state.value.chatsOf(id),
             notes = _state.value.notesOf(id),
+            voice = voice,
         )
         // Into the outbox first, then out of the draft: the files and text are never only in memory.
         updateOutbox { it + message }
@@ -1189,7 +1213,7 @@ class KrewdViewModel(private val app: Application) {
             try {
                 client.send(
                     message.sessionId, message.text, message.files.mapNotNull { it.uploadId }, message.tabs,
-                    message.delivery, message.clientId, message.chats, message.notes,
+                    message.delivery, message.clientId, message.chats, message.notes, message.voice,
                 )
                 attempt = 0
                 updateOutbox { list -> list.map { if (it.clientId == message.clientId) it.copy(sent = true) else it } }
@@ -1247,6 +1271,7 @@ class KrewdViewModel(private val app: Application) {
                 },
                 chats = it.chats,
                 notes = it.notes,
+                voice = it.voice,
             )
         }
     }
