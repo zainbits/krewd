@@ -45,7 +45,7 @@ log = logging.getLogger("krewd.voice")
 STT_TIMEOUT = 180.0
 MAX_PIECE_SECONDS = 32  # the phone cuts at 30 s
 MAX_PIECE_BYTES = MAX_PIECE_SECONDS * va.RATE * 2
-ENROLL_MIN_SECONDS = 15
+ENROLL_MIN_SECONDS = 12  # of reading once pauses are shortened (speech and the short gaps between words)
 REFERENCE_SECONDS = 15  # what the speaker model hears of the owner before each piece (the measured setting)
 MAX_PAUSE_SECONDS = 0.3  # longer pauses in the reading are shortened to this in the reference
 ENROLL_MAX_BYTES = 120 * va.RATE * 2
@@ -166,7 +166,7 @@ class Voice:
             raise VoiceError("recording too long (2 minutes at most)", 413)
         clip, speech = reference_clip(va.pcm16_to_float(pcm))
         if clip is None:
-            raise VoiceError(f"only {speech:.0f} s of speech heard; read for at least {ENROLL_MIN_SECONDS} s", 422)
+            raise VoiceError(f"only {speech:.0f} s of reading heard; read the whole text (at least {ENROLL_MIN_SECONDS} s)", 422)
         data = va.wav_bytes(clip)
         path = self.settings.reference_file
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -297,7 +297,9 @@ class Voice:
 def reference_clip(audio: np.ndarray) -> tuple[np.ndarray | None, float]:
     """The owner's voice reference from their reading: pauses shortened, the first REFERENCE_SECONDS kept.
 
-    Returns (clip, seconds of speech in the reading); the clip is None under ENROLL_MIN_SECONDS of speech."""
+    Returns (clip, seconds of reading once pauses are shortened); the clip is None under ENROLL_MIN_SECONDS. Only the
+    loud frames counted before, which leaves out the gaps between words and soft sounds: 30 s of reading came to
+    12-14 s and setup failed."""
     frame = 480  # 30 ms
     n = len(audio) // frame
     if n == 0:
@@ -306,9 +308,6 @@ def reference_clip(audio: np.ndarray) -> tuple[np.ndarray | None, float]:
     energy = np.sqrt(np.mean(frames ** 2, axis=1))
     floor = float(np.percentile(energy, 20))
     speech = energy > max(floor * 2.5, 0.004)  # clearly above the recording's quiet floor
-    seconds = float(speech.sum()) * frame / va.RATE
-    if seconds < ENROLL_MIN_SECONDS:
-        return None, seconds
     keep, quiet = [], 0
     max_quiet = round(MAX_PAUSE_SECONDS * va.RATE / frame)
     started = False
@@ -320,6 +319,9 @@ def reference_clip(audio: np.ndarray) -> tuple[np.ndarray | None, float]:
             quiet += 1
             if quiet <= max_quiet:
                 keep.append(i)
+    seconds = len(keep) * frame / va.RATE
+    if seconds < ENROLL_MIN_SECONDS:
+        return None, seconds
     clip = frames[keep].reshape(-1)[: REFERENCE_SECONDS * va.RATE]
     # The phone's gain for pieces: the loudest sample at about -3 dB, at most 20x, so both sound alike.
     clip = clip * min(20.0, 0.7 / max(float(np.abs(clip).max()), 1e-6))

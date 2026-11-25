@@ -105,7 +105,7 @@ The phone listens in a chat ("voice mode") and the server tells it, piece by pie
 | Method and path | Body | Returns |
 |---|---|---|
 | `GET /api/voice` | | `{available, problems, enrolled, enrolled_at, transcription, active: [{chat, voice_id}]}` |
-| `POST /api/voice/voiceprint` | 15 to 120 s of the owner reading aloud (PCM) | `{enrolled, enrolled_at, speech_seconds}`; 422 with under 15 s of speech. Sets up My voice: the server keeps 15 s of the reading (pauses shortened to 0.3 s) as `voice-reference.wav` in the config folder (mode 600), the one recording it keeps. |
+| `POST /api/voice/voiceprint` | 15 to 120 s of the owner reading aloud (PCM) | `{enrolled, enrolled_at, speech_seconds}`; 422 with under 12 s of reading (pauses shortened). Sets up My voice: the server keeps 15 s of the reading (pauses shortened to 0.3 s) as `voice-reference.wav` in the config folder (mode 600), the one recording it keeps. |
 | `DELETE /api/voice/voiceprint` | | `{enrolled: false}`; deletes the voice reference. |
 | `POST /api/sessions/{id}/voice` | `{voice_id?}` | `{voice_id, enrolled}`; starts the chat's voice session (or goes on with `voice_id` while the server has it), and asks the transcription API for a moment of silence (with the voice reference) so its models load. 503 with the reason when voice input is off. |
 | `POST /api/sessions/{id}/voice/{voice_id}/audio?seq=N` | one piece of speech, up to 32 s (PCM; the phone cuts at 30 s) | `{seq, lines: [{speaker: "me" \| "others", label: "Me" \| "Others", text}], text}`: one line per change of speaker, in order (empty when nothing was said). The same `seq` again returns the same answer, so a resend is safe. 413 over 32 s, 409 for a voice session the server does not have. |

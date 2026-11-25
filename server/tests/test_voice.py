@@ -201,7 +201,7 @@ async def test_setup_keeps_a_short_reference_with_pauses_shortened(hub, voice): 
     bursts = [np.concatenate([rng.normal(0, 3000, 8000), np.zeros(16000)]) for _ in range(40)]
     reading = np.concatenate(bursts).astype("<i2").tobytes()
     out = await voice.enroll(reading)
-    assert out["enrolled"] and 19 <= out["speech_seconds"] <= 21
+    assert out["enrolled"] and 31 <= out["speech_seconds"] <= 33  # 0.5 s of sound + 0.3 s of each pause, x 40
     path = voice.settings.reference_file
     assert path.stat().st_mode & 0o777 == 0o600 and not voice.settings.old_voiceprint_file.exists()
     with wave.open(str(path), "rb") as w:
@@ -214,3 +214,12 @@ async def test_setup_keeps_a_short_reference_with_pauses_shortened(hub, voice): 
         await voice.enroll(bytes(5 * va.RATE * 2))
     voice.forget_voiceprint()
     assert voice.me is None and not path.exists()
+
+
+def test_a_real_reading_with_soft_sounds_is_enough():
+    # 30 s of reading where only about 13 s is loud (the rest soft sounds and gaps between words): setup used to fail.
+    rng = np.random.default_rng(2)
+    word = np.concatenate([rng.normal(0, 0.1, 2600), rng.normal(0, 0.003, 2000), np.zeros(1400)])  # 0.375 s
+    reading = np.tile(word, 80).astype(np.float32)
+    clip, seconds = voice_mod.reference_clip(reading)
+    assert clip is not None and seconds >= 25 and len(clip) == voice_mod.REFERENCE_SECONDS * va.RATE
