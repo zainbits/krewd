@@ -20,14 +20,23 @@ class CutterTest {
         }
     }
 
+    /** Talking: 400 ms of sound and 100 ms between words (a steady tone would become the quiet floor). */
+    private fun talk(ms: Int) = repeat(ms / 500) {
+        feed(400, loud = true)
+        feed(100, loud = false)
+    }
+
     @Test
-    fun speechBetweenPausesIsOnePiece() {
+    fun shortPausesStayInsideOnePiece() {
         feed(1000, loud = false)
         feed(2000, loud = true)
-        feed(700, loud = false)
+        feed(700, loud = false) // a breath: the piece goes on
+        feed(1500, loud = true)
+        assertTrue(pieces.isEmpty())
+        feed(2100, loud = false) // 2 s of quiet ends it
         assertEquals(1, pieces.size)
-        // 300 ms before the start, 2 s of speech, 200 ms after it (give or take the onset frames).
-        assertTrue(pieces[0] in (2_300 * 16)..(2_600 * 16))
+        // 300 ms before the start, 2 s + 0.7 s + 1.5 s, then 200 ms of the quiet (give or take the onset frames).
+        assertTrue(pieces[0] in (4_600 * 16)..(4_900 * 16))
         feed(5000, loud = false) // the mic stays on: quiet sends nothing
         assertEquals(1, pieces.size)
     }
@@ -36,17 +45,30 @@ class CutterTest {
     fun aCoughIsDropped() {
         feed(500, loud = false)
         feed(200, loud = true)
-        feed(1000, loud = false)
+        feed(2500, loud = false)
         assertTrue(pieces.isEmpty())
     }
 
     @Test
-    fun longSpeechIsCutAt15Seconds() {
+    fun aLongPieceIsCutAtItsQuietestMomentBefore30Seconds() {
         feed(500, loud = false)
-        feed(20_000, loud = true)
-        feed(700, loud = false)
-        assertEquals(2, pieces.size)
-        assertEquals(15 * Voice.RATE, pieces[0])
+        talk(24_000)
+        feed(400, loud = false) // a longer pause 24 s in
+        talk(10_000)
+        assertEquals(1, pieces.size)
+        val cutAt = pieces[0] / Voice.RATE.toDouble()
+        assertTrue("cut at $cutAt s", cutAt in 24.1..24.8) // in that pause (piece time), not at 30 s
+        feed(2100, loud = false)
+        assertEquals(2, pieces.size) // the rest of the speech
+        assertTrue(pieces[1] / Voice.RATE.toDouble() in 9.5..10.5)
+    }
+
+    @Test
+    fun talkWithoutAPauseIsCutAt30Seconds() {
+        feed(500, loud = false)
+        talk(40_000)
+        assertEquals(1, pieces.size)
+        assertTrue(pieces[0] in (20 * Voice.RATE)..(30 * Voice.RATE))
     }
 
     @Test

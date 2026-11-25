@@ -42,6 +42,10 @@ brave_display() {
 # Files earlier versions made that nothing uses now.
 tidy_old() {
   [[ -d "$CONFIG_DIR/fixed-location" ]] && rm -rf "$CONFIG_DIR/fixed-location" && say "Removed $CONFIG_DIR/fixed-location (the location extension now loads from the repo)."
+  # Voice input 0.33's speaker model; the Model Warehouse labels speakers now.
+  local voice_dir; voice_dir="$(conf KREWD_DATA_DIR "$HOME/.krewd")/voice"
+  voice_dir="${voice_dir/#\~/$HOME}"
+  [[ -f "$voice_dir/voxceleb_resnet34_LM.onnx" ]] && rm -f "$voice_dir/voxceleb_resnet34_LM.onnx" && rmdir "$voice_dir" 2>/dev/null
   return 0
 }
 # Xvfb for the agents' Brave (KREWD_BROWSER_DISPLAY=virtual, the default). Needs sudo, so only when the owner says yes.
@@ -53,12 +57,6 @@ offer_xvfb() {
   else
     say "${Y}Without Xvfb the agents' Brave opens on the desktop and can take focus there:${N} sudo apt install xvfb xauth"
   fi
-}
-# Voice input's speaker model (WeSpeaker, about 27 MB, pinned by checksum; voice.py MODELS).
-fetch_voice_models() {
-  [[ -n "$(find_uv)" ]] || return 0
-  KREWD_CONFIG_DIR="$CONFIG_DIR" uvrun python -m krewd_server.voice fetch | sed 's/^/  /' \
-    || say "${Y}The voice speaker model could not be downloaded; voice input stays off until ./master.sh setup runs again.${N}"
 }
 
 linux_systemd() { [[ "$(uname)" == Linux ]] && has systemctl && systemctl --user show-environment >/dev/null 2>&1; }
@@ -140,7 +138,7 @@ PY
     fi
   fi
   if [[ -n "$(find_uv)" ]]; then
-    # Voice input: its speaker model and the transcription API (voice.py; off without KREWD_VOICE_STT_URL).
+    # Voice input: the transcription API and its speaker labels (voice.py; off without KREWD_VOICE_STT_URL).
     local line
     while IFS= read -r line; do
       case "$line" in
@@ -287,7 +285,6 @@ PY
   chmod 600 "$ENV_FILE"
   [[ -f "$CONFIG_DIR/engines.toml" ]] || { cp "$REPO/deploy/engines.example.toml" "$CONFIG_DIR/engines.toml"; say "Created engines.toml (Claude Code)."; }
   if [[ -n "$(find_uv)" ]]; then (cd "$REPO/server" && "$(find_uv)" sync --frozen --quiet) && say "Server environment ready."; else say "Install uv first, then run setup again."; fi
-  fetch_voice_models
   mkdir -p "$(conf KREWD_BROWSER_PROFILE "$HOME/.local/share/krewd/agent-brave")"
   offer_xvfb
   tidy_old
@@ -362,7 +359,6 @@ update() {
 
 update_finish() {
   (cd "$REPO/server" && "$(find_uv)" sync --frozen --quiet) || return 1
-  fetch_voice_models
   offer_xvfb
   tidy_old
   if linux_systemd; then

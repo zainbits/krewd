@@ -47,7 +47,7 @@ import kotlinx.coroutines.launch
 
 /**
  * The slim bar above the composer while the chat is in voice mode: Listening (or Muted) and the time, the "My voice"
- * switch, Mute / Unmute, Set up My voice while there is no voiceprint, and a short status. What is heard goes into
+ * switch, Mute / Unmute, Set up My voice while there is no voice sample, and a short status. What is heard goes into
  * the composer below as `Me: ...` / `Others: ...` lines. Tapping the composer's mic again leaves voice mode.
  */
 @Composable
@@ -138,7 +138,7 @@ private const val ENROLL_TEXT = "Read this aloud at your normal pace, the way yo
     "few questions, and explain the next steps clearly. If something is unclear, I say so and find out. " +
     "Numbers, names and dates matter, so I repeat them back: seven, fourteen, twenty-one, Monday and Friday."
 
-/** Records about 30 s of the owner reading, for their voiceprint ("Me"); Cancel always closes it. */
+/** Records about 30 s of the owner reading; the server keeps 15 s of it as their voice sample ("Me"). Cancel always closes it. */
 @Composable
 private fun EnrollDialog(listening: Boolean, onClose: () -> Unit) {
     val scope = rememberCoroutineScope()
@@ -160,7 +160,7 @@ private fun EnrollDialog(listening: Boolean, onClose: () -> Unit) {
                 }
                 result?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
                 Text(
-                    "Krewd keeps a short voice summary (256 numbers) on your server to tell your voice apart. No recording is kept.",
+                    "Krewd keeps 15 s of this reading on your server, only to tell your voice apart from others. Setting it up again replaces it.",
                     style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }

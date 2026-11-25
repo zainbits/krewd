@@ -38,10 +38,11 @@ import kotlin.math.sqrt
 
 /**
  * Voice input on the phone (the server side is voice.py). In voice mode the microphone is on all the time and cut
- * into pieces of speech at short pauses; each piece is kept as a file in the app's own storage until the server has
- * it (so nothing is lost while offline or while the server's model loads), then deleted. The server answers with the
- * words and who said them (Me or Others), and the words go into the chat's composer as `Me: ...` / `Others: ...`
- * lines ([heard], [joinLine]). The owner edits them and presses Send; nothing is sent by itself.
+ * into pieces of speech ([Cutter]: up to 30 s, ending after 2 s of quiet); each piece is kept as a file in the app's
+ * own storage until the server has it (so nothing is lost while offline or while the server's model loads), then
+ * deleted. The server answers with the words split by who said them (Me or Others, several lines when both spoke),
+ * and they go into the chat's composer as `Me: ...` / `Others: ...` lines ([heard], [joinLine]). The owner edits them
+ * and presses Send; nothing is sent by itself.
  *
  * [VoiceService] (a microphone foreground service) owns the running [Listener]; the UI reads [state] and calls the
  * functions here. One chat is in voice mode at a time. Mute releases the microphone (Android's mic indicator goes
@@ -103,7 +104,7 @@ object Voice {
         }
     }
 
-    /** What the voiceprint and the server's voice support look like; null on failure. */
+    /** Whether My voice is set up and the server's voice support; null on failure. */
     suspend fun refreshStatus(): JSONObject? = runCatching {
         val o = withContext(Dispatchers.IO) { connection().voiceStatus() }
         _state.update { it.copy(enrolled = o.optBoolean("enrolled"), available = o.optBoolean("available"),
@@ -130,7 +131,7 @@ object Voice {
         return if (before.substringAfterLast('\n').startsWith(prefix)) "$before $words" else "$before\n$prefix$words"
     }
 
-    // Recording the owner's voiceprint: about 30 s of them reading aloud, sent once, never kept on the phone.
+    // Setting up My voice: about 30 s of the owner reading aloud, sent once, never kept on the phone (the server keeps 15 s).
 
     /**
      * Records [seconds] of the owner reading and sends it. While a chat listens, the frames come from its mic (the
@@ -229,7 +230,7 @@ data class VoiceUi(
     val settling: Boolean = false,
     val since: Long = 0,
     val myVoice: Boolean = true,
-    /** The owner's voiceprint is on the server; null while unknown. */
+    /** The owner's voice sample is on the server (My voice set up); null while unknown. */
     val enrolled: Boolean? = null,
     val available: Boolean? = null,
     val problems: List<String> = emptyList(),
@@ -388,10 +389,13 @@ internal class Listener(private val context: Context, val chatId: String, privat
         Voice.set { it.copy(waiting = pending().size) }
     }
 
-    /** Offline for long: keep the newest [MAX_WAITING] pieces (about 20 minutes of talk). */
+    /** Offline for long: keep the newest [MAX_WAITING_BYTES] of pieces (about 20 minutes of talk). */
     private fun trim() {
-        val all = pending()
-        if (all.size > MAX_WAITING) all.take(all.size - MAX_WAITING).forEach { it.delete() }
+        var total = 0L
+        for (f in pending().asReversed()) {
+            total += f.length()
+            if (total > MAX_WAITING_BYTES) f.delete()
+        }
     }
 
     private fun pending(): List<File> = dir.listFiles { f -> f.name.endsWith(".pcm") }?.sortedBy { it.name }.orEmpty()
@@ -477,31 +481,39 @@ internal class Listener(private val context: Context, val chatId: String, privat
     private fun deliver(api: KrewdApi, vid: String, f: File) {
         val n = f.name.substringBefore('.').toLong()
         val r = api.voiceAudio(chatId, vid, n, f.readBytes())
-        val text = r.optString("text").trim()
-        val mine = r.optString("speaker") == "me"
-        if (text.isNotEmpty() && (!mine || !f.name.contains(".0."))) {
-            Voice.heard(chatId, r.optString("label").ifBlank { if (mine) "Me" else "Others" }, text)
+        val lines = r.optJSONArray("lines") ?: JSONArray()
+        for (i in 0 until lines.length()) {
+            val line = lines.optJSONObject(i) ?: continue
+            val text = line.optString("text").trim()
+            val mine = line.optString("speaker") == "me"
+            if (text.isNotEmpty() && (!mine || !f.name.contains(".0."))) {
+                Voice.heard(chatId, line.optString("label").ifBlank { if (mine) "Me" else "Others" }, text)
+            }
         }
         f.delete() // the words are in the composer (its draft is saved): the audio goes
         Voice.set { it.copy(waiting = pending().size, holdUp = null) }
     }
 
     companion object {
-        const val MAX_WAITING = 400
+        const val MAX_WAITING_BYTES = 20L * 60 * Voice.RATE * 2
     }
 }
 
 /**
- * Cuts the microphone into pieces of speech by loudness against a moving quiet floor: a piece starts after 60 ms of
- * speech (with 300 ms before it), ends after 600 ms of quiet (keeping 200 ms of it) or at 15 s, and is dropped when it
- * holds under 400 ms of speech (a cough, a click). [cut] ends the piece at once (Send, Mute, leaving voice mode).
+ * Cuts the microphone into pieces of speech by loudness against a moving quiet floor. A piece starts after 60 ms of
+ * speech (with 300 ms before it) and ends after 2 s of quiet (keeping 200 ms of it), so the short pauses of talking
+ * stay inside one piece: the server splits a piece by speaker and needs a few seconds of each voice. A piece that
+ * reaches 30 s is cut in the middle of its quietest 260 ms within the last 10 s (the rest starts the next piece), the
+ * same rule as ZnKeyboard's voice typing. A piece with under 400 ms of speech is dropped (a cough, a click).
+ * [cut] ends the piece at once (Send, Mute, leaving voice mode).
  */
 internal class Cutter(private val piece: (ShortArray) -> Unit) {
     private var floor = 300.0
     private val before = ArrayDeque<ShortArray>()
     private var current: ArrayList<ShortArray>? = null
+    private val levels = ArrayList<Double>() // loudness of each frame of [current]
+    private val loud = ArrayList<Boolean>() // whether each frame of [current] is speech
     private var onset = 0
-    private var speechFrames = 0
     private var quiet = 0
     val inSpeech: Boolean get() = current != null
 
@@ -521,24 +533,22 @@ internal class Cutter(private val piece: (ShortArray) -> Unit) {
             onset = if (speech) onset + 1 else max(0, onset - 1)
             if (onset >= 3) {
                 current = ArrayList(before)
+                before.forEach { levels.add(Voice.rms(it, it.size)) }
+                // Of the frames before the start, only the last [onset] count as speech.
+                repeat(before.size) { i -> loud.add(i >= before.size - onset) }
                 before.clear()
-                speechFrames = onset
                 quiet = 0
                 onset = 0
             }
         } else {
             cur.add(f)
-            if (speech) {
-                speechFrames++
-                quiet = 0
-            } else {
-                quiet++
-            }
-            if (quiet >= 30) {
-                end(ArrayList(cur.subList(0, cur.size - (quiet - 10))))
-            } else if (cur.size >= 15 * FPS) {
-                end(cur)
-                current = ArrayList() // still talking: the next piece starts at once
+            levels.add(level)
+            loud.add(speech)
+            quiet = if (speech) 0 else quiet + 1
+            if (quiet >= END_QUIET) {
+                end(cur.size - (quiet - KEEP_QUIET))
+            } else if (cur.size >= MAX_FRAMES) {
+                end(quietestCut())
             }
         }
         return speech
@@ -546,14 +556,44 @@ internal class Cutter(private val piece: (ShortArray) -> Unit) {
 
     /** The piece being heard ends now and goes out (if it holds enough speech). */
     fun cut() {
-        current?.let { end(it) }
+        current?.let { end(it.size) }
     }
 
-    private fun end(list: List<ShortArray>) {
-        if (speechFrames >= 20) piece(join(list))
-        current = null
-        speechFrames = 0
-        quiet = 0
+    /** Where to cut a full piece: the middle of the quietest [SPAN] frames within its last [SEARCH] frames. */
+    private fun quietestCut(): Int {
+        val from = levels.size - SEARCH
+        var best = from
+        var bestSum = Double.MAX_VALUE
+        var sum = 0.0
+        for (i in from until levels.size) {
+            sum += levels[i]
+            if (i - from >= SPAN) sum -= levels[i - SPAN]
+            if (i - from >= SPAN - 1 && sum < bestSum) {
+                bestSum = sum
+                best = i - SPAN + 1
+            }
+        }
+        return best + SPAN / 2
+    }
+
+    /** The first [count] frames go out as a piece; the rest (after a 30 s cut) start the next one. */
+    private fun end(count: Int) {
+        val cur = current ?: return
+        val n = count.coerceIn(0, cur.size)
+        if (loud.subList(0, n).count { it } >= MIN_SPEECH) piece(join(cur.subList(0, n)))
+        val rest = cur.size - n
+        if (quiet < END_QUIET && rest > 0 && n < cur.size) {
+            current = ArrayList(cur.subList(n, cur.size))
+            val keptLevels = ArrayList(levels.subList(n, levels.size))
+            val keptLoud = ArrayList(loud.subList(n, loud.size))
+            levels.clear(); levels.addAll(keptLevels)
+            loud.clear(); loud.addAll(keptLoud)
+        } else {
+            current = null
+            levels.clear()
+            loud.clear()
+            quiet = 0
+        }
     }
 
     private fun join(list: List<ShortArray>): ShortArray {
@@ -568,5 +608,11 @@ internal class Cutter(private val piece: (ShortArray) -> Unit) {
 
     companion object {
         const val FPS = 50
+        const val END_QUIET = 2 * FPS // 2 s of quiet ends a piece
+        const val KEEP_QUIET = 10 // 200 ms of it stays on the piece
+        const val MAX_FRAMES = 30 * FPS // the server takes 32 s at most
+        const val SEARCH = 10 * FPS
+        const val SPAN = 13 // 260 ms
+        const val MIN_SPEECH = 20 // 400 ms
     }
 }

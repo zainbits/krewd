@@ -67,8 +67,8 @@ class VoiceSettings:
     stt_url: str = ""  # an OpenAI-compatible API base, e.g. http://127.0.0.1:8780/v1 (POST {stt_url}/audio/transcriptions)
     stt_model: str = ""
     stt_fields: tuple[tuple[str, str], ...] = ()  # extra form fields for that API, e.g. store=false
-    models_dir: Path = Path.home() / ".krewd" / "voice"  # the speaker model (`python -m krewd_server.voice fetch`)
-    voiceprint_file: Path = CONFIG_DIR / "voiceprint.json"
+    reference_file: Path = CONFIG_DIR / "voice-reference.wav"  # the owner's 15 s voice reference (My voice), mode 600
+    old_voiceprint_file: Path = CONFIG_DIR / "voiceprint.json"  # 0.33's WeSpeaker voiceprint, deleted on setup
 
 
 @dataclass(frozen=True)
@@ -238,7 +238,6 @@ def load_voice_settings(data_dir: Path) -> VoiceSettings:
         stt_url=os.environ.get("KREWD_VOICE_STT_URL", "").strip().rstrip("/"),
         stt_model=os.environ.get("KREWD_VOICE_STT_MODEL", "").strip(),
         stt_fields=tuple(fields),
-        models_dir=Path(os.path.expanduser(os.environ.get("KREWD_VOICE_MODELS", str(data_dir / "voice")))),
     )
 
 
