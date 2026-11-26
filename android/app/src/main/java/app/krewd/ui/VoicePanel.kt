@@ -32,6 +32,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -47,8 +48,8 @@ import kotlinx.coroutines.launch
 
 /**
  * The slim bar above the composer while the chat is in voice mode: Listening (or Muted) and the time, the "My voice"
- * switch, the "Live" switch (words while speaking, when the server offers it), Mute / Unmute, Set up My voice while
- * there is no voice sample, and a short status. What is heard goes into the composer below as `Me: ...` / `Others: ...`
+ * switch, Mute / Unmute, Set up My voice while there is no voice sample, and a short status (Pieces or Live is
+ * picked when voice mode starts, [VoiceModeDialog]). What is heard goes into the composer below as `Me: ...` / `Others: ...`
  * lines; in Live mode the words being heard show here in grey first. Tapping the composer's mic again leaves voice mode.
  */
 @Composable
@@ -66,7 +67,8 @@ fun VoiceBar(voice: VoiceUi, modifier: Modifier = Modifier) {
             }
             Box(Modifier.size(8.dp).background(dot, CircleShape))
             Spacer(Modifier.width(6.dp))
-            Text(if (voice.muted) "Muted" else "Listening", style = MaterialTheme.typography.labelLarge)
+            Text((if (voice.muted) "Muted" else "Listening") + if (voice.live) " · Live" else "",
+                style = MaterialTheme.typography.labelLarge)
             Spacer(Modifier.width(6.dp))
             Elapsed(voice.since)
             if (!voice.muted) {
@@ -76,10 +78,6 @@ fun VoiceBar(voice: VoiceUi, modifier: Modifier = Modifier) {
             Spacer(Modifier.width(8.dp))
             Row(Modifier.weight(1f).horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.End)) {
                 FilterChip(selected = voice.myVoice, onClick = { Voice.setMyVoice(context, !voice.myVoice) }, label = { Text("My voice") })
-                if (voice.liveAvailable == true || voice.live) {
-                    FilterChip(selected = voice.live, enabled = !voice.stopping, onClick = { Voice.setLive(context, !voice.live) },
-                        label = { Text("Live") })
-                }
                 if (voice.enrolled == false) AssistChip(onClick = { enrolling = true }, label = { Text("Set up My voice") })
                 AssistChip(
                     onClick = { Voice.setMuted(!voice.muted) },
@@ -119,6 +117,40 @@ fun VoiceBar(voice: VoiceUi, modifier: Modifier = Modifier) {
         }
     }
     if (enrolling) EnrollDialog(listening = voice.listening && !voice.muted, onClose = { enrolling = false })
+}
+
+/**
+ * Before voice mode starts: Pieces (words after each pause, Bark) or Live (words while speaking). Picked only here,
+ * since changing it while listening would make the server swap its models. The last choice is the default.
+ */
+@Composable
+fun VoiceModeDialog(onDismiss: () -> Unit, onPick: (live: Boolean) -> Unit) {
+    val context = LocalContext.current
+    val voice by Voice.state.collectAsStateWithLifecycle()
+    LaunchedEffect(Unit) { Voice.refreshStatus() }
+    val last = remember { Voice.prefs(context).getBoolean("live_mode", false) }
+    val liveOk = voice.liveAvailable != false
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Voice mode") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Pieces: the words arrive after each pause (Bark).", style = MaterialTheme.typography.bodyMedium)
+                Text(
+                    if (liveOk) "Live: the words appear while they are said." else "Live: not set up on the server.",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                Text("To change it later, leave voice mode and start it again.",
+                    style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        },
+        confirmButton = {
+            TextButton(enabled = liveOk, onClick = { onPick(true) }) { Text(if (last && liveOk) "Live ✓" else "Live") }
+        },
+        dismissButton = {
+            TextButton(onClick = { onPick(false) }) { Text(if (!last || !liveOk) "Pieces ✓" else "Pieces") }
+        },
+    )
 }
 
 @Composable

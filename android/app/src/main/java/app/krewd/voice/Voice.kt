@@ -44,7 +44,7 @@ import kotlin.math.sqrt
  * and they go into the chat's composer as `Me: ...` / `Others: ...` lines ([heard], [joinLine]). The owner edits them
  * and presses Send; nothing is sent by itself.
  *
- * Live mode (an experiment next to the pieces, the "Live" switch): no pieces; the audio goes to the server about every
+ * Live mode (an experiment next to the pieces, picked when voice mode starts): no pieces; the audio goes to the server about every
  * 250 ms and the words come back while they are said, one segment per speaker turn: shown grey under the voice bar
  * while it is heard ([VoiceUi.liveLines]), then into the composer once final. Send first makes everything final.
  *
@@ -90,18 +90,10 @@ object Voice {
         if (muted) l.mute() else l.unmute()
     }
 
-    /** The chat to start listening in again once voice mode has ended (switching between Pieces and Live). */
-    @Volatile internal var restart: String? = null
-
-    /** Pieces or Live; while listening, voice mode starts again in the new mode. */
+    /** Pieces or Live for the next voice mode (picked before it starts; a running one keeps its mode). */
     fun setLive(context: Context, on: Boolean) {
         prefs(context).edit().putBoolean("live_mode", on).apply()
-        val s = _state.value
-        _state.update { it.copy(live = on) }
-        if (s.listening && s.chatId != null && s.live != on) {
-            restart = s.chatId
-            leave(context)
-        }
+        if (!_state.value.listening) _state.update { it.copy(live = on) }
     }
 
     fun setMyVoice(context: Context, on: Boolean) {

@@ -74,16 +74,6 @@ class VoiceService : Service() {
         listener = null
         Voice.listener = null
         watch?.cancel()
-        val again = Voice.restart
-        Voice.restart = null
-        if (again != null && again == chat && reason == null) { // Pieces <-> Live: listen again in the new mode
-            Voice.set {
-                VoiceUi(chatId = chat, listening = true, starting = true, since = it.since, myVoice = it.myVoice,
-                    enrolled = it.enrolled, available = it.available, live = it.live, liveAvailable = it.liveAvailable)
-            }
-            listen(chat)
-            return
-        }
         Voice.set {
             VoiceUi(enrolled = it.enrolled, available = it.available, myVoice = it.myVoice, live = it.live,
                 liveAvailable = it.liveAvailable, chatId = if (reason != null) it.chatId else null, error = reason)

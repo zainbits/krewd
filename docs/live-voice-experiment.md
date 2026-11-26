@@ -13,7 +13,7 @@ No Bark in Live mode.
 
 ## Plan
 
-Both modes stay available behind a switch in the voice settings (Pieces / Live) while Zain tests them.
+Both modes stay available while Zain tests them; the mode is picked when voice mode starts (the mic asks), never while listening: switching would swap the Warehouse models.
 
 1. Server bench (no app change): a recording fed as if live; measure word delay, label delay,
    GPU memory with both models, accuracy against Bark on the same audio.
