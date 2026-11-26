@@ -510,8 +510,19 @@ class KrewdApi(
 
     fun voiceStatus(): JSONObject = obj("GET", "/api/voice")
 
-    /** Starts the chat's voice session (it also wakes the server's transcription model): `{voice_id, enrolled}`. */
-    fun voiceStart(id: String): JSONObject = obj("POST", "/api/sessions/$id/voice", JSONObject())
+    /** Starts the chat's voice session (it also wakes the server's transcription model): `{voice_id, enrolled, live}`.
+     *  [live]: Live mode, words while speaking ([voiceLive]) instead of pieces. */
+    fun voiceStart(id: String, live: Boolean = false): JSONObject =
+        obj("POST", "/api/sessions/$id/voice", JSONObject().apply { if (live) put("live", true) })
+
+    /** Live mode: the next audio (about 250 ms, may be empty) in; the words heard so far out, by segment from [after]. */
+    fun voiceLive(id: String, voiceId: String, seq: Long, after: Long, flush: Boolean, end: Boolean, pcm: ByteArray): JSONObject {
+        val q = StringBuilder("seq=$seq&after=$after")
+        if (flush) q.append("&flush=true")
+        if (end) q.append("&end=true")
+        return JSONObject(call("POST", "/api/sessions/$id/voice/$voiceId/live?$q", null,
+            readTimeoutMs = 60_000, raw = pcm)) // a flush waits for the final words; a resend of the same seq is safe
+    }
 
     /** One piece of speech; the answer has who spoke (Me or Others) and the words. Waits while the server's model loads. */
     fun voiceAudio(id: String, voiceId: String, seq: Long, pcm: ByteArray): JSONObject =

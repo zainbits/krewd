@@ -44,6 +44,10 @@ import kotlin.math.sqrt
  * and they go into the chat's composer as `Me: ...` / `Others: ...` lines ([heard], [joinLine]). The owner edits them
  * and presses Send; nothing is sent by itself.
  *
+ * Live mode (an experiment next to the pieces, the "Live" switch): no pieces; the audio goes to the server about every
+ * 250 ms and the words come back while they are said, one segment per speaker turn: shown grey under the voice bar
+ * while it is heard ([VoiceUi.liveLines]), then into the composer once final. Send first makes everything final.
+ *
  * [VoiceService] (a microphone foreground service) owns the running [Listener]; the UI reads [state] and calls the
  * functions here. One chat is in voice mode at a time. Mute releases the microphone (Android's mic indicator goes
  * off); only the app's screen unmutes.
@@ -70,6 +74,7 @@ object Voice {
         _state.value = VoiceUi(
             chatId = chatId, listening = true, starting = true, since = System.currentTimeMillis(),
             myVoice = prefs(context).getBoolean("my_voice", true), enrolled = _state.value.enrolled,
+            live = prefs(context).getBoolean("live_mode", false), liveAvailable = _state.value.liveAvailable,
         )
         context.startForegroundService(Intent(context, VoiceService::class.java).putExtra(VoiceService.EXTRA_CHAT, chatId))
     }
@@ -83,6 +88,20 @@ object Voice {
     fun setMuted(muted: Boolean) {
         val l = listener ?: return
         if (muted) l.mute() else l.unmute()
+    }
+
+    /** The chat to start listening in again once voice mode has ended (switching between Pieces and Live). */
+    @Volatile internal var restart: String? = null
+
+    /** Pieces or Live; while listening, voice mode starts again in the new mode. */
+    fun setLive(context: Context, on: Boolean) {
+        prefs(context).edit().putBoolean("live_mode", on).apply()
+        val s = _state.value
+        _state.update { it.copy(live = on) }
+        if (s.listening && s.chatId != null && s.live != on) {
+            restart = s.chatId
+            leave(context)
+        }
     }
 
     fun setMyVoice(context: Context, on: Boolean) {
@@ -108,7 +127,7 @@ object Voice {
     suspend fun refreshStatus(): JSONObject? = runCatching {
         val o = withContext(Dispatchers.IO) { connection().voiceStatus() }
         _state.update { it.copy(enrolled = o.optBoolean("enrolled"), available = o.optBoolean("available"),
-            problems = o.optJSONArray("problems")?.strings().orEmpty()) }
+            problems = o.optJSONArray("problems")?.strings().orEmpty(), liveAvailable = o.optBoolean("live")) }
         o
     }.getOrNull()
 
@@ -242,7 +261,15 @@ data class VoiceUi(
     val holdUp: String? = null,
     /** Why voice mode ended or the microphone stopped; shown in the chat. */
     val error: String? = null,
+    /** Live mode is picked (the owner's switch). */
+    val live: Boolean = false,
+    /** The server offers Live mode; null while unknown. */
+    val liveAvailable: Boolean? = null,
+    /** Live mode: the words being heard now, not final yet (one line per speaker turn; label null while unknown). */
+    val liveLines: List<LiveLine> = emptyList(),
 )
+
+data class LiveLine(val label: String?, val text: String)
 
 /**
  * Voice mode in one chat: the capture thread while not muted (mic -> [Cutter] -> piece files) and the sender (piece
@@ -264,13 +291,20 @@ internal class Listener(private val context: Context, val chatId: String, privat
         private set
     @Volatile private var cutAsked = false
     private var thread: Thread? = null
+    /** Live mode (fixed for this voice session): audio goes to the server as it comes, no pieces. */
+    val live = Voice.prefs(context).getBoolean("live_mode", false)
+    private val liveAudio = java.io.ByteArrayOutputStream() // heard, not sent yet (guarded by itself)
+    private var livePeak = 3000.0
+    private var after = 0L // the first live segment not in the composer yet
+    private val flushes = java.util.concurrent.ConcurrentLinkedQueue<kotlinx.coroutines.CompletableDeferred<Unit>>()
+    private var sender: Job? = null
 
     fun start() {
         // Pieces left by a chat whose voice mode ended with the app (killed before they were sent) are not kept.
         File(context.filesDir, "voice").listFiles()?.filter { it.name != chatId && it.lastModified() < System.currentTimeMillis() - 3_600_000 }
             ?.forEach { it.deleteRecursively() }
         unmute()
-        scope.launch { send() }
+        sender = scope.launch { if (live) sendLive() else send() }
     }
 
     fun unmute() {
@@ -288,6 +322,10 @@ internal class Listener(private val context: Context, val chatId: String, privat
 
     fun mute() {
         capturing = false // the capture thread sends the piece it holds and lets go of the microphone
+        if (live) { // the words being heard become final now, not when the server notices the quiet
+            flushes.add(kotlinx.coroutines.CompletableDeferred())
+            wake.trySend(Unit)
+        }
         Voice.set { it.copy(muted = true, speaking = false, level = 0f) }
     }
 
@@ -300,6 +338,10 @@ internal class Listener(private val context: Context, val chatId: String, privat
         scope.launch {
             withContext(Dispatchers.IO) { thread?.join(2_000) }
             val drained = withTimeoutOrNull(30_000) {
+                if (live) {
+                    wake.trySend(Unit)
+                    sender?.join()
+                }
                 while (pending().isNotEmpty()) delay(200)
                 true
             }
@@ -315,6 +357,13 @@ internal class Listener(private val context: Context, val chatId: String, privat
 
     /** Ends the piece being heard now, then waits until the server has answered for every piece. */
     suspend fun settle() {
+        if (live) {
+            val done = kotlinx.coroutines.CompletableDeferred<Unit>()
+            flushes.add(done)
+            wake.trySend(Unit)
+            done.await()
+            return
+        }
         if (capturing) {
             cutAsked = true
             while (cutAsked && capturing) delay(20)
@@ -355,15 +404,20 @@ internal class Listener(private val context: Context, val chatId: String, privat
                     t(frame, n)
                     continue
                 }
-                cutter.feed(frame, n)
+                if (live) liveFeed(frame, n) else cutter.feed(frame, n)
                 val now = SystemClock.elapsedRealtime()
                 if (now - lastLevel > 100) {
                     lastLevel = now
-                    val level = min(1f, (Voice.rms(frame, n) / 5000.0).toFloat())
-                    Voice.set { it.copy(level = level, speaking = cutter.inSpeech) }
+                    val rms = Voice.rms(frame, n)
+                    val level = min(1f, (rms / 5000.0).toFloat())
+                    Voice.set { it.copy(level = level, speaking = if (live) rms > 600 else cutter.inSpeech) }
                 }
             }
-            cutter.cut()
+            if (live) {
+                wake.trySend(Unit) // the last audio goes with the next request
+            } else {
+                cutter.cut()
+            }
         } finally {
             cutAsked = false
             runCatching { rec.stop() }
@@ -472,8 +526,160 @@ internal class Listener(private val context: Context, val chatId: String, privat
         }
     }
 
+
+    // Live mode
+
+    /** A frame of the mic into the live audio, with a slow automatic gain (the loudest of the last seconds at about
+     *  -3 dB, at most 20x, like the pieces), so a quiet phone mic still reaches the models. */
+    private fun liveFeed(frame: ShortArray, n: Int) {
+        var peak = 0
+        for (i in 0 until n) peak = max(peak, kotlin.math.abs(frame[i].toInt()))
+        livePeak = max(max(peak.toDouble(), 1500.0), livePeak * 0.995)
+        val gain = min(20.0, 0.7 * 32767 / livePeak)
+        val bytes = ByteArray(n * 2)
+        for (i in 0 until n) {
+            val v = (frame[i] * gain).toInt().coerceIn(-32768, 32767)
+            bytes[2 * i] = (v and 0xff).toByte()
+            bytes[2 * i + 1] = (v shr 8).toByte()
+        }
+        synchronized(liveAudio) {
+            liveAudio.write(bytes)
+            if (liveAudio.size() > LIVE_KEEP_BYTES) { // offline for long: keep the newest 2 minutes
+                val all = liveAudio.toByteArray()
+                liveAudio.reset()
+                liveAudio.write(all, all.size - LIVE_KEEP_BYTES, LIVE_KEEP_BYTES)
+            }
+        }
+    }
+
+    private fun takeLive(): ByteArray = synchronized(liveAudio) {
+        val all = liveAudio.toByteArray()
+        val n = min(all.size, LIVE_MAX_SEND_BYTES)
+        liveAudio.reset()
+        if (n < all.size) liveAudio.write(all, n, all.size - n)
+        all.copyOf(n)
+    }
+
+    private fun liveWaiting(): Boolean = synchronized(liveAudio) { liveAudio.size() > 0 }
+
+    /** Audio to the server about every 250 ms (one request at a time, a failed one sent again with its number), and
+     *  the words back: final segments into the composer, the others under the voice bar. Ends after the last audio
+     *  once voice mode is left. */
+    private suspend fun sendLive() {
+        var backoff = 1_000L
+        var chunk: ByteArray? = null
+        var chunkSeq = 0L
+        var chunkFlush = 0
+        var chunkEnd = false
+        while (true) {
+            if (voiceId == null) {
+                if (!active && !liveWaiting() && chunk == null) break
+                val started = try {
+                    val api = withTimeoutOrNull(5_000) { Voice.connection() }
+                    if (api == null) Voice.set { it.copy(holdUp = "offline") } else begin(api)
+                    api != null
+                } catch (e: ApiException) {
+                    if (e.code == 503 || e.code == 404) {
+                        stop(e.message ?: "Voice input is not available")
+                        break
+                    }
+                    false
+                } catch (e: java.io.IOException) {
+                    Voice.set { it.copy(holdUp = "offline") }
+                    false
+                }
+                if (!started) {
+                    delay(backoff + (Math.random() * 500).toLong())
+                    backoff = min(backoff * 2, 30_000L)
+                    continue
+                }
+                backoff = 1_000L
+            }
+            if (chunk == null) {
+                if (active && flushes.isEmpty()) withTimeoutOrNull(LIVE_SEND_MS) { wake.receive() }
+                if (active && flushes.isEmpty() && capturing && !liveWaiting()) continue
+                val flushing = flushes.size
+                val ending = !active
+                val audio = takeLive()
+                if (audio.isEmpty() && flushing == 0 && !ending) {
+                    withTimeoutOrNull(1_000) { wake.receive() } // muted: nothing to send
+                    continue
+                }
+                chunk = audio
+                chunkSeq = seq.incrementAndGet()
+                chunkFlush = flushing
+                chunkEnd = ending && !liveWaiting()
+            }
+            val sent = try {
+                val api = withTimeoutOrNull(5_000) { Voice.connection() }
+                if (api == null) {
+                    Voice.set { it.copy(holdUp = "offline") }
+                    false
+                } else {
+                    val vid = voiceId ?: begin(api)
+                    val r = api.voiceLive(chatId, vid, chunkSeq, after, chunkFlush > 0, chunkEnd, chunk!!)
+                    liveAnswer(r)
+                    true
+                }
+            } catch (e: ApiException) {
+                when {
+                    e.code == 409 -> { voiceId = null; false } // the server lost the voice session: start again
+                    e.code in 400..499 && e.code != 429 -> {
+                        Log.w(Voice.TAG, "voice: live audio refused (${e.code}): ${e.message}")
+                        true // that audio is dropped
+                    }
+                    else -> {
+                        Voice.set { it.copy(holdUp = "server", error = e.message) }
+                        false
+                    }
+                }
+            } catch (e: java.io.IOException) {
+                Voice.set { it.copy(holdUp = "offline") }
+                false
+            }
+            if (sent) {
+                backoff = 1_000L
+                repeat(chunkFlush) { flushes.poll()?.complete(Unit) }
+                val ended = chunkEnd
+                chunk = null
+                if (ended) break
+            } else {
+                delay(backoff + (Math.random() * 500).toLong())
+                backoff = min(backoff * 2, 30_000L)
+            }
+        }
+        while (true) flushes.poll()?.complete(Unit) ?: break
+        Voice.set { it.copy(liveLines = emptyList()) }
+    }
+
+    private fun liveAnswer(r: JSONObject) {
+        val segments = r.optJSONArray("segments") ?: JSONArray()
+        val lines = mutableListOf<LiveLine>()
+        val myVoice = Voice.state.value.myVoice
+        for (i in 0 until segments.length()) {
+            val seg = segments.optJSONObject(i) ?: continue
+            val id = seg.optLong("id", -1)
+            if (id < after) continue
+            val text = seg.optString("text").trim()
+            val mine = seg.optString("speaker") == "me"
+            val label = seg.optString("label").takeIf { it.isNotBlank() && it != "null" }
+            if (seg.optBoolean("final")) {
+                if (text.isNotEmpty() && (!mine || myVoice)) Voice.heard(chatId, label ?: "Others", text)
+                after = id + 1
+            } else if (text.isNotEmpty() && (!mine || myVoice)) {
+                lines.add(LiveLine(label, text))
+            }
+        }
+        val status = r.optString("status")
+        Voice.set {
+            it.copy(liveLines = lines, holdUp = null, starting = status == "queued" || status == "starting",
+                error = if (it.holdUp == "server") null else it.error)
+        }
+    }
+
     private fun begin(api: KrewdApi): String {
-        val o = api.voiceStart(chatId)
+        after = 0
+        val o = api.voiceStart(chatId, live)
         Voice.set { it.copy(starting = false, enrolled = o.optBoolean("enrolled"), holdUp = null) }
         return o.getString("voice_id").also { voiceId = it }
     }
@@ -496,6 +702,9 @@ internal class Listener(private val context: Context, val chatId: String, privat
 
     companion object {
         const val MAX_WAITING_BYTES = 20L * 60 * Voice.RATE * 2
+        const val LIVE_SEND_MS = 250L
+        const val LIVE_MAX_SEND_BYTES = 8 * Voice.RATE * 2 // the server takes 10 s per request
+        const val LIVE_KEEP_BYTES = 120 * Voice.RATE * 2
     }
 }
 

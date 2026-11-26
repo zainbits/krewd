@@ -50,6 +50,11 @@ class VoiceService : Service() {
         val current = listener
         if (current?.chatId == chat) return START_NOT_STICKY
         current?.stop(null)
+        listen(chat)
+        return START_NOT_STICKY
+    }
+
+    private fun listen(chat: String) {
         val l = Listener(applicationContext, chat) { reason -> scope.launch { finish(reason, chat) } }
         listener = l
         Voice.listener = l
@@ -62,7 +67,6 @@ class VoiceService : Service() {
                 }
             }
         }
-        return START_NOT_STICKY
     }
 
     private fun finish(reason: String?, chat: String? = null) {
@@ -70,9 +74,19 @@ class VoiceService : Service() {
         listener = null
         Voice.listener = null
         watch?.cancel()
+        val again = Voice.restart
+        Voice.restart = null
+        if (again != null && again == chat && reason == null) { // Pieces <-> Live: listen again in the new mode
+            Voice.set {
+                VoiceUi(chatId = chat, listening = true, starting = true, since = it.since, myVoice = it.myVoice,
+                    enrolled = it.enrolled, available = it.available, live = it.live, liveAvailable = it.liveAvailable)
+            }
+            listen(chat)
+            return
+        }
         Voice.set {
-            VoiceUi(enrolled = it.enrolled, available = it.available, myVoice = it.myVoice,
-                chatId = if (reason != null) it.chatId else null, error = reason)
+            VoiceUi(enrolled = it.enrolled, available = it.available, myVoice = it.myVoice, live = it.live,
+                liveAvailable = it.liveAvailable, chatId = if (reason != null) it.chatId else null, error = reason)
         }
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
@@ -113,7 +127,8 @@ class VoiceService : Service() {
             listener?.stop(null)
             listener = null
             Voice.listener = null
-            Voice.set { VoiceUi(enrolled = it.enrolled, available = it.available, myVoice = it.myVoice) }
+            Voice.set { VoiceUi(enrolled = it.enrolled, available = it.available, myVoice = it.myVoice, live = it.live,
+                liveAvailable = it.liveAvailable) }
         }
         scope.cancel()
         super.onDestroy()

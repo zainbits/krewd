@@ -47,8 +47,9 @@ import kotlinx.coroutines.launch
 
 /**
  * The slim bar above the composer while the chat is in voice mode: Listening (or Muted) and the time, the "My voice"
- * switch, Mute / Unmute, Set up My voice while there is no voice sample, and a short status. What is heard goes into
- * the composer below as `Me: ...` / `Others: ...` lines. Tapping the composer's mic again leaves voice mode.
+ * switch, the "Live" switch (words while speaking, when the server offers it), Mute / Unmute, Set up My voice while
+ * there is no voice sample, and a short status. What is heard goes into the composer below as `Me: ...` / `Others: ...`
+ * lines; in Live mode the words being heard show here in grey first. Tapping the composer's mic again leaves voice mode.
  */
 @Composable
 fun VoiceBar(voice: VoiceUi, modifier: Modifier = Modifier) {
@@ -75,6 +76,10 @@ fun VoiceBar(voice: VoiceUi, modifier: Modifier = Modifier) {
             Spacer(Modifier.width(8.dp))
             Row(Modifier.weight(1f).horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.End)) {
                 FilterChip(selected = voice.myVoice, onClick = { Voice.setMyVoice(context, !voice.myVoice) }, label = { Text("My voice") })
+                if (voice.liveAvailable == true || voice.live) {
+                    FilterChip(selected = voice.live, enabled = !voice.stopping, onClick = { Voice.setLive(context, !voice.live) },
+                        label = { Text("Live") })
+                }
                 if (voice.enrolled == false) AssistChip(onClick = { enrolling = true }, label = { Text("Set up My voice") })
                 AssistChip(
                     onClick = { Voice.setMuted(!voice.muted) },
@@ -93,7 +98,7 @@ fun VoiceBar(voice: VoiceUi, modifier: Modifier = Modifier) {
             voice.settling -> "Adding the last words before sending…"
             voice.holdUp == "offline" -> if (voice.waiting > 0) "Offline · ${voice.waiting} waiting" else "Offline"
             voice.holdUp == "server" && voice.waiting > 0 -> "Server busy or loading · ${voice.waiting} waiting"
-            voice.starting -> "Starting…"
+            voice.starting -> if (voice.live) "Starting the live model…" else "Starting…"
             voice.waiting > 0 -> "Transcribing…"
             else -> null
         }
@@ -101,6 +106,14 @@ fun VoiceBar(voice: VoiceUi, modifier: Modifier = Modifier) {
             Text(
                 status, style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis,
                 color = if (voice.error != null) colors.error else colors.onSurfaceVariant,
+                modifier = Modifier.padding(start = 14.dp),
+            )
+        }
+        // Live mode: what is being heard now, grey until it is final and goes into the composer
+        for (line in voice.liveLines.takeLast(3)) {
+            Text(
+                "${line.label ?: "…"}: ${line.text}", style = MaterialTheme.typography.bodySmall, maxLines = 2,
+                overflow = TextOverflow.Ellipsis, color = colors.onSurfaceVariant.copy(alpha = 0.75f),
                 modifier = Modifier.padding(start = 14.dp),
             )
         }
