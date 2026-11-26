@@ -34,6 +34,7 @@ from .config import Profile, Settings
 from .logins import LoginError, Logins
 from .profiles import PRESETS, Gateways, ProfileError, check_gateway, set_key, slug, valid_url, write_profiles
 from .routines import Invalid
+from .voice import RULES as VOICE_RULES, Voice
 
 log = logging.getLogger("krewd.hub")
 
@@ -297,6 +298,7 @@ class Hub:
         self.profiles_lock = asyncio.Lock()  # one profile change at a time
         self.logins = Logins()
         self.checking: set[str] = set()  # agents whose sign-in status is being checked
+        self.voice = Voice(self, settings.voice)  # voice input: the phone listening in a chat (voice.py)
 
     # lifecycle
 
@@ -328,10 +330,12 @@ class Hub:
             log.warning("could not prepare the browser-harness workspace: %s", exc)
         self.harness_sweeper = asyncio.create_task(self._sweep_harness_loop())
         self.scheduler = asyncio.create_task(self._schedule_loop())
+        self.voice.start()
 
     async def close(self) -> None:
         self.closing = True
         await self.logins.close()
+        await self.voice.close()
         for task in (self.scheduler, self.harness_sweeper):
             if task:
                 task.cancel()
@@ -972,6 +976,7 @@ class Hub:
 
         Returns the chat's agent sessions; with remove_files=False the caller removes its files (see delete_old_chats)."""
         await self.get_session(session_id)
+        self.voice.forget(session_id)
         rt = self.runtimes.pop(session_id, None)
         if rt:
             await self._stop_turn(rt)
@@ -1401,6 +1406,8 @@ class Hub:
         if purpose:
             payload["purpose"] = purpose
             payload["meta"] = meta or {}
+        elif meta and meta.get("voice"):
+            payload["meta"] = {"voice": True}  # sent from voice mode: the bubble shows a mic
         seq = await self.emit(session_id, "user", payload)
         await self.pool.execute("update messages set event_seq = $2 where id = $1", message_id, seq)
         noted = (notes[0]["note"] or notes[0]["quote"]) if notes else ""
@@ -1460,13 +1467,14 @@ class Hub:
         if row is None:
             return
         outcome = None
+        text, carried_rules = await self._voice_text(rt, row["text"], row["meta"])
         try:
             result = await proc.request(
                 "_session/steering",
                 {
                     "sessionId": rt.agent_session,
                     "prompt": prompt_blocks(
-                        _prompt_text(row["text"], row["tabs"], row["chats"], (row["meta"] or {}).get("notes")),
+                        _prompt_text(text, row["tabs"], row["chats"], (row["meta"] or {}).get("notes")),
                         row["attachments"] or [],
                     ),
                     "_meta": {"steering": {"idleBehavior": "promptRequired"}},
@@ -1481,6 +1489,9 @@ class Hub:
                 rt.turn_messages.append(message_id)
         else:  # promptRequired (the turn just ended) or an error: run it as the next prompt
             await self.pool.execute("update messages set state = 'queued' where id = $1 and state = 'steering'", message_id)
+            if carried_rules:  # the voice rules this attempt carried did not arrive: the next prompt brings them
+                await self.pool.execute("update sessions set voice_rules_for = null where id = $1 and voice_rules_for = $2",
+                                        rt.id, rt.agent_session)
 
     async def _delivered(self, message_id: uuid.UUID, how: str, from_state: str = "queued") -> asyncpg.Record | None:
         row = await self.pool.fetchrow(
@@ -1491,6 +1502,20 @@ class Hub:
         if row:
             await self.emit(row["session_id"], "message", db.message_json(row))
         return row
+
+    async def _voice_text(self, rt: Runtime, text: str, meta: dict[str, Any] | None) -> tuple[str, bool]:
+        """A message as the agent reads it, and whether it carries Krewd's voice rules: the first message sent from
+        voice mode that an agent session gets has them in front (voice.RULES)."""
+        if not (meta or {}).get("voice") or not rt.agent_session:
+            return text, False
+        given = await self.pool.fetchval(
+            """update sessions set voice_rules_for = $2 where id = $1 and voice_rules_for is distinct from $2
+               returning id""",
+            rt.id, rt.agent_session,
+        )
+        if not given:
+            return text, False
+        return VOICE_RULES + "\n\n---\n\n" + text, True
 
     def _kick(self, rt: Runtime) -> None:
         rt.wake.set()
@@ -1954,7 +1979,7 @@ class Hub:
             proc = await self._ensure_loaded(rt)
             if rt.cancel_requested:
                 raise _Cancelled()
-            prompt_text = _prompt_text(text, tabs, chats, (meta or {}).get("notes"))
+            prompt_text = _prompt_text((await self._voice_text(rt, text, meta))[0], tabs, chats, (meta or {}).get("notes"))
             if fresh:
                 # A new agent session learns which chat it is, for `krewd chat history` and `krewd side`. At the end,
                 # since agents name a chat after the start of its first prompt.

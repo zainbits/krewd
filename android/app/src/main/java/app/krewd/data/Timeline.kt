@@ -45,6 +45,8 @@ data class UserItem(
     val fromKind: String? = null,
     /** Margin notes on parts of earlier replies, shown above the text. */
     val notes: List<ReplyNote> = emptyList(),
+    /** Sent from voice mode (heard lines from the composer): the bubble shows a small mic. */
+    val voice: Boolean = false,
 ) : ChatItem
 
 /** This chat started a side session or sub-agent, or sent a message to another chat ([kind] side, subagent, prompt). */
@@ -130,6 +132,8 @@ class Timeline {
                     ok = p.optJSONObject("meta")?.optBoolean("ok", true) ?: true,
                     fromKind = p.optJSONObject("meta")?.optStringOrNull("kind"),
                     notes = ReplyNote.list(p.optJSONArray("notes")),
+                    // true since 0.33.0; an object (who said it, how it was routed) on 0.32 voice messages
+                    voice = p.optJSONObject("meta")?.opt("voice").let { it != null && it != false && it != org.json.JSONObject.NULL },
                 )
                 add(item)
                 if (messageId != null) messages[messageId] = item.key

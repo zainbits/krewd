@@ -19,6 +19,9 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_PROMOTED_NOTIFICATIONS" />
+    <!-- Voice input: the microphone while the owner has it on in a chat (a "Listening" notification shows). -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
 
     <application
         android:name=".KrewdApplication"
@@ -52,6 +55,10 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Shows the live progress of the owner's own agent tasks running on their home server, and keeps their approval alerts arriving while the phone is locked." />
         </service>
+        <service
+            android:name=".voice.VoiceService"
+            android:exported="false"
+            android:foregroundServiceType="microphone" />
         <!-- Pictures shared from the image viewer: copies in the cache, readable only through a granted link. -->
         <provider
             android:name="androidx.core.content.FileProvider"

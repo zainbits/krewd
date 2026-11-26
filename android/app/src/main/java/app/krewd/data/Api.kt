@@ -489,9 +489,10 @@ class KrewdApi(
      */
     fun send(
         id: String, text: String, attachments: List<String>, tabs: List<BrowserTab>, delivery: String?, clientId: String,
-        chats: List<ChatRef> = emptyList(), notes: List<ReplyNote> = emptyList(),
+        chats: List<ChatRef> = emptyList(), notes: List<ReplyNote> = emptyList(), voice: Boolean = false,
     ): JSONObject {
         val body = JSONObject().put("text", text).put("client_id", clientId)
+        if (voice) body.put("voice", true) // sent from voice mode: the agent gets Krewd's voice rules once
         if (notes.isNotEmpty()) body.put("notes", JSONArray(notes.map { it.toJson() }))
         if (attachments.isNotEmpty()) body.put("attachments", JSONArray(attachments))
         if (tabs.isNotEmpty()) body.put("tabs", tabsJson(tabs))
@@ -504,6 +505,33 @@ class KrewdApi(
 
     private fun tabsJson(tabs: List<BrowserTab>) =
         JSONArray(tabs.map { JSONObject().put("id", it.id).put("title", it.title).put("url", it.url) })
+
+    // Voice input (voice.py on the server): 16 kHz mono 16-bit PCM about every 250 ms, numbered per voice session.
+
+    fun voiceStatus(): JSONObject = obj("GET", "/api/voice")
+
+    /** Starts the chat's voice session (it also wakes the server's live model): `{voice_id, enrolled}`. */
+    fun voiceStart(id: String): JSONObject = obj("POST", "/api/sessions/$id/voice", JSONObject())
+
+    /** The next audio (about 250 ms, may be empty) in; the words heard so far out, by segment from [after]. */
+    fun voiceLive(id: String, voiceId: String, seq: Long, after: Long, flush: Boolean, end: Boolean, pcm: ByteArray): JSONObject {
+        val q = StringBuilder("seq=$seq&after=$after")
+        if (flush) q.append("&flush=true")
+        if (end) q.append("&end=true")
+        return JSONObject(call("POST", "/api/sessions/$id/voice/$voiceId/live?$q", null,
+            readTimeoutMs = 60_000, raw = pcm)) // a flush waits for the final words; a resend of the same seq is safe
+    }
+
+    fun voiceStop(id: String, voiceId: String) {
+        call("DELETE", "/api/sessions/$id/voice/$voiceId", null, readTimeoutMs = 30_000)
+    }
+
+    fun voiceEnroll(pcm: ByteArray): JSONObject =
+        JSONObject(call("POST", "/api/voice/voiceprint", null, readTimeoutMs = 60_000, raw = pcm))
+
+    fun voiceForget() {
+        call("DELETE", "/api/voice/voiceprint", null)
+    }
 
     /** Emergency restart of the server and its agents; it is back after about 10 to 15 seconds. */
     fun restartServer() {
@@ -783,6 +811,7 @@ class KrewdApi(
         headers: Map<String, String> = emptyMap(),
         retried: Boolean = false,
         poll: Boolean = false,
+        raw: ByteArray? = null,
     ): String {
         val conn = open(baseUrl + path)
         if (poll) polling = conn
@@ -794,7 +823,12 @@ class KrewdApi(
             if (auth) conn.setRequestProperty("Authorization", "Bearer ${bearer()}")
             headers.forEach { (k, v) -> conn.setRequestProperty(k, v) }
             val payload = text ?: body?.toString()
-            if (payload != null) {
+            if (raw != null) {
+                conn.doOutput = true
+                conn.setRequestProperty("Content-Type", "application/octet-stream")
+                conn.setFixedLengthStreamingMode(raw.size)
+                conn.outputStream.use { it.write(raw) }
+            } else if (payload != null) {
                 conn.doOutput = true
                 conn.setRequestProperty("Content-Type", "application/json")
                 conn.outputStream.use { it.write(payload.toByteArray()) }
@@ -804,7 +838,7 @@ class KrewdApi(
                 // The session ran out (or the server restarted): get a new one with the phone's key, once.
                 creds.session = null
                 conn.errorStream?.use { it.readBytes() } // read to the end, so the connection is reused
-                return call(method, path, body, connectTimeoutMs, readTimeoutMs, auth, text, headers, retried = true, poll = poll)
+                return call(method, path, body, connectTimeoutMs, readTimeoutMs, auth, text, headers, retried = true, poll = poll, raw = raw)
             }
             val stream = if (code in 200..299) conn.inputStream else conn.errorStream
             val text = stream?.bufferedReader()?.use { it.readText() }.orEmpty()

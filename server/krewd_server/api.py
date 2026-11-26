@@ -26,6 +26,7 @@ from .hub import Conflict, Hub, NotFound, TabTaken
 from .locations import LOCATION_SCRIPT, Invalid as LocationInvalid, Locations
 from .profiles import ProfileError
 from .routines import Invalid
+from .voice import ENROLL_MAX_BYTES, LIVE_MAX_BYTES, VoiceError
 
 LONG_POLL_MAX_SECONDS = 30
 
@@ -94,10 +95,15 @@ class ProposalSend(BaseModel):
     chats: list[ChatRef] = Field(default_factory=list, max_length=5)
 
 
+class VoiceStart(BaseModel):
+    voice_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{32}$")  # go on with this one if the server has it
+
+
 class Message(WithAttachments):
     # steer: into the running turn (where the engine supports it); queue: after it; interrupt: stop it, then send.
     delivery: Literal["steer", "queue", "interrupt"] | None = None
     notes: list[Note] = Field(default_factory=list, max_length=20)  # margin notes on parts of earlier replies
+    voice: bool = False  # sent from voice mode (heard lines in the composer): the agent gets Krewd's voice rules once
 
 
 class DeleteOldChats(BaseModel):
@@ -366,6 +372,10 @@ def create_app(hub: Hub, token: str, lifespan_hub: bool = True) -> FastAPI:
     @app.exception_handler(Invalid)
     async def invalid(_, exc: Invalid):
         return JSONResponse(status_code=422, content={"detail": str(exc)})
+
+    @app.exception_handler(VoiceError)
+    async def voice_error(_, exc: VoiceError):
+        return JSONResponse(status_code=exc.status, content={"detail": str(exc)})
 
     @app.exception_handler(Conflict)
     async def conflict(_, exc: Conflict):
@@ -707,9 +717,52 @@ def create_app(hub: Hub, token: str, lifespan_hub: bool = True) -> FastAPI:
         message = await hub.send(
             session_id, body.text, body.attachments, tabs=[t.model_dump() for t in body.tabs],
             delivery=body.delivery, client_id=body.client_id, chats=[{"id": str(c.id)} for c in body.chats],
-            notes=[n.model_dump() for n in body.notes],
+            notes=[n.model_dump() for n in body.notes], meta={"voice": True} if body.voice else None,
         )
         return {"ok": True, "message": message}
+
+    # voice input (voice.py): the phone sends 16 kHz mono 16-bit PCM about every 250 ms, numbered per voice session
+
+    async def _pcm(request: Request, limit: int) -> bytes:
+        size = int(request.headers.get("content-length") or 0)
+        if size > limit:
+            raise VoiceError("audio too long", 413)
+        out = bytearray()
+        async for chunk in request.stream():
+            out += chunk
+            if len(out) > limit:
+                raise VoiceError("audio too long", 413)
+        if len(out) % 2:
+            raise VoiceError("audio must be 16-bit PCM", 422)
+        return bytes(out)
+
+    @app.get("/api/voice", dependencies=auth)
+    async def voice_status() -> dict[str, Any]:
+        return hub.voice.status()
+
+    @app.post("/api/voice/voiceprint", dependencies=auth)
+    async def voice_enroll(request: Request) -> dict[str, Any]:
+        return await hub.voice.enroll(await _pcm(request, ENROLL_MAX_BYTES))
+
+    @app.delete("/api/voice/voiceprint", dependencies=auth)
+    async def voice_forget() -> dict[str, Any]:
+        hub.voice.forget_voiceprint()
+        return {"enrolled": False}
+
+    @app.post("/api/sessions/{session_id}/voice", dependencies=auth)
+    async def voice_start(session_id: uuid.UUID, body: VoiceStart) -> dict[str, Any]:
+        return await hub.voice.start_session(session_id, body.voice_id)
+
+    @app.post("/api/sessions/{session_id}/voice/{voice_id}/live", dependencies=auth)
+    async def voice_live(session_id: uuid.UUID, voice_id: str, request: Request, seq: int = Query(ge=0),
+                         after: int = Query(default=0, ge=0), flush: bool = False, end: bool = False) -> dict[str, Any]:
+        """The next audio (about 250 ms, may be empty) in, the words heard so far out, by segment."""
+        return await hub.voice.live(session_id, voice_id, seq, await _pcm(request, LIVE_MAX_BYTES), after, flush, end)
+
+    @app.delete("/api/sessions/{session_id}/voice/{voice_id}", dependencies=auth)
+    async def voice_stop(session_id: uuid.UUID, voice_id: str) -> dict[str, Any]:
+        hub.voice.stop(session_id, voice_id)
+        return {"active": False}
 
     @app.get("/api/sessions/{session_id}/links", dependencies=auth)
     async def links(session_id: uuid.UUID) -> dict[str, Any]:

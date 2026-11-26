@@ -61,6 +61,16 @@ class Engine:
 
 
 @dataclass(frozen=True)
+class VoiceSettings:
+    """Voice input (see voice.py). Without a transcription URL, voice input is off and the app says why."""
+
+    stt_url: str = ""  # the Model Warehouse API base, e.g. http://127.0.0.1:8780/v1 (POST {stt_url}/audio/live)
+    live_model: str = ""  # its live speech-to-text model with speaker labels, e.g. nemotron-live
+    reference_file: Path = CONFIG_DIR / "voice-reference.wav"  # the owner's 15 s voice reference (My voice), mode 600
+    old_voiceprint_file: Path = CONFIG_DIR / "voiceprint.json"  # 0.33's WeSpeaker voiceprint, deleted on setup
+
+
+@dataclass(frozen=True)
 class Settings:
     database_url: str
     host: str
@@ -94,6 +104,7 @@ class Settings:
     # Where the agents keep their session transcripts (storage report and cleanup). None: their defaults.
     claude_dir: Path | None = None
     codex_dir: Path | None = None
+    voice: "VoiceSettings" = field(default_factory=lambda: VoiceSettings())
 
     @property
     def shared(self) -> list[Path]:
@@ -212,6 +223,14 @@ def load_settings() -> Settings:
         passkey_rp_id=os.environ.get("KREWD_PASSKEY_RP_ID", "").strip().lower() or None,
         passkey_certs=tuple(c.strip().replace(":", "").lower() for c in os.environ.get("KREWD_PASSKEY_CERTS", "").split(",")
                             if c.strip()),
+        voice=load_voice_settings(Path(os.path.expanduser(os.environ.get("KREWD_DATA_DIR", "~/.krewd")))),
+    )
+
+
+def load_voice_settings(data_dir: Path) -> VoiceSettings:
+    return VoiceSettings(
+        stt_url=os.environ.get("KREWD_VOICE_STT_URL", "").strip().rstrip("/"),
+        live_model=os.environ.get("KREWD_VOICE_LIVE_MODEL", "").strip(),
     )
 
 

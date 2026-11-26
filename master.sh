@@ -42,6 +42,10 @@ brave_display() {
 # Files earlier versions made that nothing uses now.
 tidy_old() {
   [[ -d "$CONFIG_DIR/fixed-location" ]] && rm -rf "$CONFIG_DIR/fixed-location" && say "Removed $CONFIG_DIR/fixed-location (the location extension now loads from the repo)."
+  # Voice input 0.33's speaker model; the Model Warehouse labels speakers now.
+  local voice_dir; voice_dir="$(conf KREWD_DATA_DIR "$HOME/.krewd")/voice"
+  voice_dir="${voice_dir/#\~/$HOME}"
+  [[ -f "$voice_dir/voxceleb_resnet34_LM.onnx" ]] && rm -f "$voice_dir/voxceleb_resnet34_LM.onnx" && rmdir "$voice_dir" 2>/dev/null
   return 0
 }
 # Xvfb for the agents' Brave (KREWD_BROWSER_DISPLAY=virtual, the default). Needs sudo, so only when the owner says yes.
@@ -54,6 +58,7 @@ offer_xvfb() {
     say "${Y}Without Xvfb the agents' Brave opens on the desktop and can take focus there:${N} sudo apt install xvfb xauth"
   fi
 }
+
 linux_systemd() { [[ "$(uname)" == Linux ]] && has systemctl && systemctl --user show-environment >/dev/null 2>&1; }
 
 # ---------------------------------------------------------------- doctor
@@ -131,6 +136,17 @@ PY
     else
       bad "sign-ins and profiles could not be checked" "cd $REPO/server && uv run python -m krewd_server.profiles check"
     fi
+  fi
+  if [[ -n "$(find_uv)" ]]; then
+    # Voice input: the Warehouse's live model and its speaker labels (voice.py; off without KREWD_VOICE_STT_URL).
+    local line
+    while IFS= read -r line; do
+      case "$line" in
+        "OK    "*) ok "${line#OK    }" ;;
+        "WARN  "*) warn "${line#WARN  }" "AGENTS.md, Voice input" ;;
+        "INFO  "*) say "  info  ${line#INFO  }" ;;
+      esac
+    done < <(KREWD_CONFIG_DIR="$CONFIG_DIR" uvrun python -m krewd_server.voice check 2>/dev/null)
   fi
   if [[ -n "$(conf KREWD_DATABASE_URL '')" && -n "$(find_uv)" ]]; then
     local db; db="$(KREWD_CONFIG_DIR="$CONFIG_DIR" uvrun python - <<'PY' 2>&1
