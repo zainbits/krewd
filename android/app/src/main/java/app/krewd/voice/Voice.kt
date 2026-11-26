@@ -44,9 +44,10 @@ import kotlin.math.sqrt
  * and they go into the chat's composer as `Me: ...` / `Others: ...` lines ([heard], [joinLine]). The owner edits them
  * and presses Send; nothing is sent by itself.
  *
- * Live mode (an experiment next to the pieces, picked when voice mode starts): no pieces; the audio goes to the server about every
- * 250 ms and the words come back while they are said, one segment per speaker turn: shown grey under the voice bar
- * while it is heard ([VoiceUi.liveLines]), then into the composer once final. Send first makes everything final.
+ * Live mode (an experiment next to the pieces, picked when voice mode starts): no pieces; the audio goes to the server about
+ * every 250 ms and the words come back while they are said, one segment per speaker turn, written straight into the
+ * composer as its last lines ([LiveTail]) and replaced as they change, until final. Send first makes everything final
+ * (about half a second), then sends; voice mode goes on listening.
  *
  * [VoiceService] (a microphone foreground service) owns the running [Listener]; the UI reads [state] and calls the
  * functions here. One chat is in voice mode at a time. Mute releases the microphone (Android's mic indicator goes
@@ -57,14 +58,17 @@ object Voice {
     val state: StateFlow<VoiceUi> = _state.asStateFlow()
 
     @Volatile internal var connection: suspend () -> KrewdApi = { throw IllegalStateException("Krewd is not connected") }
-    /** Where heard words go: the ViewModel adds them to the chat's composer draft (chat id, label, words). */
-    @Volatile internal var heard: (String, String, String) -> Unit = { _, _, _ -> }
+    /** Where heard words go: the ViewModel applies the change to the chat's composer draft (chat id, change). */
+    @Volatile internal var edit: (String, (String) -> String) -> Unit = { _, _ -> }
+
+    /** Heard words from [label] at the end of [chatId]'s composer ([joinLine]). */
+    internal fun heard(chatId: String, label: String, text: String) = edit(chatId) { joinLine(it, label, text) }
     @Volatile internal var listener: Listener? = null
 
     /** The ViewModel hands over its connection ([wait] returns once the app is online) and the composer drafts. */
-    fun bind(wait: suspend () -> KrewdApi, onHeard: (chatId: String, label: String, text: String) -> Unit) {
+    fun bind(wait: suspend () -> KrewdApi, onEdit: (chatId: String, change: (String) -> String) -> Unit) {
         connection = wait
-        heard = onHeard
+        edit = onEdit
     }
 
     fun hasMic(context: Context) = context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
@@ -257,11 +261,44 @@ data class VoiceUi(
     val live: Boolean = false,
     /** The server offers Live mode; null while unknown. */
     val liveAvailable: Boolean? = null,
-    /** Live mode: the words being heard now, not final yet (one line per speaker turn; label null while unknown). */
-    val liveLines: List<LiveLine> = emptyList(),
 )
 
-data class LiveLine(val label: String?, val text: String)
+/**
+ * Live mode's words at the end of the composer: final turns become `Me: ...` / `Others: ...` lines ([Voice.joinLine]);
+ * the turns still being heard follow as the last lines and are replaced whenever they change. While the text still ends
+ * with what was last written, that part is swapped; if the owner changed it (a fix) or sent it, their text stays and
+ * those turns are theirs: their later words or final text are not added again. Used on the main thread only.
+ */
+internal class LiveTail {
+    data class Turn(val id: Long, val label: String?, val text: String)
+
+    private var tail = ""
+    private var tailIds = emptySet<Long>()
+    private val theirs = HashSet<Long>()
+
+    fun apply(current: String, finals: List<Turn>, hearing: List<Turn>): String {
+        var base = current
+        if (tail.isNotEmpty()) {
+            if (current.endsWith(tail)) base = current.dropLast(tail.length) else theirs += tailIds
+        }
+        val add = finals.filter { it.id !in theirs && it.text.isNotEmpty() }
+        val now = hearing.filter { it.id !in theirs && it.text.isNotEmpty() }
+        finals.forEach { theirs.remove(it.id) } // done: an id is never seen again
+        var text = base
+        for (t in add) text = Voice.joinLine(text, t.label ?: "Others", t.text)
+        if (now.isEmpty()) {
+            tail = ""
+            tailIds = emptySet()
+            return text
+        }
+        val start = text.trimEnd()
+        var rendered = start
+        for (t in now) rendered = Voice.joinLine(rendered, t.label ?: "…", t.text)
+        tail = rendered.substring(start.length)
+        tailIds = now.map { it.id }.toSet()
+        return rendered
+    }
+}
 
 /**
  * Voice mode in one chat: the capture thread while not muted (mic -> [Cutter] -> piece files) and the sender (piece
@@ -287,7 +324,8 @@ internal class Listener(private val context: Context, val chatId: String, privat
     val live = Voice.prefs(context).getBoolean("live_mode", false)
     private val liveAudio = java.io.ByteArrayOutputStream() // heard, not sent yet (guarded by itself)
     private var livePeak = 3000.0
-    private var after = 0L // the first live segment not in the composer yet
+    private var after = 0L // the first live segment not final in the composer yet
+    private val tail = LiveTail()
     private val flushes = java.util.concurrent.ConcurrentLinkedQueue<kotlinx.coroutines.CompletableDeferred<Unit>>()
     private var sender: Job? = null
 
@@ -641,30 +679,31 @@ internal class Listener(private val context: Context, val chatId: String, privat
             }
         }
         while (true) flushes.poll()?.complete(Unit) ?: break
-        Voice.set { it.copy(liveLines = emptyList()) }
     }
 
     private fun liveAnswer(r: JSONObject) {
         val segments = r.optJSONArray("segments") ?: JSONArray()
-        val lines = mutableListOf<LiveLine>()
+        val finals = mutableListOf<LiveTail.Turn>()
+        val hearing = mutableListOf<LiveTail.Turn>()
         val myVoice = Voice.state.value.myVoice
         for (i in 0 until segments.length()) {
             val seg = segments.optJSONObject(i) ?: continue
             val id = seg.optLong("id", -1)
             if (id < after) continue
-            val text = seg.optString("text").trim()
             val mine = seg.optString("speaker") == "me"
             val label = seg.optString("label").takeIf { it.isNotBlank() && it != "null" }
+            val turn = LiveTail.Turn(id, label, if (mine && !myVoice) "" else seg.optString("text").trim())
             if (seg.optBoolean("final")) {
-                if (text.isNotEmpty() && (!mine || myVoice)) Voice.heard(chatId, label ?: "Others", text)
+                finals.add(turn)
                 after = id + 1
-            } else if (text.isNotEmpty() && (!mine || myVoice)) {
-                lines.add(LiveLine(label, text))
+            } else {
+                hearing.add(turn)
             }
         }
+        Voice.edit(chatId) { tail.apply(it, finals, hearing) }
         val status = r.optString("status")
         Voice.set {
-            it.copy(liveLines = lines, holdUp = null, starting = status == "queued" || status == "starting",
+            it.copy(holdUp = null, starting = status == "queued" || status == "starting",
                 error = if (it.holdUp == "server") null else it.error)
         }
     }

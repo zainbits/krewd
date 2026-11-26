@@ -723,7 +723,7 @@ private fun Composer(
     /** Words are being said or transcribed: Send stays possible while the text is still empty. */
     voiceWaiting: Boolean,
     voiceSettling: Boolean,
-    attachHeard: ((label: String, text: String) -> Unit) -> Unit,
+    attachHeard: ((change: (String) -> String) -> Unit) -> Unit,
     detachHeard: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -741,8 +741,9 @@ private fun Composer(
         // The saved draft is the newest text: words heard while this composer was gone (or its state was being
         // restored after the activity was recreated) are only there.
         if (initialText != value.text) value = TextFieldValue(initialText, TextRange(initialText.length))
-        attachHeard { label, words ->
-            val joined = Voice.joinLine(value.text, label, words)
+        attachHeard { change ->
+            val joined = change(value.text)
+            if (joined == value.text) return@attachHeard
             val sel = value.selection
             val atEnd = sel.collapsed && sel.start >= value.text.length
             edit(if (atEnd) TextFieldValue(joined, TextRange(joined.length))

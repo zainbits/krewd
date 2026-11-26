@@ -265,8 +265,8 @@ class KrewdViewModel(private val app: Application) {
         prefs.onChange = { key, value -> api?.let { client -> scope.launch(Dispatchers.IO) { runCatching { client.setPref(key, value) } } } }
         // Voice input sends through the same connection, and waits while the app is offline; what it hears goes into
         // the chat's composer draft.
-        Voice.bind({ apiFlow.filterNotNull().first() }) { chat, label, text ->
-            scope.launch(Dispatchers.Main) { addHeard(chat, label, text) }
+        Voice.bind({ apiFlow.filterNotNull().first() }) { chat, change ->
+            scope.launch(Dispatchers.Main) { addHeard(chat, change) }
         }
     }
     private var loop: Job? = null
@@ -1088,9 +1088,9 @@ class KrewdViewModel(private val app: Application) {
     fun setMessageDraft(sessionId: String, text: String) = prefs.setTextDraft(sessionId, text)
 
     /** The composer on screen and where heard words go into it, so they land where the owner is typing. */
-    private var composerSink: Pair<String, (String, String) -> Unit>? = null
+    private var composerSink: Pair<String, ((String) -> String) -> Unit>? = null
 
-    fun attachComposer(sessionId: String, sink: (label: String, text: String) -> Unit) {
+    fun attachComposer(sessionId: String, sink: (change: (String) -> String) -> Unit) {
         composerSink = sessionId to sink
     }
 
@@ -1098,13 +1098,14 @@ class KrewdViewModel(private val app: Application) {
         if (composerSink?.first == sessionId) composerSink = null
     }
 
-    /** Words voice input heard in [sessionId] (main thread): into its composer when on screen, else its saved draft. */
-    private fun addHeard(sessionId: String, label: String, text: String) {
+    /** Words voice input heard in [sessionId] (main thread), as a [change] of the text: into its composer when on
+     *  screen, else its saved draft. */
+    private fun addHeard(sessionId: String, change: (String) -> String) {
         val sink = composerSink
         if (sink != null && sink.first == sessionId) {
-            sink.second(label, text)
+            sink.second(change)
         } else {
-            prefs.setTextDraft(sessionId, Voice.joinLine(prefs.textDraft(sessionId), label, text))
+            prefs.setTextDraft(sessionId, change(prefs.textDraft(sessionId)))
         }
     }
 

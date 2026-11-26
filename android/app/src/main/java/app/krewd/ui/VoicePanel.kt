@@ -50,7 +50,7 @@ import kotlinx.coroutines.launch
  * The slim bar above the composer while the chat is in voice mode: Listening (or Muted) and the time, the "My voice"
  * switch, Mute / Unmute, Set up My voice while there is no voice sample, and a short status (Pieces or Live is
  * picked when voice mode starts, [VoiceModeDialog]). What is heard goes into the composer below as `Me: ...` / `Others: ...`
- * lines; in Live mode the words being heard show here in grey first. Tapping the composer's mic again leaves voice mode.
+ * lines (in Live mode while they are being said). Tapping the composer's mic again leaves voice mode.
  */
 @Composable
 fun VoiceBar(voice: VoiceUi, modifier: Modifier = Modifier) {
@@ -107,14 +107,7 @@ fun VoiceBar(voice: VoiceUi, modifier: Modifier = Modifier) {
                 modifier = Modifier.padding(start = 14.dp),
             )
         }
-        // Live mode: what is being heard now, grey until it is final and goes into the composer
-        for (line in voice.liveLines.takeLast(3)) {
-            Text(
-                "${line.label ?: "…"}: ${line.text}", style = MaterialTheme.typography.bodySmall, maxLines = 2,
-                overflow = TextOverflow.Ellipsis, color = colors.onSurfaceVariant.copy(alpha = 0.75f),
-                modifier = Modifier.padding(start = 14.dp),
-            )
-        }
+
     }
     if (enrolling) EnrollDialog(listening = voice.listening && !voice.muted, onClose = { enrolling = false })
 }
