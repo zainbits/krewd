@@ -52,6 +52,9 @@ ENROLL_MAX_BYTES = 120 * va.RATE * 2
 IDLE_SESSION_SECONDS = 30 * 60  # a voice session the phone has not used for this long ends
 SEEN_PIECES = 200  # answers kept per voice session for resends
 TEXT_MAX = 4000
+LIVE_MAX_BYTES = 10 * va.RATE * 2  # audio per live request (the phone sends about 250 ms at a time)
+LIVE_TIMEOUT = 45.0  # a flush waits for the last words' final text
+LIVE_SPEAKERS = {"reference": "me", "other": "others"}
 
 LABELS = {"me": "Me", "others": "Others"}
 
@@ -82,6 +85,27 @@ class VoiceGone(VoiceError):
 
 
 @dataclass
+class LiveRelay:
+    """A live voice session's link to the transcription API's live sessions (see `Voice.live`).
+
+    The API ends its session when the phone goes quiet or another request needs the GPU; the next audio then
+    opens a new one. Segment ids stay rising across them (`base`), and final segments are kept until the phone
+    has them (it asks with `after`, the first id it does not have yet)."""
+
+    wid: str | None = None  # the API's live session
+    base: int = 0  # the id this API session's segment 0 has here
+    next_id: int = 0
+    local_next: int = 0  # first segment id of the API session not final here yet
+    wseq: int = 0
+    finals: dict[int, dict[str, Any]] = field(default_factory=dict)
+    current: list[dict[str, Any]] = field(default_factory=list)  # the segments still being heard
+    status: str = "starting"
+    heard: float = 0.0
+    last_seq: int = -1
+    last: dict[str, Any] | None = None
+
+
+@dataclass
 class VoiceSession:
     chat: uuid.UUID
     id: str
@@ -89,6 +113,7 @@ class VoiceSession:
     seen: dict[int, dict[str, Any]] = field(default_factory=dict)  # piece seq -> its answer, so a resend is safe
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     used: float = field(default_factory=time.monotonic)
+    live: LiveRelay | None = None  # Live mode: words while speaking instead of pieces
 
 
 class Voice:
@@ -144,6 +169,7 @@ class Voice:
             "enrolled": self.me is not None,
             "enrolled_at": self.me_at,
             "transcription": self.settings.stt_model or None,
+            "live": bool(self.settings.live_model) and not problems,
             "active": [{"chat": str(c), "voice_id": s.id} for c, s in self.sessions.items()],
         }
 
@@ -188,19 +214,32 @@ class Voice:
 
     # voice sessions
 
-    async def start_session(self, chat: uuid.UUID, voice_id: str | None = None) -> dict[str, Any]:
-        """Start listening in a chat, or go on with the phone's voice session `voice_id` if the server still has it."""
+    async def start_session(self, chat: uuid.UUID, voice_id: str | None = None, live: bool = False) -> dict[str, Any]:
+        """Start listening in a chat, or go on with the phone's voice session `voice_id` if the server still has it.
+
+        `live`: words while speaking (Live mode), through the API's live sessions, instead of pieces."""
         problems = self.problems()
         if problems:
             raise VoiceError(problems[0])
+        if live and not self.settings.live_model:
+            raise VoiceError("Live mode is not set up on the server: set KREWD_VOICE_LIVE_MODEL in krewd.env.")
         await self.hub.get_session(chat)  # NotFound for an unknown chat
         vs = self.sessions.get(chat)
-        if vs is None or (voice_id and vs.id != voice_id):
-            vs = VoiceSession(chat=chat, id=voice_id or uuid.uuid4().hex)
+        if vs is None or (voice_id and vs.id != voice_id) or (vs.live is not None) != live:
+            if vs is not None:
+                self._live_close(vs)
+            vs = VoiceSession(chat=chat, id=voice_id or uuid.uuid4().hex, live=LiveRelay() if live else None)
             self.sessions[chat] = vs
-            self._warm()
+            if live:
+                async with vs.lock:  # the live model queues and loads while the owner starts talking
+                    try:
+                        await self._live_open(vs.live)
+                    except VoiceError as exc:
+                        log.warning("voice: live session not opened yet: %s", exc)
+            else:
+                self._warm()
         vs.used = time.monotonic()
-        return {"voice_id": vs.id, "enrolled": self.me is not None}
+        return {"voice_id": vs.id, "enrolled": self.me is not None, "live": vs.live is not None}
 
     def _warm(self) -> None:
         """Ask for a transcription of a moment of silence, so the model loads while the owner starts talking."""
@@ -226,10 +265,140 @@ class Voice:
         vs = self.sessions.get(chat)
         if vs is not None and vs.id == voice_id:
             del self.sessions[chat]
+            self._live_close(vs)
 
     def forget(self, chat: uuid.UUID) -> None:
         """The chat is being deleted: drop its voice session."""
-        self.sessions.pop(chat, None)
+        vs = self.sessions.pop(chat, None)
+        if vs is not None:
+            self._live_close(vs)
+
+
+    # Live mode: about 250 ms of audio at a time; each answer has the words heard so far, by segment (one speaker
+    # turn each): a segment's text grows while it is heard, then it is final.
+
+    async def live(self, chat: uuid.UUID, voice_id: str, seq: int, pcm: bytes, after: int = 0,
+                   flush: bool = False, end: bool = False) -> dict[str, Any]:
+        if len(pcm) > LIVE_MAX_BYTES:
+            raise VoiceError("live audio piece too long (10 s at most)", 413)
+        vs = self._get(chat, voice_id)
+        if vs.live is None:
+            raise VoiceError("this voice session is not in Live mode", 409)
+        lr = vs.live
+        async with vs.lock:
+            if seq <= lr.last_seq and lr.last is not None:
+                return lr.last  # a resend: the audio is in already
+            await self._live_send(lr, pcm, flush or end, end)
+            for key in [k for k in lr.finals if k < after]:
+                del lr.finals[key]  # the phone has them
+            segments = [lr.finals[k] for k in sorted(lr.finals)]
+            segments += [seg for seg in lr.current if seg["id"] >= after and seg["id"] not in lr.finals]
+            for seg in segments:
+                if seg["final"] and seg["speaker"] is None:
+                    seg["speaker"] = vs.last  # the speaker model could not place it: the last speaker's
+                    seg["label"] = LABELS[vs.last]
+                if seg["final"] and seg["speaker"]:
+                    vs.last = seg["speaker"]
+            result = {"seq": seq, "status": lr.status, "heard_seconds": lr.heard, "segments": segments}
+            lr.last_seq, lr.last = seq, result
+            return result
+
+    async def _live_send(self, lr: LiveRelay, pcm: bytes, flush: bool, end: bool) -> None:
+        s = self.settings
+        for _ in range(3):
+            if lr.wid is None:
+                if not pcm and end:
+                    lr.status = "ended"
+                    return
+                await self._live_open(lr)
+            params = {"seq": lr.wseq, "after": lr.local_next}
+            if flush:
+                params["flush"] = "true"
+            if end:
+                params["end"] = "true"
+            try:
+                r = await self._client().post(
+                    f"{s.stt_url}/audio/live/{lr.wid}/audio", params=params, content=pcm,
+                    headers={"Content-Type": "application/octet-stream"},
+                    timeout=httpx.Timeout(LIVE_TIMEOUT, connect=5.0),
+                )
+            except httpx.HTTPError as exc:
+                raise VoiceError(f"live transcription unreachable: {type(exc).__name__}") from None
+            lr.wseq += 1
+            if r.status_code == 404:  # that session ended (quiet, or the GPU went to another request): a new one
+                await self._live_collect(lr)
+                lr.wid = None
+                continue
+            if r.status_code != 200:
+                log.warning("live transcription answered HTTP %s: %s", r.status_code, r.text[:200])
+                raise VoiceError(f"live transcription failed (HTTP {r.status_code})")
+            self._live_take(lr, r.json())
+            return
+        raise VoiceError("live transcription keeps ending its sessions")
+
+    async def _live_open(self, lr: LiveRelay) -> None:
+        s = self.settings
+        files = {"speaker_reference": ("me.wav", self.me, "audio/wav")} if self.me is not None else None
+        try:
+            r = await self._client().post(f"{s.stt_url}/audio/live", data={"model": s.live_model}, files=files,
+                                          timeout=httpx.Timeout(30.0, connect=5.0))
+        except httpx.HTTPError as exc:
+            raise VoiceError(f"live transcription unreachable: {type(exc).__name__}") from None
+        if r.status_code != 201:
+            log.warning("live transcription answered HTTP %s on open: %s", r.status_code, r.text[:200])
+            raise VoiceError(f"live transcription could not start (HTTP {r.status_code})")
+        body = r.json()
+        lr.wid, lr.base, lr.local_next, lr.wseq, lr.current = body["id"], lr.next_id, 0, 0, []
+        lr.status = body.get("status") or "queued"
+
+    async def _live_collect(self, lr: LiveRelay) -> None:
+        """The final words of an API session that has just ended, if it still has them."""
+        try:
+            r = await self._client().get(f"{self.settings.stt_url}/audio/live/{lr.wid}",
+                                         params={"after": lr.local_next})
+            if r.status_code == 200:
+                self._live_take(lr, r.json())
+        except httpx.HTTPError:
+            pass
+        lr.current = []
+
+    def _live_take(self, lr: LiveRelay, state: dict[str, Any]) -> None:
+        current = []
+        for seg in state.get("segments") or []:
+            try:
+                key = lr.base + int(seg["id"])
+                speaker = LIVE_SPEAKERS.get(seg.get("speaker")) if self.me is not None else "others"
+                text = " ".join(str(seg.get("text") or "").split())
+                final = bool(seg.get("final"))
+            except (KeyError, TypeError, ValueError):
+                continue
+            out = {"id": key, "speaker": speaker, "label": LABELS.get(speaker) if speaker else None,
+                   "text": text if len(text) <= TEXT_MAX else text[: TEXT_MAX - 1] + "…", "final": final}
+            lr.next_id = max(lr.next_id, key + 1)
+            if final:
+                lr.finals[key] = out
+                lr.local_next = max(lr.local_next, int(seg["id"]) + 1)
+            else:
+                current.append(out)
+        lr.current = current
+        lr.status = str(state.get("status") or lr.status)
+        lr.heard = float(state.get("heard_seconds") or lr.heard)
+        if lr.status in ("ended", "failed"):
+            lr.wid = None
+
+    def _live_close(self, vs: VoiceSession) -> None:
+        lr = vs.live
+        if lr is None or lr.wid is None:
+            return
+        wid, lr.wid = lr.wid, None
+
+        async def go() -> None:
+            try:
+                await self._client().delete(f"{self.settings.stt_url}/audio/live/{wid}")
+            except httpx.HTTPError:
+                pass
+
+        asyncio.get_running_loop().create_task(go())
 
     # pieces of audio
 
@@ -350,6 +519,20 @@ def check(settings: VoiceSettings) -> int:
                 print(f"OK    voice transcription: {settings.stt_model} with speaker labels")
         except (httpx.HTTPError, ValueError):
             print(f"WARN  voice transcription API not answering at {settings.stt_url}")
+        if settings.live_model:
+            try:
+                r = httpx.get(f"{settings.stt_url}/models", timeout=5.0)
+                live = {m.get("id"): m for m in r.json().get("data", [])}.get(settings.live_model)
+                if live is None:
+                    print(f"WARN  voice Live mode: {settings.live_model} not listed by {settings.stt_url}/models")
+                elif live.get("ready") is False:
+                    print(f"WARN  voice Live mode: {settings.live_model} is listed but not ready")
+                else:
+                    print(f"OK    voice Live mode: {settings.live_model}")
+            except (httpx.HTTPError, ValueError):
+                pass
+        else:
+            print("INFO  voice Live mode off: no KREWD_VOICE_LIVE_MODEL")
     print(f"INFO  voice reference (My voice): {'set up' if settings.reference_file.is_file() else 'not set up'}")
     return 0
 

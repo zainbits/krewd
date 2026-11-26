@@ -67,6 +67,9 @@ class VoiceSettings:
     stt_url: str = ""  # an OpenAI-compatible API base, e.g. http://127.0.0.1:8780/v1 (POST {stt_url}/audio/transcriptions)
     stt_model: str = ""
     stt_fields: tuple[tuple[str, str], ...] = ()  # extra form fields for that API, e.g. store=false
+    # Live mode (words while speaking): a Model Warehouse live model on the same API, e.g. nemotron-live
+    # (POST {stt_url}/audio/live). Empty: the app offers only pieces.
+    live_model: str = ""
     reference_file: Path = CONFIG_DIR / "voice-reference.wav"  # the owner's 15 s voice reference (My voice), mode 600
     old_voiceprint_file: Path = CONFIG_DIR / "voiceprint.json"  # 0.33's WeSpeaker voiceprint, deleted on setup
 
@@ -238,6 +241,7 @@ def load_voice_settings(data_dir: Path) -> VoiceSettings:
         stt_url=os.environ.get("KREWD_VOICE_STT_URL", "").strip().rstrip("/"),
         stt_model=os.environ.get("KREWD_VOICE_STT_MODEL", "").strip(),
         stt_fields=tuple(fields),
+        live_model=os.environ.get("KREWD_VOICE_LIVE_MODEL", "").strip(),
     )
 
 
