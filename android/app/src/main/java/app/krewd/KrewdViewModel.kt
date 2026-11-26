@@ -177,6 +177,7 @@ data class UiState(
     val needs: List<NeedItem> = emptyList(),
     /** A Needs you card to scroll to and flash on the Krewd tab (a notification was tapped). */
     val focusNeed: String? = null,
+    val focusAlarm: Boolean = false,
     /** Push on this phone and the server; see [PushState.active]. */
     val push: PushState = PushState(built = PushProvider.built, provider = PushProvider.NAME),
     /** The routine whose page is open, with its run history once loaded. */
@@ -851,6 +852,14 @@ class KrewdViewModel(private val app: Application) {
     }
 
     fun focusNeedDone() = _state.update { it.copy(focusNeed = null) }
+
+    /** Opened from a Critical alarm: the Krewd tab, at the top, where its card and Got it are. */
+    fun focusAlarm() {
+        closeSession()
+        _state.update { it.copy(navTab = NavTab.TASKS, focusAlarm = true) }
+    }
+
+    fun focusAlarmDone() = _state.update { it.copy(focusAlarm = false) }
 
     /** Done, Dismiss or Snooze on a card; the card goes (or moves) at once and comes back if the server says no. */
     fun needAction(item: NeedItem, action: String, until: java.time.Instant? = null) {

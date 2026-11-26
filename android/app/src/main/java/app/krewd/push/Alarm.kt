@@ -29,7 +29,6 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.ui.Alignment
@@ -48,8 +47,8 @@ import app.krewd.data.AlertLevel
 /**
  * A ringing Critical alarm: a foreground service (only while it rings) that plays the phone's alarm sound in a loop on
  * the alarm stream and vibrates, under a full-screen notification ([AlarmActivity] over the lock screen). It rings
- * until Got it, at most [MAX_RING_MS]; after that the notification stays, silent. Started only when Do Not Disturb is
- * off ([AlertCenter.ring]).
+ * until Got it on the Krewd tab ([AlertCenter.gotIt]), at most [MAX_RING_MS]; after that the notification and the card
+ * stay, silent, until Got it. Started only when Do Not Disturb is off ([AlertCenter.ring]).
  */
 class AlarmService : Service() {
     private var player: MediaPlayer? = null
@@ -62,7 +61,6 @@ class AlarmService : Service() {
             return START_NOT_STICKY
         }
         val alert = intent?.let(::alertOf) ?: run { stopSelf(); return START_NOT_STICKY }
-        _ringing.value = alert
         startForeground(AlertCenter.ALARM_ID, AlertCenter.alarmNotification(this, alert), ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
         startRinging()
         handler.removeCallbacks(timeout)
@@ -98,7 +96,6 @@ class AlarmService : Service() {
     }
 
     override fun onDestroy() {
-        _ringing.value = null
         handler.removeCallbacks(timeout)
         silence()
         super.onDestroy()
@@ -126,12 +123,6 @@ class AlarmService : Service() {
             runCatching { context.stopService(Intent(context, AlarmService::class.java)) }
         }
 
-        private val _ringing = kotlinx.coroutines.flow.MutableStateFlow<AlertInfo?>(null)
-
-        /** The alarm ringing now, if any: the Krewd tab shows it on top with its own Got it (opening the app alone
-         *  never stops it, so it cannot be silenced by accident). */
-        val ringing: kotlinx.coroutines.flow.StateFlow<AlertInfo?> = _ringing
-
         fun withAlert(intent: Intent, alert: AlertInfo): Intent = intent
             .putExtra("id", alert.id).putExtra("kind", alert.kind).putExtra("level", alert.level)
             .putExtra("title", alert.title).putExtra("body", alert.body)
@@ -148,7 +139,8 @@ class AlarmService : Service() {
     }
 }
 
-/** The alarm over the lock screen: what it is, a big Got it (stops it), and Open (stops it and opens the card). */
+/** The alarm over the lock screen: what it is, and Open Krewd, which goes to the Krewd tab, where Got it stops it.
+ *  It has no stop button of its own, so a half-awake tap cannot silence it. */
 class AlarmActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -157,27 +149,15 @@ class AlarmActivity : ComponentActivity() {
         val alert = AlarmService.alertOf(intent) ?: run { finish(); return }
         setContent {
             KrewdTheme {
-                AlarmScreen(
-                    alert,
-                    onGotIt = {
-                        AlertCenter.gotIt(this, alert.id)
-                        finish()
-                    },
-                    onOpen = {
-                        AlertCenter.gotIt(this, alert.id)
-                        getSystemService(KeyguardManager::class.java).requestDismissKeyguard(this, null)
-                        startActivity(
-                            Intent(this, MainActivity::class.java)
-                                .putExtra(AlertCenter.EXTRA_ALERT_ID, alert.id)
-                                .apply {
-                                    alert.needsId?.let { putExtra(AlertCenter.EXTRA_NEEDS_ID, it) }
-                                    if (alert.needsId == null) alert.sessionId?.let { putExtra(MainActivity.EXTRA_SESSION_ID, it) }
-                                }
-                                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP),
-                        )
-                        finish()
-                    },
-                )
+                AlarmScreen(alert) {
+                    getSystemService(KeyguardManager::class.java).requestDismissKeyguard(this, null)
+                    startActivity(
+                        Intent(this, MainActivity::class.java)
+                            .putExtra(AlertCenter.EXTRA_SHOW_ALARM, true)
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP),
+                    )
+                    finish()
+                }
             }
         }
     }
@@ -193,7 +173,7 @@ class AlarmActivity : ComponentActivity() {
 }
 
 @androidx.compose.runtime.Composable
-private fun AlarmScreen(alert: AlertInfo, onGotIt: () -> Unit, onOpen: () -> Unit) {
+private fun AlarmScreen(alert: AlertInfo, onOpen: () -> Unit) {
     val krewd = LocalKrewdColors.current
     Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surface) {
         Column(
@@ -209,13 +189,16 @@ private fun AlarmScreen(alert: AlertInfo, onGotIt: () -> Unit, onOpen: () -> Uni
                 Text(alert.body, style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center)
             }
             Spacer(Modifier.weight(1f))
+            Text(
+                "Open Krewd and tap Got it on the Krewd tab to stop the alarm.",
+                style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center,
+            )
+            Spacer(Modifier.height(16.dp))
             Button(
-                onClick = onGotIt,
+                onClick = onOpen,
                 colors = ButtonDefaults.buttonColors(containerColor = krewd.needs, contentColor = krewd.onNeeds),
                 modifier = Modifier.fillMaxWidth().height(64.dp),
-            ) { Text("Got it", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold) }
-            Spacer(Modifier.height(12.dp))
-            OutlinedButton(onClick = onOpen, modifier = Modifier.fillMaxWidth().height(52.dp)) { Text("Open in Krewd") }
+            ) { Text("Open Krewd", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold) }
         }
     }
 }

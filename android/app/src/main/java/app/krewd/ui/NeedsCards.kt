@@ -323,20 +323,21 @@ fun AlertSetupBanner(onOpen: () -> Unit) {
     }
 }
 
-/** At the top of the Krewd tab while a Critical alarm rings: what it is, and the only buttons that stop it. */
+/** At the top of the Krewd tab while a Critical alarm rings (or waits out Do Not Disturb): what it is, and Got it,
+ *  the only thing that stops it. Open chat looks at its chat and leaves it ringing. */
 @Composable
-fun RingingAlarmCard(alarm: app.krewd.data.AlertInfo, onGotIt: () -> Unit, onOpen: () -> Unit) {
+fun RingingAlarmCard(alarm: app.krewd.data.AlertInfo, quiet: Boolean, onGotIt: () -> Unit, onOpenChat: (() -> Unit)?) {
     val colors = MaterialTheme.colorScheme
     Surface(shape = RoundedCornerShape(24.dp), color = colors.errorContainer, modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp)) {
         Column(Modifier.padding(start = 18.dp, end = 16.dp, top = 14.dp, bottom = 12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Icon(painterResource(R.drawable.ic_notification), contentDescription = null, tint = colors.error, modifier = Modifier.size(20.dp))
-                Text("Alarm ringing", style = MaterialTheme.typography.labelLarge, color = colors.onErrorContainer, fontWeight = FontWeight.SemiBold)
+                Text(if (quiet) "Alarm (held by Do Not Disturb)" else "Alarm ringing", style = MaterialTheme.typography.labelLarge, color = colors.onErrorContainer, fontWeight = FontWeight.SemiBold)
             }
             Text(alarm.title, style = MaterialTheme.typography.titleMedium, color = colors.onErrorContainer)
             if (alarm.body.isNotBlank()) Text(alarm.body, style = MaterialTheme.typography.bodyMedium, color = colors.onErrorContainer.copy(alpha = 0.85f))
             Row(Modifier.fillMaxWidth().padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
-                if (alarm.needsId != null || alarm.sessionId != null) TextButton(onClick = onOpen) { Text("Open", color = colors.onErrorContainer) }
+                onOpenChat?.let { TextButton(onClick = it) { Text("Open chat", color = colors.onErrorContainer) } }
                 Button(onClick = onGotIt, colors = ButtonDefaults.buttonColors(containerColor = colors.error, contentColor = colors.onError)) {
                     Text("Got it", fontWeight = FontWeight.SemiBold)
                 }

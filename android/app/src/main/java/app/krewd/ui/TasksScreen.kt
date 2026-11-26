@@ -152,7 +152,14 @@ fun TasksScreen(
     val cards = NeedItem.sorted(state.needs, now)
     val permissions = rememberAlertPermissions()
     val context = androidx.compose.ui.platform.LocalContext.current
-    val ringing by app.krewd.push.AlarmService.ringing.collectAsStateWithLifecycle()
+    val ringing by app.krewd.push.AlertCenter.alarm.collectAsStateWithLifecycle()
+    LaunchedEffect(Unit) { app.krewd.push.AlertCenter.restore(context) }
+    // Opened from the alarm (its notification or full-screen screen): the card is at the top; scroll there.
+    LaunchedEffect(state.focusAlarm) {
+        if (!state.focusAlarm) return@LaunchedEffect
+        viewModel.focusAlarmDone()
+        listState.animateScrollToItem(0)
+    }
     var flashNeed by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(state.focusNeed, cards.size) {
         val id = state.focusNeed ?: return@LaunchedEffect
@@ -181,15 +188,17 @@ fun TasksScreen(
         ) {
             // The name floats at the top left (the title pill); the connection is part of the page, at its top right.
             item(key = "header") { HomeHeader(state.connection, onOpenSettings) }
-            ringing?.let { alarm ->
+            ringing?.let { active ->
+                val alarm = active.alert
                 item(key = "ringing") {
                     RingingAlarmCard(
                         alarm,
-                        onGotIt = { app.krewd.push.AlertCenter.gotIt(context, alarm.id) },
-                        onOpen = {
+                        quiet = active.quiet,
+                        onGotIt = {
                             app.krewd.push.AlertCenter.gotIt(context, alarm.id)
-                            alarm.needsId?.let(viewModel::focusNeed) ?: alarm.sessionId?.let(viewModel::openSession)
+                            alarm.needsId?.let(viewModel::focusNeed)
                         },
+                        onOpenChat = alarm.sessionId?.let { id -> { viewModel.openSession(id) } },
                     )
                 }
             }

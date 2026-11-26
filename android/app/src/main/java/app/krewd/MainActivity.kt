@@ -67,6 +67,11 @@ class MainActivity : ComponentActivity() {
             viewModel.askStop(it)
             return
         }
+        // From a Critical alarm: the Krewd tab, where its card has Got it (opening alone stops nothing).
+        if (intent?.getBooleanExtra(app.krewd.push.AlertCenter.EXTRA_SHOW_ALARM, false) == true) {
+            viewModel.focusAlarm()
+            return
+        }
         // From a notification: the owner saw that alert; it opens its card or its chat.
         intent?.getStringExtra(app.krewd.push.AlertCenter.EXTRA_ALERT_ID)?.let(viewModel::ackAlert)
         intent?.getStringExtra(app.krewd.push.AlertCenter.EXTRA_NEEDS_ID)?.let {

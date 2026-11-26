@@ -29,8 +29,10 @@ import kotlinx.coroutines.withTimeoutOrNull
  * - info: no notification (a card in the app only).
  * - action: a normal notification.
  * - urgent: a heads-up notification whose sound repeats until it is opened (FLAG_INSISTENT).
- * - critical: a full-screen alarm that rings until "Got it" ([AlarmService], [AlarmActivity]). It follows Do Not
- *   Disturb (the owner's choice): with it on, the alarm waits silently as a notification that cannot be swiped away.
+ * - critical: a full-screen alarm ([AlarmService], [AlarmActivity]) that only Got it on the Krewd tab stops
+ *   ([alarm]): swiping its notification away puts it straight back, and neither the notification nor the full-screen
+ *   alarm has a stop button, so it cannot be silenced by accident. It follows Do Not Disturb (the owner's choice): with
+ *   it on, the alarm waits silently, still on the Krewd tab until Got it.
  *
  * Alerts come by push (FCM, [onPush]: a wake-up with the alert id; the details are fetched from Krewd) or, without
  * push, from the app's live connection while it is open ([fromEvent]). Every push ends in a notification, as Android
@@ -46,6 +48,17 @@ object AlertCenter {
     const val EXTRA_NEEDS_ID = "needs_id"
     private const val FETCH_MS = 8_000L
     private const val TAG = "Krewd"
+
+    const val EXTRA_SHOW_ALARM = "show_alarm"
+    private const val ALARM_EXTRAS = "krewd_alarm"
+
+    /** A Critical alarm that is ringing ([quiet] false) or held back by Do Not Disturb ([quiet] true). */
+    data class ActiveAlarm(val alert: AlertInfo, val quiet: Boolean)
+
+    private val _alarm = kotlinx.coroutines.flow.MutableStateFlow<ActiveAlarm?>(null)
+
+    /** The alarm waiting for Got it, if any: the Krewd tab shows it on top, the only place that stops it. */
+    val alarm: kotlinx.coroutines.flow.StateFlow<ActiveAlarm?> = _alarm
 
     private val handled = LinkedHashSet<String>()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -74,6 +87,16 @@ object AlertCenter {
                 },
             ),
         )
+    }
+
+    /** After the process restarts, the alarm still waiting is read back from its notification. */
+    fun restore(context: Context) {
+        if (_alarm.value != null) return
+        val posted = context.getSystemService(NotificationManager::class.java).activeNotifications
+            .firstOrNull { it.id == ALARM_ID } ?: return
+        val extras = posted.notification.extras.getBundle(ALARM_EXTRAS) ?: return
+        val alert = AlarmService.alertOf(Intent().putExtras(extras)) ?: return
+        _alarm.value = ActiveAlarm(alert, extras.getBoolean("quiet"))
     }
 
     private fun allowed(context: Context): Boolean =
@@ -154,55 +177,84 @@ object AlertCenter {
         context.getSystemService(NotificationManager::class.java).notify(notificationId(alert), notification)
     }
 
-    private fun ring(context: Context, alert: AlertInfo) {
+    fun ring(context: Context, alert: AlertInfo) {
         if (quietNow(context)) {
-            // Do Not Disturb: no sound, no full screen; it waits, and cannot be swiped away until Got it.
-            val n = Notification.Builder(context, CH_CRITICAL_QUIET)
-                .setSmallIcon(R.drawable.ic_notification)
-                .setContentTitle(alert.title)
-                .setContentText(alert.body.ifBlank { "Alarm held back while Do Not Disturb is on" })
-                .setStyle(Notification.BigTextStyle().bigText(alert.body))
-                .setContentIntent(openIntent(context, alert))
-                .setOngoing(true)
-                .setCategory(Notification.CATEGORY_ALARM)
-                .addAction(Notification.Action.Builder(null, "Got it", gotItIntent(context, alert.id)).build())
-                .setDeleteIntent(gotItIntent(context, alert.id))
-                .build()
-            context.getSystemService(NotificationManager::class.java).notify(ALARM_ID, n)
+            // Do Not Disturb: no sound, no full screen; it waits on the Krewd tab until Got it.
+            _alarm.value = ActiveAlarm(alert, quiet = true)
+            context.getSystemService(NotificationManager::class.java).notify(ALARM_ID, quietNotification(context, alert))
             return
         }
+        _alarm.value = ActiveAlarm(alert, quiet = false)
         AlarmService.start(context, alert)
     }
 
-    /** The notification of a ringing alarm: full screen over the lock screen, Got it and Open. */
+    private fun quietNotification(context: Context, alert: AlertInfo): Notification =
+        Notification.Builder(context, CH_CRITICAL_QUIET)
+            .setSmallIcon(R.drawable.ic_notification)
+            .setContentTitle(alert.title)
+            .setContentText("Held back by Do Not Disturb. Open Krewd and tap Got it to clear it.")
+            .setStyle(Notification.BigTextStyle().bigText(listOf(alert.body, "Held back by Do Not Disturb. Open Krewd and tap Got it to clear it.").filter { it.isNotBlank() }.joinToString("\n\n")))
+            .setContentIntent(showAlarmIntent(context))
+            .setOngoing(true)
+            .setCategory(Notification.CATEGORY_ALARM)
+            .setDeleteIntent(repostIntent(context, alert, quiet = true))
+            .addExtras(alarmExtras(alert, quiet = true))
+            .build()
+
+    /** The notification of a ringing alarm: full screen over the lock screen; a tap opens the Krewd tab, where Got it is. */
     fun alarmNotification(context: Context, alert: AlertInfo): Notification {
         val full = PendingIntent.getActivity(
             context, ALARM_ID,
             AlarmActivity.intent(context, alert),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
+        val hint = "Open Krewd and tap Got it to stop the alarm."
         return Notification.Builder(context, CH_CRITICAL)
             .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle(alert.title)
-            .setContentText(alert.body)
-            .setStyle(Notification.BigTextStyle().bigText(alert.body))
+            .setContentText(hint)
+            .setStyle(Notification.BigTextStyle().bigText(listOf(alert.body, hint).filter { it.isNotBlank() }.joinToString("\n\n")))
             .setFullScreenIntent(full, true)
-            .setContentIntent(full)
+            .setContentIntent(showAlarmIntent(context))
             .setOngoing(true)
+            .setOnlyAlertOnce(true)
             .setCategory(Notification.CATEGORY_ALARM)
-            .addAction(Notification.Action.Builder(null, "Got it", gotItIntent(context, alert.id)).build())
-            // Android 14+ lets the owner swipe even an ongoing alarm away: that is Got it too, so the ringing never
-            // goes on with nothing left to stop it.
-            .setDeleteIntent(gotItIntent(context, alert.id))
+            // Android 14+ lets the owner swipe even an ongoing notification away: it comes straight back, and the
+            // alarm goes on ringing. Only Got it on the Krewd tab stops it.
+            .setDeleteIntent(repostIntent(context, alert, quiet = false))
+            .addExtras(alarmExtras(alert, quiet = false))
             .build()
     }
 
-    /** Got it: the alarm stops, its notification goes, and Krewd hears it was seen. */
+    private fun alarmExtras(alert: AlertInfo, quiet: Boolean): android.os.Bundle =
+        android.os.Bundle().apply {
+            putBundle(ALARM_EXTRAS, (AlarmService.withAlert(Intent(), alert).extras ?: android.os.Bundle()).apply { putBoolean("quiet", quiet) })
+        }
+
+    /** The alarm's notification was swiped away: it goes back up, unless Got it came first. */
+    fun repost(context: Context, alertId: String?, quiet: Boolean) {
+        restore(context)
+        val active = _alarm.value?.takeIf { it.alert.id == alertId } ?: return
+        val manager = context.getSystemService(NotificationManager::class.java)
+        manager.notify(ALARM_ID, if (quiet) quietNotification(context, active.alert) else alarmNotification(context, active.alert))
+    }
+
+    /** Got it, from the Krewd tab only: the alarm stops, its notification goes, and Krewd hears it was seen. */
     fun gotIt(context: Context, alertId: String?) {
+        _alarm.value = null
         AlarmService.stop(context)
         context.getSystemService(NotificationManager::class.java).cancel(ALARM_ID)
         if (!alertId.isNullOrBlank() && alertId != AlarmActivity.TEST_LOCAL) scope.launch { runCatching { vm(context).ackAlertNow(alertId) } }
     }
+
+    /** Opens Krewd on the Krewd tab, scrolled to the alarm card (nothing is stopped or acknowledged by it). */
+    fun showAlarmIntent(context: Context): PendingIntent = PendingIntent.getActivity(
+        context,
+        ALARM_ID + 1,
+        Intent(context, MainActivity::class.java).putExtra(EXTRA_SHOW_ALARM, true)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP),
+        PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+    )
 
     fun clearChat(context: Context, sessionId: String) =
         context.getSystemService(NotificationManager::class.java).cancel("chat:$sessionId".hashCode())
@@ -229,21 +281,22 @@ object AlertCenter {
         PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
     )
 
-    private fun gotItIntent(context: Context, alertId: String): PendingIntent = PendingIntent.getBroadcast(
+    private fun repostIntent(context: Context, alert: AlertInfo, quiet: Boolean): PendingIntent = PendingIntent.getBroadcast(
         context,
         ALARM_ID,
-        Intent(context, AlertActions::class.java).setAction(AlertActions.GOT_IT).putExtra(EXTRA_ALERT_ID, alertId),
+        Intent(context, AlertActions::class.java).setAction(AlertActions.REPOST)
+            .putExtra(EXTRA_ALERT_ID, alert.id).putExtra("quiet", quiet),
         PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
     )
 }
 
-/** Notification buttons: Got it on an alarm. */
+/** An alarm's notification was swiped away: put it back (the alarm keeps going until Got it on the Krewd tab). */
 class AlertActions : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        if (intent.action == GOT_IT) AlertCenter.gotIt(context, intent.getStringExtra(AlertCenter.EXTRA_ALERT_ID))
+        if (intent.action == REPOST) AlertCenter.repost(context, intent.getStringExtra(AlertCenter.EXTRA_ALERT_ID), intent.getBooleanExtra("quiet", false))
     }
 
     companion object {
-        const val GOT_IT = "app.krewd.GOT_IT"
+        const val REPOST = "app.krewd.ALARM_REPOST"
     }
 }

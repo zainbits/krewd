@@ -252,14 +252,14 @@ Krewd tells the owner's phone about what needs them with alerts, each with a lev
 | `info` | a card only, no notification | an agent's Needs you item that suggests it |
 | `action` | a normal notification | an approval, a sign-in request, a proposal, a task that finished or stopped with an error, a routine run that finished or waits, a Needs you item (the default) |
 | `urgent` | a heads-up notification whose sound repeats until it is opened | a failed routine run; a Needs you item that suggests it |
-| `critical` | a full-screen alarm that rings until "Got it" | a failed run of a routine with `alarm_on_fail` (the owner's own switch, "Alarm if a run fails"); the owner's test |
+| `critical` | a full-screen alarm that rings until "Got it" on the app's Krewd tab (swiping the notification away does not stop it) | a failed run of a routine with `alarm_on_fail` (the owner's own switch, "Alarm if a run fails"); the owner's test |
 
 An agent can only suggest a level, and gets at most `urgent`. Critical alarms follow the phone's Do Not Disturb: while it is on they wait silently. `alarm_on_fail` can only be changed from a paired phone (`PATCH /api/routines/{id}` with `alarm_on_fail`; 403 from the local token).
 
 An alert object: `{id, kind, level, title, body, session_id, needs_id, ref_id, created_at, acked_at}`; `GET /api/alerts/{id}` adds `open` (false once acknowledged, its approval decided or its item closed) and `needs`. `kind` is one of `approval`, `secret`, `proposal`, `error`, `finished`, `run_done`, `needs`, `test`.
 
 - `GET /api/alerts?limit=` the newest alerts (kept 14 days).
-- `GET /api/alerts/{id}`, `POST /api/alerts/{id}/ack` (the owner opened it or tapped Got it).
+- `GET /api/alerts/{id}`, `POST /api/alerts/{id}/ack` (the owner opened it, or tapped Got it on an alarm).
 - `POST /api/alerts/test` `{level: action|urgent|critical}`: a test alert, end to end (critical only from a paired phone, 403 from the local token).
 
 Push: every alert above `info` is sent to every registered phone through Firebase Cloud Messaging (HTTP v1, a service-account key file on the server, `KREWD_FCM_KEY`, default `~/.config/krewd/fcm-service-account.json`) as a high-priority data message with only `{k: "alert", id, l: level}`; the phone fetches the rest from Krewd. When Krewd cannot be reached it shows "Krewd: something needs you" at that level. At most 30 pushes a minute. Without the key, push is off and the app shows alerts only while it is open (from the `alert` events).

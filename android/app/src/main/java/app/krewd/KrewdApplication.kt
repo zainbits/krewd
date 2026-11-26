@@ -11,6 +11,7 @@ class KrewdApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         AlertCenter.channels(this)
+        AlertCenter.restore(this)
         // Push starts with the process: a push can be what started it (the google flavor; nothing in plain).
         PushProvider.init(this)
     }
