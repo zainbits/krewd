@@ -62,7 +62,7 @@ class AlarmService : Service() {
             return START_NOT_STICKY
         }
         val alert = intent?.let(::alertOf) ?: run { stopSelf(); return START_NOT_STICKY }
-        ringing = alert.id
+        _ringing.value = alert
         startForeground(AlertCenter.ALARM_ID, AlertCenter.alarmNotification(this, alert), ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
         startRinging()
         handler.removeCallbacks(timeout)
@@ -98,7 +98,7 @@ class AlarmService : Service() {
     }
 
     override fun onDestroy() {
-        ringing = null
+        _ringing.value = null
         handler.removeCallbacks(timeout)
         silence()
         super.onDestroy()
@@ -126,13 +126,11 @@ class AlarmService : Service() {
             runCatching { context.stopService(Intent(context, AlarmService::class.java)) }
         }
 
-        @Volatile var ringing: String? = null
-            private set
+        private val _ringing = kotlinx.coroutines.flow.MutableStateFlow<AlertInfo?>(null)
 
-        /** Opening the app counts as seeing the alarm: stop it the way Got it does. */
-        fun silenceIfRinging(context: Context) {
-            ringing?.let { AlertCenter.gotIt(context, it) }
-        }
+        /** The alarm ringing now, if any: the Krewd tab shows it on top with its own Got it (opening the app alone
+         *  never stops it, so it cannot be silenced by accident). */
+        val ringing: kotlinx.coroutines.flow.StateFlow<AlertInfo?> = _ringing
 
         fun withAlert(intent: Intent, alert: AlertInfo): Intent = intent
             .putExtra("id", alert.id).putExtra("kind", alert.kind).putExtra("level", alert.level)

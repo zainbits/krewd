@@ -42,6 +42,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
@@ -150,14 +151,16 @@ fun TasksScreen(
     }
     val cards = NeedItem.sorted(state.needs, now)
     val permissions = rememberAlertPermissions()
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val ringing by app.krewd.push.AlarmService.ringing.collectAsStateWithLifecycle()
     var flashNeed by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(state.focusNeed, cards.size) {
         val id = state.focusNeed ?: return@LaunchedEffect
         val at = cards.indexOfFirst { it.id == id }
         if (at < 0) return@LaunchedEffect
         viewModel.focusNeedDone()
-        // header, hero, [setup banner], [roster], needs title, then the cards
-        val before = 2 + (if (!permissions.complete) 1 else 0) + (if (members.isNotEmpty()) 1 else 0) + 1
+        // header, [ringing alarm], hero, [setup banner], [roster], needs title, then the cards
+        val before = 2 + (if (ringing != null) 1 else 0) + (if (!permissions.complete) 1 else 0) + (if (members.isNotEmpty()) 1 else 0) + 1
         listState.animateScrollToItem(before + at)
         flashNeed = id
         kotlinx.coroutines.delay(1_800)
@@ -178,6 +181,18 @@ fun TasksScreen(
         ) {
             // The name floats at the top left (the title pill); the connection is part of the page, at its top right.
             item(key = "header") { HomeHeader(state.connection, onOpenSettings) }
+            ringing?.let { alarm ->
+                item(key = "ringing") {
+                    RingingAlarmCard(
+                        alarm,
+                        onGotIt = { app.krewd.push.AlertCenter.gotIt(context, alarm.id) },
+                        onOpen = {
+                            app.krewd.push.AlertCenter.gotIt(context, alarm.id)
+                            alarm.needsId?.let(viewModel::focusNeed) ?: alarm.sessionId?.let(viewModel::openSession)
+                        },
+                    )
+                }
+            }
             item(key = "hero") {
                 Hero(
                     needs = pending.size + signIns.size + proposals.size + cards.size,
