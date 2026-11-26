@@ -166,6 +166,7 @@ object AlertCenter {
                 .setOngoing(true)
                 .setCategory(Notification.CATEGORY_ALARM)
                 .addAction(Notification.Action.Builder(null, "Got it", gotItIntent(context, alert.id)).build())
+                .setDeleteIntent(gotItIntent(context, alert.id))
                 .build()
             context.getSystemService(NotificationManager::class.java).notify(ALARM_ID, n)
             return
@@ -190,6 +191,9 @@ object AlertCenter {
             .setOngoing(true)
             .setCategory(Notification.CATEGORY_ALARM)
             .addAction(Notification.Action.Builder(null, "Got it", gotItIntent(context, alert.id)).build())
+            // Android 14+ lets the owner swipe even an ongoing alarm away: that is Got it too, so the ringing never
+            // goes on with nothing left to stop it.
+            .setDeleteIntent(gotItIntent(context, alert.id))
             .build()
     }
 

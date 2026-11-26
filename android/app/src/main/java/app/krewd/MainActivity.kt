@@ -41,6 +41,8 @@ class MainActivity : ComponentActivity() {
     override fun onStart() {
         super.onStart()
         viewModel.inForeground = true
+        // The owner opened Krewd: a ringing alarm has been seen (it stays as a card where it has one).
+        app.krewd.push.AlarmService.silenceIfRinging(this)
     }
 
     override fun onResume() {
