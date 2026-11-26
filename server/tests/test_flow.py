@@ -33,7 +33,7 @@ TOKEN = "test-token"
 async def hub(tmp_path):
     pool = await db.connect(DATABASE_URL)
     await pool.execute(
-        "drop table if exists browser_tabs, proposals, session_agents, routine_triggers, routine_runs, routine_versions, routines, messages, events, approvals, sessions,"
+        "drop table if exists alerts, needs_items, push_tokens, browser_tabs, proposals, session_agents, routine_triggers, routine_runs, routine_versions, routines, messages, events, approvals, sessions,"
         " engines, devices, app_prefs, browser_locations, schema_version cascade"
     )
     settings = Settings(

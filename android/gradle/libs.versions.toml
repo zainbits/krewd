@@ -11,6 +11,7 @@ junit = "4.13.2"
 json = "20250517"
 commonmark = "0.24.0"
 credentials = "1.6.0"
+firebaseBom = "35.2.0"
 
 [libraries]
 meniscus = { group = "io.github.zainbits", name = "meniscus", version.ref = "meniscus" }
@@ -33,6 +34,8 @@ commonmark-ext-gfm-strikethrough = { group = "org.commonmark", name = "commonmar
 commonmark-ext-autolink = { group = "org.commonmark", name = "commonmark-ext-autolink", version.ref = "commonmark" }
 androidx-credentials = { group = "androidx.credentials", name = "credentials", version.ref = "credentials" }
 androidx-credentials-play-services = { group = "androidx.credentials", name = "credentials-play-services-auth", version.ref = "credentials" }
+firebase-bom = { group = "com.google.firebase", name = "firebase-bom", version.ref = "firebaseBom" }
+firebase-messaging = { group = "com.google.firebase", name = "firebase-messaging" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

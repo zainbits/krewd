@@ -663,6 +663,27 @@ class KrewdApi(
 
     fun approvals(): List<Approval> = arr("GET", "/api/approvals").objects().map(Approval::from)
 
+    // Push, alerts and Needs you (alerts.py on the server)
+
+    /** Registers this phone's FCM token; the answer says whether Krewd has its FCM key. */
+    fun registerPush(token: String, appVersion: String): JSONObject =
+        obj("POST", "/api/push/register", JSONObject().put("token", token).put("app_version", appVersion))
+
+    fun alert(id: String, timeoutMs: Int = 8_000): AlertInfo =
+        AlertInfo.from(JSONObject(call("GET", "/api/alerts/$id", null, connectTimeoutMs = minOf(timeoutMs, Timing.CONNECT_TIMEOUT_MS), readTimeoutMs = timeoutMs)))
+
+    fun ackAlert(id: String) {
+        obj("POST", "/api/alerts/$id/ack", JSONObject())
+    }
+
+    fun testAlert(level: String): AlertInfo = AlertInfo.from(obj("POST", "/api/alerts/test", JSONObject().put("level", level)))
+
+    fun needs(): List<NeedItem> = arr("GET", "/api/needs").objects().map(NeedItem::from)
+
+    /** done, dismissed, snooze (with [until]) or open. */
+    fun needAction(id: String, action: String, until: java.time.Instant? = null): NeedItem =
+        NeedItem.from(obj("POST", "/api/needs/$id", JSONObject().put("action", action).apply { until?.let { put("until", it.toString()) } }))
+
     fun decide(id: String, optionId: String): Approval =
         Approval.from(obj("POST", "/api/approvals/$id", JSONObject().put("option_id", optionId)))
 

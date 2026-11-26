@@ -12,6 +12,10 @@
     krewd routines skip ID [--trigger NAME] (--today | --runs N | --clear)   skip coming runs (owner's ask only)
     krewd schedule CRON [--timezone TZ]      check a schedule and show its next runs
     krewd chat history CHAT [--last N] [--after SEQ]     a chat's messages (owner, agents), e.g. after a switch
+    krewd chat find [WORDS] [--archived] [--limit N]     earlier chats by title (full ids, to name them in a reply)
+    krewd needs add --key KEY --title T [--source S] [--link URL] [--due WHEN] [--level L]   a Needs you card
+    krewd needs list | done KEY | dismiss KEY            the open cards; close one you added
+    krewd alert test [--level action|urgent]             the owner's end-to-end test of a notification level
     krewd secret request [--field KIND[:LABEL[:SELECTOR]]]... [--submit enter|none|SELECTOR] --reason TEXT [--tab ID]
     krewd security status | revoke PHONE | remove-key ID | reset   the owner's phones and keys (this machine only)
     krewd browser tabs                       the agents' Brave tabs with their view (vertical or horizontal)
@@ -33,6 +37,13 @@ A sign-in request (`krewd secret request`) asks the owner for a password, a one-
 the phone. The agent never sees it: the owner types it there, Krewd types it into the page's fields and submits
 the form, and the command prints only the outcome and the page it landed on. KIND is username, email, password,
 otp or text (default: username and password); the fields are found by themselves, or give a CSS selector.
+
+A Needs you card (`krewd needs add`) is something the owner must do or decide: a popup to answer, a form due
+by a time. KEY is stable (the same popup on every run is one card: `zoho-timesheet-2026-11`); the same key again
+updates the card, and a card the owner closed stays closed unless --again. WHEN is 19:00 (today, else tomorrow),
+"in 2h", or an ISO time. --level is only a suggestion: Krewd's rules decide (agents get at most urgent), so
+alarms stay rare. Name another Krewd chat in a reply by its full id (from `krewd chat find`): the app shows its
+title as a link.
 
 ID can be the first characters of a routine id. Reads the token from ~/.config/krewd/token.
 """
@@ -328,6 +339,88 @@ def _at_time(text: str) -> dict[str, Any]:
     return {"at": at.isoformat()}
 
 
+def _due(text: str) -> str:
+    text = text.strip()
+    m = re.fullmatch(r"in\s+(\d+(?:\.\d+)?)\s*(m|min|h|d)", text)
+    if m:
+        value = float(m.group(1))
+        minutes = value * {"m": 1, "min": 1, "h": 60, "d": 1440}[m.group(2)]
+        return (datetime.now().astimezone() + timedelta(minutes=minutes)).isoformat()
+    if re.fullmatch(r"\d{1,2}:\d{2}", text):
+        return _at_time(text)["at"]
+    try:
+        when = datetime.fromisoformat(text)
+    except ValueError:
+        raise CliError(f"--due takes 19:00, 'in 2h' or an ISO time, not {text!r}") from None
+    return (when if when.tzinfo else when.astimezone()).isoformat()
+
+
+def _need_line(n: dict[str, Any]) -> str:
+    due = f", due {_when(n['due_at'])}" if n.get("due_at") else ""
+    snooze = f", snoozed until {_when(n['snoozed_until'])}" if n.get("snoozed_until") else ""
+    return f"  {n['key']}: {n['title']} ({n['level']}{due}{snooze}){' - ' + n['source'] if n['source'] else ''}"
+
+
+def _push_line() -> str:
+    p = call("GET", "/api/push")
+    if not p.get("configured"):
+        return "off (no FCM key on this machine); the phone shows it only while the app is open"
+    return f"FCM project {p.get('project')}, {p.get('phones', 0)} phone(s)" + \
+        (f", last errors: {'; '.join(p['errors'][:2])}" if p.get("errors") else "")
+
+
+def _needs(args: argparse.Namespace) -> int:
+    if args.needs_action == "list":
+        found = call("GET", "/api/needs")
+        if not found:
+            print("No open Needs you cards.")
+        for n in found:
+            print(_need_line(n))
+        return 0
+    if args.needs_action in ("done", "dismiss"):
+        import urllib.parse
+
+        action = "done" if args.needs_action == "done" else "dismissed"
+        n = call("POST", f"/api/needs/key/{urllib.parse.quote(args.key, safe='')}", {"action": action})
+        print(f"Marked {action}: {n['title']}")
+        return 0
+    body: dict[str, Any] = {"key": args.key, "title": args.title, "source": args.source, "again": args.again}
+    if args.link:
+        body["link"] = args.link
+    if args.due:
+        body["due_at"] = _due(args.due)
+    if args.level:
+        body["level"] = args.level
+    if args.from_chat:
+        body["session_id"] = _chat_id(args.from_chat)
+    n = call("POST", "/api/needs", body)
+    said = {"added": "Added", "updated": "Updated", "reopened": "Raised again"}.get(n["outcome"])
+    if said is None:
+        print(f"Not raised: the owner already marked this {n['status']} ({_when(n['closed_at'])}). "
+              "Use --again only if it really needs them again.")
+        return 0
+    level = n["level"] + (f" (you suggested {n['suggested_level']})" if n.get("suggested_level") and
+                          n["suggested_level"] != n["level"] else "")
+    print(f"{said}: {n['title']}, level {level}." + (" The owner gets a notification." if n["outcome"] != "updated"
+                                                      and n["level"] != "info" else ""))
+    return 0
+
+
+def _find_chats(args: argparse.Namespace) -> int:
+    chats = call("GET", "/api/sessions") + (call("GET", "/api/sessions?archived=true") if args.archived else [])
+    words = [w.lower() for w in args.words]
+    found = [c for c in chats if all(w in (c["title"] or "").lower() for w in words)]
+    found.sort(key=lambda c: c.get("updated_at") or "", reverse=True)
+    if not found:
+        print("No chat title has those words. Try fewer words, or --archived.")
+        return 0
+    for c in found[: max(1, args.limit)]:
+        print(f"{c['id']}  {_when(c.get('updated_at'))}  {c['status']:<7} {c['title']}"
+              + ("  (archived)" if c.get("archived") else ""))
+    print("Name a chat in your reply by its full id: the app shows its title as a link that opens it.")
+    return 0
+
+
 def _secret(args: argparse.Namespace) -> int:
     import time
 
@@ -420,6 +513,10 @@ def main(argv: list[str] | None = None) -> int:
     hist.add_argument("chat")
     hist.add_argument("--last", type=int, default=30, help="how many messages from the end (default 30)")
     hist.add_argument("--after", type=int, default=0, help="only messages after this event seq")
+    find = csub.add_parser("find", help="earlier chats whose title has these words, newest first, with full ids")
+    find.add_argument("words", nargs="*")
+    find.add_argument("--archived", action="store_true", help="also archived chats")
+    find.add_argument("--limit", type=int, default=20)
     prompt = csub.add_parser("prompt", help="draft a message to another chat; it goes only when the owner sends it",
                              epilog=SIDE_RULES, formatter_class=argparse.RawDescriptionHelpFormatter)
     prompt.add_argument("chat", help="the chat to message: one the owner attached with @, or a linked one")
@@ -464,6 +561,28 @@ def main(argv: list[str] | None = None) -> int:
                             "it keeps that view until someone changes it")
     view.add_argument("tab", help="the tab's DevTools target id (browser-harness current_tab()) or its first characters")
     view.add_argument("mode", choices=["vertical", "horizontal"])
+
+    needs = sub.add_parser("needs", help="Needs you cards for the owner (things to do or decide, with a due time)",
+                           description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    nsub = needs.add_subparsers(dest="needs_action", required=True)
+    nadd = nsub.add_parser("add", help="add a card, or update the one with this key")
+    nadd.add_argument("--key", required=True, help="stable key: the same thing seen again is the same card")
+    nadd.add_argument("--title", required=True)
+    nadd.add_argument("--source", default="", help="where it comes from, e.g. 'Zoho People popup'")
+    nadd.add_argument("--link", help="https://... or krewd://chat/<id> (default: your chat)")
+    nadd.add_argument("--due", help="19:00, 'in 2h' or an ISO time")
+    nadd.add_argument("--level", choices=["info", "action", "urgent", "critical"],
+                      help="a suggestion; Krewd's rules decide (agents get at most urgent)")
+    nadd.add_argument("--again", action="store_true", help="raise it again even though the owner closed it")
+    nadd.add_argument("--chat-id", dest="from_chat", help="your chat's id (from your first prompt)")
+    nsub.add_parser("list", help="the open cards")
+    for name in ("done", "dismiss"):
+        nsub.add_parser(name, help=f"mark a card {name}").add_argument("key")
+    alert = sub.add_parser("alert", help="notifications on the owner's phone")
+    asub = alert.add_subparsers(dest="alert_action", required=True)
+    atest = asub.add_parser("test", help="send a test alert through push (the owner's check)")
+    atest.add_argument("--level", choices=["action", "urgent"], default="action",
+                       help="a Critical test alarm only from the app (Settings > Alerts)")
 
     sched = sub.add_parser("schedule", help="check a 5-field cron schedule and show its next runs")
     sched.add_argument("cron")
@@ -538,6 +657,14 @@ def main(argv: list[str] | None = None) -> int:
             if args.from_chat:
                 body["session_id"] = _chat_id(args.from_chat)
             _proposed(call("POST", "/api/proposals", body))
+            return 0
+        if args.cmd == "chat" and args.chat_action == "find":
+            return _find_chats(args)
+        if args.cmd == "needs":
+            return _needs(args)
+        if args.cmd == "alert":
+            a = call("POST", "/api/alerts/test", {"level": args.level})
+            print(f"Sent a {a['level']} test alert ({a['id'][:8]}). Push: {_push_line()}")
             return 0
         if args.cmd == "chat":
             chat_id = _chat_id(args.chat)

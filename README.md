@@ -61,11 +61,14 @@ them from anywhere.
 - **Hardware-key security.** Phones pair with your FIDO security key (USB-C or NFC) or your phone passkey. Keys and
   sign-ins need your fingerprint. HTTPS everywhere with Krewd's own pinned certificate; one QR code
   connects a new phone.
-- **Files both ways.** Attach anything to a task; agents hand files back as downloads.
+- **Files both ways.** Attach anything to a task; agents hand files back. Markdown, PDF and HTML open right in
+  the app, like artifacts; anything else downloads.
 - **Your agents' own commands and skills.** The composer suggests each agent's slash commands and
   skills as you type.
-- **Live notifications.** Android 16 live updates for running tasks, plus alerts when an agent needs
-  you, finishes or fails.
+- **Alerts that arrive.** Push through your own free Firebase project (optional): the push carries only an id,
+  the phone fetches the rest from your machine. Four levels set by fixed rules, from a quiet card to a
+  full-screen alarm for a failed time-bound job (a missed check-in). Agents add "Needs you" cards with a
+  countdown, Done, Snooze and Add to calendar.
 
 ## A look inside
 

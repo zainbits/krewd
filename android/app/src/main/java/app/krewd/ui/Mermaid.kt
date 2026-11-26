@@ -49,6 +49,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.toArgb
@@ -419,7 +420,7 @@ private fun DiagramPicture(diagram: Diagram) {
                     is ImageLoad.Ready -> Image(
                         l.bitmap,
                         contentDescription = "Diagram",
-                        modifier = Modifier.size(w, h).clickable { viewer?.open?.invoke(listOf(ref), 0) },
+                        modifier = Modifier.size(w, h).clip(RoundedCornerShape(8.dp)).clickable { viewer?.open?.invoke(listOf(ref), 0) },
                     )
                     is ImageLoad.Failed -> Text(l.reason, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
                     ImageLoad.Loading -> Box(Modifier.size(w, h))

@@ -67,6 +67,12 @@ class MainActivity : ComponentActivity() {
             viewModel.askStop(it)
             return
         }
+        // From a notification: the owner saw that alert; it opens its card or its chat.
+        intent?.getStringExtra(app.krewd.push.AlertCenter.EXTRA_ALERT_ID)?.let(viewModel::ackAlert)
+        intent?.getStringExtra(app.krewd.push.AlertCenter.EXTRA_NEEDS_ID)?.let {
+            viewModel.focusNeed(it)
+            return
+        }
         intent?.getStringExtra(EXTRA_SESSION_ID)?.let(viewModel::openSession)
     }
 

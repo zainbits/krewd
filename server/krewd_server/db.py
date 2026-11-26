@@ -12,7 +12,7 @@ SCHEMA_VERSION = 6
 MIGRATIONS = {1: "schema.sql", 2: "schema_v2.sql", 3: "schema_v3.sql", 4: "schema_v4.sql", 5: "schema_v5.sql",
               6: "schema_v6.sql", 7: "schema_v7.sql", 8: "schema_v8.sql",
               9: "schema_v9.sql", 10: "schema_v10.sql", 11: "schema_v11.sql",
-              12: "schema_v12.sql", 13: "schema_v13.sql"}
+              12: "schema_v12.sql", 13: "schema_v13.sql", 14: "schema_v14.sql"}
 
 
 async def _init_connection(conn: asyncpg.Connection) -> None:
@@ -120,7 +120,7 @@ def session_json(row: asyncpg.Record, pending_approvals: int = 0) -> dict[str, A
 def event_json(row: asyncpg.Record) -> dict[str, Any]:
     return {
         "seq": row["seq"],
-        "session_id": str(row["session_id"]),
+        "session_id": str(row["session_id"]) if row["session_id"] else "",
         "kind": row["kind"],
         "payload": row["payload"],
         "created_at": row["created_at"].isoformat(),
@@ -199,6 +199,7 @@ def routine_json(row: asyncpg.Record) -> dict[str, Any]:
         "last_run_at": _iso(row["last_run_at"]),
         "created_by": row["created_by"],
         "notes": row["notes"] if "notes" in row.keys() else "",
+        "alarm_on_fail": row["alarm_on_fail"] if "alarm_on_fail" in row.keys() else False,
         "created_at": _iso(row["created_at"]),
         "updated_at": _iso(row["updated_at"]),
     }

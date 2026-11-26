@@ -76,6 +76,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.ui.zIndex
@@ -497,7 +498,7 @@ private fun AllTabs(state: UiState, actions: TabActions, onNew: () -> Unit, onDi
                             shape = RoundedCornerShape(18.dp),
                             color = MaterialTheme.colorScheme.surfaceContainer,
                             border = if (selected) androidx.compose.foundation.BorderStroke(2.dp, MaterialTheme.colorScheme.primary) else null,
-                            modifier = Modifier.fillMaxWidth().combinedClickable(
+                            modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp)).combinedClickable(
                                 onClick = { actions.onSelect(tab); onDismiss() },
                                 onLongClick = { menu = true },
                             ),
@@ -518,7 +519,7 @@ private fun AllTabs(state: UiState, actions: TabActions, onNew: () -> Unit, onDi
                                         )
                                     }
                                     Box(
-                                        Modifier.align(Alignment.TopEnd).padding(6.dp).size(28.dp).background(Color(0xAA000000), CircleShape)
+                                        Modifier.align(Alignment.TopEnd).padding(6.dp).size(28.dp).clip(CircleShape).background(Color(0xAA000000))
                                             .clickable { actions.onClose(tab) },
                                         contentAlignment = Alignment.Center,
                                     ) { Icon(painterResource(R.drawable.ic_close_24), contentDescription = "Close tab", tint = Color.White, modifier = Modifier.size(16.dp)) }

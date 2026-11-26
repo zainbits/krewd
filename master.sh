@@ -148,6 +148,20 @@ PY
       esac
     done < <(KREWD_CONFIG_DIR="$CONFIG_DIR" uvrun python -m krewd_server.voice check 2>/dev/null)
   fi
+  if [[ -n "$(find_uv)" ]]; then
+    # Push (push.py): the FCM service-account key, on this machine only (mode 600, never in git). Without it alerts
+    # reach the phone only while the app is open.
+    local line
+    while IFS= read -r line; do
+      case "$line" in
+        "OK    "*) ok "${line#OK    }" ;;
+        "WARN  "*) warn "${line#WARN  }" "AGENTS.md, Push: put the key at $CONFIG_DIR/fcm-service-account.json (chmod 600)" ;;
+        "FAIL  "*) bad "${line#FAIL  }" "AGENTS.md, Push" ;;
+      esac
+    done < <(KREWD_CONFIG_DIR="$CONFIG_DIR" uvrun python -m krewd_server.push check 2>/dev/null)
+    [[ -f "$(firebase_config)" ]] && ok "push: Firebase app config for the app build ($(firebase_config))" \
+      || warn "push: no Firebase app config for the app build ($(firebase_config))" "AGENTS.md, Push: download google-services.json for app.krewd there"
+  fi
   if [[ -n "$(conf KREWD_DATABASE_URL '')" && -n "$(find_uv)" ]]; then
     local db; db="$(KREWD_CONFIG_DIR="$CONFIG_DIR" uvrun python - <<'PY' 2>&1
 import asyncio, os, asyncpg
@@ -289,6 +303,7 @@ PY
   offer_xvfb
   tidy_old
   mkdir -p "$HOME/.local/bin" && ln -sfn "$REPO/deploy/krewd-cli.sh" "$HOME/.local/bin/krewd" && say "Linked the krewd command: ~/.local/bin/krewd."
+  setup_push
   if linux_systemd; then
     install_units
     [[ "$(loginctl show-user "$USER" -p Linger --value 2>/dev/null)" == yes ]] \
@@ -299,6 +314,20 @@ PY
   doctor
   say ""
   say "Next: ./master.sh token, then scan its code with the phone (or open its link there) to connect the app."
+}
+
+# Push (FCM): two files from the owner's own free Firebase project, both outside the repo (AGENTS.md, Push).
+setup_push() {
+  (umask 077; mkdir -p "$CONFIG_DIR/firebase")
+  local key="${KREWD_FCM_KEY:-$CONFIG_DIR/fcm-service-account.json}"
+  [[ -f "$key" ]] && chmod 600 "$key"
+  if [[ -f "$key" && -f "$(firebase_config)" ]]; then
+    say "Push: FCM key and Firebase app config are in place."
+    return 0
+  fi
+  say "${Y}Push is not set up yet${N} (alerts then reach the phone only while the app is open). In the Firebase console:"
+  [[ -f "$(firebase_config)" ]] || say "  - add an Android app with package app.krewd, download google-services.json to $(firebase_config), then ./master.sh app"
+  [[ -f "$key" ]] || say "  - Project settings > Service accounts > Generate new private key, save it as $key (chmod 600)"
 }
 
 # ---------------------------------------------------------------- run
@@ -361,6 +390,7 @@ update_finish() {
   (cd "$REPO/server" && "$(find_uv)" sync --frozen --quiet) || return 1
   offer_xvfb
   tidy_old
+  setup_push
   if linux_systemd; then
     install_units
     restart all
@@ -372,15 +402,22 @@ update_finish() {
 
 signing_file() { printf '%s' "${ANDROID_SIGNING_PROPERTIES:-$HOME/.android/keystores/release.properties}"; }
 
+firebase_config() { printf '%s' "${KREWD_FIREBASE_CONFIG:-$CONFIG_DIR/firebase/google-services.json}"; }
+
+# `./master.sh app` builds the google flavor (push through FCM); `./master.sh app plain` the one without Google push.
 app() {
-  local variant=release apk
+  local variant=release apk flavor="${1:-google}"
+  [[ "$flavor" == google || "$flavor" == plain ]] || { say "${R}app takes google (default) or plain${N}"; return 1; }
   if [[ ! -f "$(signing_file)" ]]; then
     say "${Y}No signing key at $(signing_file); building a debug APK (Android debug key).${N}"
     variant=debug
   fi
-  local task=":app:assembleRelease"; [[ "$variant" == debug ]] && task=":app:assembleDebug"
-  (cd "$REPO/android" && ./gradlew --quiet "$task") || return 1
-  apk="$REPO/android/app/build/outputs/apk/$variant/app-$variant.apk"
+  if [[ "$flavor" == google && ! -f "$(firebase_config)" ]]; then
+    say "${Y}No Firebase app config at $(firebase_config): this build has no push (see AGENTS.md, Push).${N}"
+  fi
+  local cap="${flavor^}" vcap="${variant^}"
+  (cd "$REPO/android" && ./gradlew --quiet ":app:assemble$cap$vcap") || return 1
+  apk="$REPO/android/app/build/outputs/apk/$flavor/$variant/app-$flavor-$variant.apk"
   say "Built $apk"
   local signer; signer="$(ls "${ANDROID_HOME:-$HOME/Android/Sdk}"/build-tools/*/apksigner 2>/dev/null | sort -V | tail -n 1)"
   [[ -n "$signer" ]] && "$signer" verify --print-certs "$apk" 2>/dev/null | grep -m1 "SHA-256" | sed 's/^/Signed: /'
@@ -445,7 +482,7 @@ ${B}Krewd master script${N} ($REPO)
   security       the owner's phones and security key: status | revoke PHONE | reset
   test           run the server tests
   update         pull the latest code, reinstall, restart
-  app            build the Android app and install it over adb
+  app [plain]    build the Android app (google flavor: push through FCM; plain: without Google push) and install it over adb
   demo ACTION    the throwaway demo server for screenshots and videos:
                  setup | up | down | seed | reset | status | token | app
   agent-prompt   copy a ready prompt to paste into Claude Code, Codex or any agent
@@ -478,7 +515,7 @@ dispatch() {
     test) run_tests ;;
     update) update ;;
     update-finish) update_finish ;;  # the second half of update, run by the freshly pulled script
-    app) app ;;
+    app) app "$@" ;;
     demo) "$REPO/demo/demo.sh" "$@" ;;
     agent-prompt|agent|help-agent) agent_prompt ;;
     help|-h|--help) usage ;;

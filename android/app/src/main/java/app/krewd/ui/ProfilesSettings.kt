@@ -37,6 +37,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.AnnotatedString
@@ -77,7 +78,7 @@ fun ProfilesCard(state: UiState, viewModel: KrewdViewModel) {
         state.profiles.profiles.forEach { profile ->
             HorizontalDivider()
             Row(
-                Modifier.fillMaxWidth().clickable(enabled = online && state.profiles.managed) { editing = profile }.padding(vertical = 6.dp),
+                Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).clickable(enabled = online && state.profiles.managed) { editing = profile }.padding(vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Column(Modifier.weight(1f)) {

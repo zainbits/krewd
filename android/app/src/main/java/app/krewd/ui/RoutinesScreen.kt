@@ -65,6 +65,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
@@ -173,7 +174,8 @@ fun RoutinesScreen(state: UiState, viewModel: KrewdViewModel, padding: PaddingVa
 @Composable
 private fun RoutineCard(routine: Routine, chatStatus: String?, engineName: String, onClick: () -> Unit, onToggle: (Boolean) -> Unit) {
     Surface(
-        modifier = Modifier.fillMaxWidth().clickable(onClick = onClick),
+        onClick = onClick,
+        modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(ShellDimensions.CARD_CORNER),
         color = MaterialTheme.colorScheme.surfaceContainer,
     ) {
@@ -332,6 +334,19 @@ fun RoutineScreen(state: UiState, viewModel: KrewdViewModel, listState: androidx
                             IconButton(onClick = { editing = EditPart.AGENT }, enabled = online) {
                                 Icon(painterResource(R.drawable.ic_edit_24), contentDescription = "Change agent", modifier = Modifier.size(20.dp))
                             }
+                        }
+                        // The owner's rule for a time-bound job (a check-in): a failed run rings a full-screen alarm.
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            Column(Modifier.weight(1f)) {
+                                Text("Alarm if a run fails", style = MaterialTheme.typography.bodyLarge)
+                                Text(
+                                    if (routine.alarmOnFail) "A failed run rings full screen until you tap Got it (not during Do Not Disturb)"
+                                    else "A failed run is an urgent notification",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            Switch(checked = routine.alarmOnFail, onCheckedChange = { viewModel.setRoutineAlarm(routine.id, it) }, enabled = online)
                         }
                     }
                 }
@@ -508,7 +523,7 @@ private fun FoldedTextCard(title: String, text: String, empty: String, onOpen: (
         if (text.isBlank()) {
             Text(empty, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         } else {
-            Column(Modifier.fillMaxWidth().clickable(enabled = long, onClick = onOpen), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).clickable(enabled = long, onClick = onOpen), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text(text, style = MaterialTheme.typography.bodyMedium, maxLines = FOLDED_LINES, overflow = TextOverflow.Ellipsis)
                 if (long) {
                     Text(
@@ -685,7 +700,8 @@ private fun nextOf(routine: Routine, trigger: String?): String? =
 @Composable
 private fun SkipOption(label: String, detail: String?, danger: Boolean = false, onClick: () -> Unit) {
     Surface(
-        modifier = Modifier.fillMaxWidth().clickable(onClick = onClick),
+        onClick = onClick,
+        modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(16.dp),
         color = MaterialTheme.colorScheme.surfaceContainerHighest,
         contentColor = MaterialTheme.colorScheme.onSurface,
@@ -793,7 +809,9 @@ private fun RoutineMenuCard(
 @Composable
 private fun RunRow(run: RoutineRun, onClick: () -> Unit) {
     Surface(
-        modifier = Modifier.fillMaxWidth().clickable(enabled = run.seq != null, onClick = onClick),
+        onClick = onClick,
+        enabled = run.seq != null,
+        modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(16.dp),
         color = MaterialTheme.colorScheme.surfaceContainerLow,
     ) {
@@ -865,7 +883,7 @@ private fun TriggerLine(t: RoutineTrigger, routineOn: Boolean, onUndoSkip: () ->
             )
         }
         if (t.skipRuns > 0 && t.enabled) {
-            Surface(shape = CircleShape, color = MaterialTheme.colorScheme.tertiaryContainer, modifier = Modifier.clickable(enabled = online, onClick = onUndoSkip)) {
+            Surface(onClick = onUndoSkip, enabled = online, shape = CircleShape, color = MaterialTheme.colorScheme.tertiaryContainer) {
                 Row(Modifier.padding(start = 10.dp, end = 6.dp, top = 4.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text(
                         "Skip ${t.skipRuns}",

@@ -22,6 +22,8 @@ object ShellDimensions {
 
 object Timing {
     const val LONG_POLL_SECONDS = 25
+    /** How long the live connection stays after the app leaves the screen (an app switch), before it rests. */
+    const val BACKGROUND_GRACE_MS = 20_000L
     /** How much later than the server's wait a long poll may answer before its connection counts as dead. */
     const val READ_MARGIN_MS = 6_000
     const val CONNECT_TIMEOUT_MS = 4_000

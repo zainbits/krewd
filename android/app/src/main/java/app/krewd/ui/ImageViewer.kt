@@ -35,6 +35,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -95,6 +96,9 @@ fun ImageViewerHost(viewModel: KrewdViewModel, content: @Composable () -> Unit) 
     }
     CompositionLocalProvider(LocalImageViewer provides controller) {
         content()
+        // Markdown, PDF and HTML files open over everything, like the pictures (FilePreview.kt).
+        val preview by viewModel.preview.collectAsStateWithLifecycle()
+        preview?.let { FilePreviewScreen(it, onBack = viewModel::closePreview, onDownload = viewModel::downloadPreview, onShare = viewModel::sharePreview) }
         gallery?.let { (list, start) ->
             ImageViewer(list, start, controller, onSave = viewModel::saveImage, onShare = viewModel::shareImage, onDismiss = { gallery = null })
         }

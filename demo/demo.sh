@@ -138,8 +138,8 @@ token() { need_setup; (cd "$REPO/server" && "$PY" -m krewd_server connect); }
 
 app() {
   local signer apk
-  (cd "$REPO/android" && ./gradlew --quiet :app:assembleDemo) || return 1
-  apk="$REPO/android/app/build/outputs/apk/demo/app-demo.apk"
+  (cd "$REPO/android" && ./gradlew --quiet :app:assembleGoogleDemo) || return 1
+  apk="$REPO/android/app/build/outputs/apk/google/demo/app-google-demo.apk"
   say "Built $apk (app.krewd.demo, screen recording allowed everywhere)"
   if command -v adb >/dev/null 2>&1 && adb get-state >/dev/null 2>&1; then adb install -r "$apk"; else say "No phone on adb."; fi
 }

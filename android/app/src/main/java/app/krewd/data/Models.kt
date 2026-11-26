@@ -408,6 +408,8 @@ data class Routine(
     /** The next firing that really runs (skipped ones left out). */
     val nextLiveAt: String? = null,
     val upcoming: List<UpcomingRun> = emptyList(),
+    /** The owner's rule: a failed run rings a Critical alarm (a time-bound job such as a check-in). */
+    val alarmOnFail: Boolean = false,
 ) {
     val skipping: Boolean get() = triggers.any { !it.isFollowUp && it.skipRuns > 0 }
     val cronTriggers: List<RoutineTrigger> get() = triggers.filterNot { it.isFollowUp }
@@ -439,6 +441,7 @@ data class Routine(
             upcoming = o.optJSONArray("upcoming").objects().map { u ->
                 UpcomingRun(u.optString("at"), u.optString("trigger"), u.optBoolean("skipped"), if (u.isNull("attempt")) null else u.optInt("attempt"))
             },
+            alarmOnFail = o.optBoolean("alarm_on_fail"),
         )
     }
 }
@@ -664,4 +667,106 @@ sealed interface FileLoad {
 
     /** The download broke off; tapping again resumes it from where it stopped. */
     data object Failed : FileLoad
+}
+
+/** Alert levels, lowest first (server alerts.py): info is a card only; action a notification; urgent repeats; critical rings. */
+object AlertLevel {
+    const val INFO = "info"
+    const val ACTION = "action"
+    const val URGENT = "urgent"
+    const val CRITICAL = "critical"
+    fun rank(level: String?): Int = listOf(INFO, ACTION, URGENT, CRITICAL).indexOf(level).coerceAtLeast(0)
+}
+
+/** What a push was about (GET /api/alerts/{id}); [open] is false once nothing is asked any more (decided, done). */
+data class AlertInfo(
+    val id: String,
+    val kind: String,
+    val level: String,
+    val title: String,
+    val body: String,
+    val sessionId: String?,
+    val needsId: String?,
+    val open: Boolean,
+) {
+    companion object {
+        fun from(o: JSONObject) = AlertInfo(
+            id = o.optString("id"),
+            kind = o.optString("kind"),
+            level = o.optString("level", AlertLevel.ACTION),
+            title = o.optString("title", "Krewd"),
+            body = o.optString("body"),
+            sessionId = o.optStringOrNull("session_id"),
+            needsId = o.optStringOrNull("needs_id"),
+            open = if (o.has("open")) o.optBoolean("open") else o.isNull("acked_at"),
+        )
+    }
+}
+
+/** A Needs you card (server alerts.py): something to do or decide, with an optional due time. */
+data class NeedItem(
+    val id: String,
+    val key: String,
+    val title: String,
+    val source: String,
+    val link: String?,
+    val dueAt: java.time.Instant?,
+    val level: String,
+    val status: String,
+    val snoozedUntil: java.time.Instant?,
+    val sessionId: String?,
+    val createdBy: String,
+    val createdAt: java.time.Instant?,
+) {
+    val open: Boolean get() = status == "open"
+
+    fun snoozed(now: java.time.Instant): Boolean = snoozedUntil?.isAfter(now) == true
+
+    companion object {
+        private fun time(o: JSONObject, key: String): java.time.Instant? =
+            o.optStringOrNull(key)?.let { runCatching { java.time.OffsetDateTime.parse(it).toInstant() }.getOrNull() }
+
+        fun from(o: JSONObject) = NeedItem(
+            id = o.optString("id"),
+            key = o.optString("key"),
+            title = o.optString("title"),
+            source = o.optString("source"),
+            link = o.optStringOrNull("link"),
+            dueAt = time(o, "due_at"),
+            level = o.optString("level", AlertLevel.ACTION),
+            status = o.optString("status", "open"),
+            snoozedUntil = time(o, "snoozed_until"),
+            sessionId = o.optStringOrNull("session_id"),
+            createdBy = o.optString("created_by", "agent"),
+            createdAt = time(o, "created_at"),
+        )
+
+        /**
+         * Home's order: what is due within a day first (soonest first), then by level (highest first), then newest.
+         * Snoozed cards go last.
+         */
+        fun sorted(items: List<NeedItem>, now: java.time.Instant): List<NeedItem> {
+            val day = now.plusSeconds(24 * 3600)
+            return items.sortedWith(
+                compareBy<NeedItem> { it.snoozed(now) }
+                    .thenBy { if (it.dueAt != null && it.dueAt.isBefore(day)) 0 else 1 }
+                    .thenBy { if (it.dueAt != null && it.dueAt.isBefore(day)) it.dueAt else java.time.Instant.MAX }
+                    .thenByDescending { AlertLevel.rank(it.level) }
+                    .thenByDescending { it.createdAt ?: java.time.Instant.EPOCH },
+            )
+        }
+    }
+}
+
+/** Push on this phone and on the server (GET /api/push and the token registration). */
+data class PushState(
+    val built: Boolean = false,
+    val provider: String = "",
+    val serverKey: Boolean? = null,
+    val project: String? = null,
+    val registered: Boolean = false,
+    val error: String? = null,
+) {
+    /** Krewd can wake this phone: alerts come by push, not over the app's live connection. */
+    val active: Boolean get() = built && registered && serverKey == true
 }

@@ -83,7 +83,8 @@ Event: `{seq, session_id, kind, payload, created_at}`. Kinds:
 - `tool` `{tool_call_id, title, kind, status, input, output, paths, images}`: replace the row with the same id
 - `plan` `{entries: [{content, status}]}`
 - `approval` approval object (pending, then again when decided)
-- `turn_start` `{message_id}`, `turn_end` `{stop_reason, usage, preview, files?}` (`preview`: first line of the reply; `files`: see Files from the agent), `error` `{message}`
+- `turn_start` `{message_id}`, `turn_end` `{stop_reason, usage, preview, files?, chats?}` (`preview`: first line of the reply; `files`: see Files from the agent; `chats`: see Chats named in a reply), `error` `{message}`
+- `alert` alert object, when Krewd raises one and when it is acknowledged; `needs` Needs you item, whenever it changes (see Alerts and push). Both may have no session (`session_id` `""`)
 - `session` session object, whenever it changes
 
 ## Messages and delivery
@@ -235,6 +236,49 @@ Files are saved as `~/.krewd/common/attachments/<first 8 characters of the sessi
 An agent hands a file back by saving it in a shared folder (`KREWD_SHARE_DIRS`, colon-separated; default `$KREWD_WORKDIR/outputs`) and writing its path in the reply. At the end of the turn, every absolute or `~` path in the reply that names a regular file inside a shared folder is listed on `turn_end` as `files: [{path, name, size, mime}]` (at most 10).
 
 `GET /api/files?path=<path>` returns the file as a download. Only regular files inside the shared folders are served, after resolving symlinks and `..`; anything else is 404.
+
+The app opens Markdown (`.md`), PDF and HTML files inside itself (a preview over the chat, with Download and Share) instead of handing them to another app; HTML is shown in a WebView with scripts and network loads off unless the owner turns them on for that page.
+
+## Chats named in a reply
+
+When an agent's reply names other Krewd chats by their full id (bare, in backticks or as `krewd://chat/<id>`), `turn_end` lists the ones that exist as `chats: [{id, title, archived}]` (in order of first mention, at most 20, not the chat itself). The app shows each id in the text as a link with the chat's title, and the chats as chips under the reply; a tap opens the chat. Agents find earlier chats with `krewd chat find WORDS`.
+
+## Alerts and push
+
+Krewd tells the owner's phone about what needs them with alerts, each with a level that Krewd's own rules set (`alerts.py`):
+
+| Level | On the phone | Raised for |
+| --- | --- | --- |
+| `info` | a card only, no notification | an agent's Needs you item that suggests it |
+| `action` | a normal notification | an approval, a sign-in request, a proposal, a task that finished or stopped with an error, a routine run that finished or waits, a Needs you item (the default) |
+| `urgent` | a heads-up notification whose sound repeats until it is opened | a failed routine run; a Needs you item that suggests it |
+| `critical` | a full-screen alarm that rings until "Got it" | a failed run of a routine with `alarm_on_fail` (the owner's own switch, "Alarm if a run fails"); the owner's test |
+
+An agent can only suggest a level, and gets at most `urgent`. Critical alarms follow the phone's Do Not Disturb: while it is on they wait silently. `alarm_on_fail` can only be changed from a paired phone (`PATCH /api/routines/{id}` with `alarm_on_fail`; 403 from the local token).
+
+An alert object: `{id, kind, level, title, body, session_id, needs_id, ref_id, created_at, acked_at}`; `GET /api/alerts/{id}` adds `open` (false once acknowledged, its approval decided or its item closed) and `needs`. `kind` is one of `approval`, `secret`, `proposal`, `error`, `finished`, `run_done`, `needs`, `test`.
+
+- `GET /api/alerts?limit=` the newest alerts (kept 14 days).
+- `GET /api/alerts/{id}`, `POST /api/alerts/{id}/ack` (the owner opened it or tapped Got it).
+- `POST /api/alerts/test` `{level: action|urgent|critical}`: a test alert, end to end (critical only from a paired phone, 403 from the local token).
+
+Push: every alert above `info` is sent to every registered phone through Firebase Cloud Messaging (HTTP v1, a service-account key file on the server, `KREWD_FCM_KEY`, default `~/.config/krewd/fcm-service-account.json`) as a high-priority data message with only `{k: "alert", id, l: level}`; the phone fetches the rest from Krewd. When Krewd cannot be reached it shows "Krewd: something needs you" at that level. At most 30 pushes a minute. Without the key, push is off and the app shows alerts only while it is open (from the `alert` events).
+
+- `POST /api/push/register` `{token, app_version}`: the phone's FCM token (the phone's id is taken from its session). Answers like `GET /api/push`.
+- `POST /api/push/unregister` `{token}`.
+- `GET /api/push` `{configured, project, phones, errors}`.
+
+Tokens FCM says are gone are dropped at once; others after 60 days without a registration.
+
+### Needs you
+
+Things the owner must do or decide, as cards on the app's Krewd tab with a countdown, Done, Snooze, Dismiss and Add to calendar (which opens the phone's calendar app with the event filled in; nothing is written to a calendar by Krewd). An item: `{id, key, title, source, link, due_at, level, suggested_level, status: open|done|dismissed, snoozed_until, session_id, routine_id, created_by: agent|krewd|owner, seen_count, created_at, updated_at, closed_at}`.
+
+- `POST /api/needs` `{key, title, source?, link?, due_at?, level?, session_id?, again?}` (agents: `krewd needs add`): adds the card, or updates the one with the same `key` (one card per key; `seen_count` goes up). A card the owner closed stays closed (`outcome: closed`) unless `again`. `link` is `http(s)://...` or `krewd://chat/<id>`; without one the card opens the chat that raised it. The answer has `outcome`: `added`, `updated`, `reopened` or `closed`. A new or reopened card (or a raised level) is an alert.
+- `GET /api/needs` open items (soonest due first); `?closed=true` all, newest first.
+- `GET /api/needs/{id}`; `POST /api/needs/{id}` or `POST /api/needs/key/{key}` `{action: done|dismissed|snooze|open, until?}`.
+
+A snoozed card alerts again when the snooze ends, and a card with a due time alerts once 15 minutes before it. A routine run that failed or waits is a card too (`created_by: krewd`, key `run:<run id>`); the routine's next good run marks those done. Closed items are deleted after 30 days.
 
 ## Images in tool results
 

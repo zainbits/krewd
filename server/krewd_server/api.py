@@ -23,6 +23,7 @@ from . import files as shared_files
 from .attachments import TooLarge
 from .browser import Browser, BrowserUnavailable, TabGone
 from .hub import Conflict, Hub, NotFound, TabTaken
+from .alerts import LEVELS, Invalid as AlertInvalid
 from .locations import LOCATION_SCRIPT, Invalid as LocationInvalid, Locations
 from .profiles import ProfileError
 from .routines import Invalid
@@ -152,6 +153,7 @@ class RoutineFields(BaseModel):
     config: dict[str, str] | None = None
     auto_approve: bool | None = None
     enabled: bool | None = None
+    alarm_on_fail: bool | None = None  # the owner's rule: a failed run rings as a Critical alarm (phone only)
     note: str | None = Field(default=None, max_length=500)  # why it changed, kept with the version
     by: Literal["owner", "agent"] = "owner"
 
@@ -159,6 +161,39 @@ class RoutineFields(BaseModel):
 class NewRoutine(RoutineFields):
     title: str = Field(min_length=1, max_length=200)
     instructions: str = Field(min_length=1, max_length=20000)
+
+
+class PushToken(BaseModel):
+    token: str = Field(min_length=1, max_length=4096)
+    app_version: str | None = Field(default=None, max_length=40)
+
+
+class NewNeed(BaseModel):
+    """A Needs you card from an agent (`krewd needs add`). The same key again updates the card."""
+    key: str = Field(min_length=1, max_length=200)
+    title: str = Field(min_length=1, max_length=300)
+    source: str = Field(default="", max_length=200)
+    link: str | None = Field(default=None, max_length=2000)
+    due_at: datetime | None = None
+    level: Literal["info", "action", "urgent", "critical"] | None = None  # a suggestion: Krewd's rules decide
+    session_id: uuid.UUID | None = None  # the agent's chat (from its first prompt)
+    again: bool = False  # raise it again even though the owner closed it
+
+    @field_validator("link")
+    @classmethod
+    def link_kind(cls, value: str | None) -> str | None:
+        if value and not value.startswith(("https://", "http://", "krewd://chat/")):
+            raise ValueError("a link is an http(s) address or krewd://chat/<id>")
+        return value
+
+
+class NeedAction(BaseModel):
+    action: Literal["done", "dismissed", "snooze", "open"]
+    until: datetime | None = None  # snooze: until when
+
+
+class TestAlert(BaseModel):
+    level: Literal["action", "urgent", "critical"] = "critical"
 
 
 class RunRequest(BaseModel):
@@ -377,6 +412,10 @@ def create_app(hub: Hub, token: str, lifespan_hub: bool = True) -> FastAPI:
     async def voice_error(_, exc: VoiceError):
         return JSONResponse(status_code=exc.status, content={"detail": str(exc)})
 
+    @app.exception_handler(AlertInvalid)
+    async def alert_invalid(_: Request, exc: AlertInvalid) -> JSONResponse:
+        return JSONResponse({"detail": str(exc)}, status_code=422)
+
     @app.exception_handler(Conflict)
     async def conflict(_, exc: Conflict):
         return JSONResponse(status_code=409, content={"detail": str(exc)})
@@ -551,6 +590,9 @@ def create_app(hub: Hub, token: str, lifespan_hub: bool = True) -> FastAPI:
             title=tab.get("title") or "", reason=body.reason.strip(), fields=parse_fields(body.fields), submit=submit,
         ))
         await emit_secret(req)
+        await hub._alert_chat(session_id, "secret", "action", "Sign in for {title}",
+                              f"Sign in on {url_origin(req.url) or 'a website'}" + (f": {req.reason}" if req.reason else ""),
+                              ref_id=str(req.id))
         return req.json()
 
     @app.get("/api/secrets", dependencies=auth)
@@ -837,8 +879,11 @@ def create_app(hub: Hub, token: str, lifespan_hub: bool = True) -> FastAPI:
         return await hub.get_routine(routine_id)
 
     @app.patch("/api/routines/{routine_id}", dependencies=auth)
-    async def change_routine(routine_id: uuid.UUID, body: RoutineFields) -> dict[str, Any]:
+    async def change_routine(routine_id: uuid.UUID, body: RoutineFields, request: Request) -> dict[str, Any]:
         changes = body.model_dump(exclude_none=True, exclude={"note", "by"})
+        if "alarm_on_fail" in changes and request.state.principal.kind == "local" and security.paired:
+            # Alarms stay rare: only the owner, from a paired phone, decides which routine may ring one.
+            raise HTTPException(403, "only the owner can turn the alarm on or off, from the app")
         return await hub.update_routine(routine_id, changes, changed_by=body.by, note=body.note)
 
     @app.put("/api/routines/{routine_id}/notes", dependencies=auth)
@@ -927,6 +972,92 @@ def create_app(hub: Hub, token: str, lifespan_hub: bool = True) -> FastAPI:
         if path is None:
             raise HTTPException(404, "no such image")
         return FileResponse(path, media_type=hub.tool_images.mime(name), headers={"Cache-Control": "private, max-age=31536000, immutable"})
+
+    # push, alerts and Needs you (alerts.py, push.py)
+
+    @app.post("/api/push/register", dependencies=auth)
+    async def push_register(body: PushToken, request: Request) -> dict[str, Any]:
+        """The phone's FCM token; the phone sends it after each start and whenever FCM gives it a new one."""
+        await hub.alerts.register(body.token, request.state.principal.device_id, body.app_version)
+        return await hub.alerts.status()
+
+    @app.post("/api/push/unregister", dependencies=auth)
+    async def push_unregister(body: PushToken) -> dict[str, Any]:
+        await hub.alerts.unregister(body.token)
+        return {"ok": True}
+
+    @app.get("/api/push", dependencies=auth)
+    async def push_status() -> dict[str, Any]:
+        return await hub.alerts.status()
+
+    @app.get("/api/alerts", dependencies=auth)
+    async def recent_alerts(limit: int = Query(default=50, ge=1, le=200)) -> list[dict[str, Any]]:
+        return await hub.alerts.recent(limit)
+
+    @app.get("/api/alerts/{alert_id}", dependencies=auth)
+    async def alert(alert_id: uuid.UUID) -> dict[str, Any]:
+        """What a push was about: the phone fetches it when the push wakes it."""
+        found = await hub.alerts.get(alert_id)
+        if found is None:
+            raise HTTPException(404, "no such alert")
+        return found
+
+    @app.post("/api/alerts/{alert_id}/ack", dependencies=auth)
+    async def ack_alert(alert_id: uuid.UUID) -> dict[str, Any]:
+        await hub.alerts.ack(alert_id)
+        return {"ok": True}
+
+    @app.post("/api/alerts/test", dependencies=auth, status_code=201)
+    async def test_alert(body: TestAlert, request: Request) -> dict[str, Any]:
+        """The owner's test of a level, end to end through FCM. A Critical test only from a paired phone, so no agent
+        can ring an alarm."""
+        if body.level == "critical" and request.state.principal.kind == "local" and security.paired:
+            raise HTTPException(403, "a Critical test alarm only from the app (Settings > Alerts)")
+        names = {"action": "Action", "urgent": "Urgent", "critical": "Critical"}
+        return await hub.alerts.notify("test", body.level, f"Test: {names[body.level]} alert",
+                                       "Krewd test alert. Tap to open." if body.level != "critical"
+                                       else "Krewd test alarm. Tap Got it to stop it.")
+
+    @app.get("/api/needs", dependencies=auth)
+    async def needs(closed: bool = False, limit: int = Query(default=100, ge=1, le=500)) -> list[dict[str, Any]]:
+        return await hub.alerts.needs(closed, limit)
+
+    @app.post("/api/needs", dependencies=auth)
+    async def add_need(body: NewNeed) -> dict[str, Any]:
+        session_id = body.session_id
+        if session_id is None:
+            running = [rt.id for rt in hub.runtimes.values() if rt.running]
+            session_id = running[0] if len(running) == 1 else None
+        elif await hub.pool.fetchval("select 1 from sessions where id = $1", session_id) is None:
+            raise HTTPException(404, "no such chat")
+        routine_id = await hub.pool.fetchval(
+            "select routine_id from routine_runs where session_id = $1 order by created_at desc limit 1",
+            session_id) if session_id else None
+        return await hub.alerts.add_need(
+            key=body.key, title=body.title, source=body.source, link=body.link, due_at=body.due_at,
+            level=body.level, session_id=session_id, routine_id=routine_id, again=body.again,
+        )
+
+    @app.get("/api/needs/{need_id}", dependencies=auth)
+    async def need(need_id: uuid.UUID) -> dict[str, Any]:
+        found = await hub.alerts.need(need_id)
+        if found is None:
+            raise HTTPException(404, "no such item")
+        return found
+
+    @app.post("/api/needs/{need_id}", dependencies=auth)
+    async def change_need(need_id: uuid.UUID, body: NeedAction) -> dict[str, Any]:
+        found = await hub.alerts.set_need(need_id, body.action, body.until)
+        if found is None:
+            raise HTTPException(404, "no such open item")
+        return found
+
+    @app.post("/api/needs/key/{key}", dependencies=auth)
+    async def change_need_by_key(key: str, body: NeedAction) -> dict[str, Any]:
+        found = await hub.alerts.set_need(None, body.action, body.until, key=key)
+        if found is None:
+            raise HTTPException(404, "no item with that key")
+        return found
 
     @app.get("/api/approvals", dependencies=auth)
     async def approvals(status: str | None = "pending") -> list[dict[str, Any]]:

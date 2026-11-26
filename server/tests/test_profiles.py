@@ -286,7 +286,7 @@ async def managed(tmp_path, gateway, fake_codex, fake_claude):
         pytest.skip("KREWD_TEST_DATABASE_URL is not set")
     pool = await db.connect(DATABASE_URL)
     await pool.execute(
-        "drop table if exists browser_tabs, proposals, session_agents, routine_triggers, routine_runs, routine_versions, routines, messages, events, approvals, sessions,"
+        "drop table if exists alerts, needs_items, push_tokens, browser_tabs, proposals, session_agents, routine_triggers, routine_runs, routine_versions, routines, messages, events, approvals, sessions,"
         " engines, devices, app_prefs, schema_version cascade"
     )
     engines, _ = setup(tmp_path, gateway, fake_codex, claude=fake_claude)

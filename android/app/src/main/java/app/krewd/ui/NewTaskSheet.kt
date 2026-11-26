@@ -36,6 +36,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
@@ -275,7 +276,8 @@ fun NewTaskSheet(
                         .fillMaxWidth()
                         .heightIn(min = 48.dp)
                         .padding(top = 6.dp)
-                        .then(if (onGlass) Modifier.background(colors.surfaceContainerHighest, RoundedCornerShape(20.dp)) else Modifier)
+                        .clip(RoundedCornerShape(20.dp))
+                        .then(if (onGlass) Modifier.background(colors.surfaceContainerHighest) else Modifier)
                         .combinedClickable(onClick = { returns = !returns }),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
@@ -341,7 +343,7 @@ fun NewTaskSheet(
                     Surface(
                         shape = RoundedCornerShape(12.dp),
                         color = MaterialTheme.colorScheme.surfaceContainerHighest,
-                        modifier = Modifier.combinedClickable(
+                        modifier = Modifier.clip(RoundedCornerShape(12.dp)).combinedClickable(
                             onClick = { viewModel.setNewTaskText(prompt) },
                             onLongClick = {
                                 viewModel.forgetPrompt(prompt)

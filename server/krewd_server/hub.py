@@ -26,6 +26,7 @@ from . import db
 from . import files as shared_files
 from . import harness
 from . import routines as rtn
+from .alerts import Alerts, run_level
 from .acp import AcpError, AcpProcess, MethodNotFound
 from .tool_images import ToolImages, is_empty, split as split_images
 from .attachments import Attachments, UnknownUpload, prompt_blocks
@@ -42,6 +43,8 @@ TEXT_FLUSH_SECONDS = 0.3
 CLIP = 4000
 TITLE_MAX = 80
 PREVIEW_MAX = 280
+# A Krewd chat id in a reply: a full UUID, bare or in a krewd://chat/ link.
+CHAT_ID_RE = re.compile(r"(?<![0-9a-fA-F-])([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})(?![0-9a-fA-F-])")
 SCHEDULER_TICK = 15  # seconds between looks for due routines
 PROBE_RETRY = 60.0  # seconds before probing an engine again after a failed probe
 RUN_SUMMARY_MAX = 2000
@@ -106,6 +109,7 @@ class Runtime:
     assistant_run: str | None = None
     assistant_text: str = ""
     usage: dict[str, Any] | None = None
+    last_error: str | None = None  # the running turn's error, for its alert
     turn_messages: list[uuid.UUID] = field(default_factory=list)  # messages the running turn started with or took in
 
 
@@ -267,6 +271,7 @@ class Hub:
     def __init__(self, settings: Settings, pool: asyncpg.Pool):
         self.settings = settings
         self.pool = pool
+        self.alerts = Alerts(pool, self.emit)  # notifications, their levels and the Needs you items (alerts.py)
         self.procs: dict[str, AcpProcess] = {}
         self.proc_locks: dict[str, asyncio.Lock] = {}
         self.runtimes: dict[uuid.UUID, Runtime] = {}
@@ -335,6 +340,7 @@ class Hub:
     async def close(self) -> None:
         self.closing = True
         await self.logins.close()
+        await self.alerts.close()
         await self.voice.close()
         for task in (self.scheduler, self.harness_sweeper):
             if task:
@@ -734,7 +740,7 @@ class Hub:
 
     # events
 
-    async def emit(self, session_id: uuid.UUID, kind: str, payload: dict[str, Any]) -> int:
+    async def emit(self, session_id: uuid.UUID | None, kind: str, payload: dict[str, Any]) -> int:
         # Serialised so seq values commit in order and long-pollers never skip an event.
         async with self.emit_lock:
             seq = await self.pool.fetchval(
@@ -1960,6 +1966,7 @@ class Hub:
         rt.assistant_run, rt.assistant_text = None, ""
         rt.running, rt.cancel_requested = True, False
         rt.turn_tabs = set()
+        rt.last_error = None
         await self._set_status(rt, "running")
         await self.emit(rt.id, "turn_start", {"message_id": str(message_id) if message_id else None})
         if message_id and purpose == "routine":
@@ -2001,6 +2008,7 @@ class Hub:
         except _Cancelled:
             stop_reason = "cancelled"
         except AcpError as exc:
+            rt.last_error = str(exc)
             await self._flush_text(rt)
             await self.emit(rt.id, "error", {"message": str(exc)})
         finally:
@@ -2022,7 +2030,16 @@ class Hub:
         handed = shared_files.mentioned(rt.assistant_text, self.settings.shared)
         if handed:
             end["files"] = handed
+        named = await self.named_chats(rt.assistant_text, exclude=rt.id)
+        if named:
+            end["chats"] = named
         await self.emit(rt.id, "turn_end", end)
+        if purpose not in ("routine", "compact", "switch"):
+            if stop_reason == "error":
+                await self._alert_chat(rt.id, "error", "action", "Stopped: {title}",
+                                       rt.last_error or "The task stopped with an error")
+            elif stop_reason != "cancelled":
+                await self._alert_chat(rt.id, "finished", "action", "{title}", preview or "Finished")
         if purpose == "compact":
             await self._compacted(rt, stop_reason, (meta or {}).get("how"))
         if purpose == "switch":
@@ -2153,6 +2170,8 @@ class Hub:
             await self._set_status(rt, "waiting")
             row = await self.pool.fetchrow("select * from approvals where id = $1", approval_id)
             await self.emit(rt.id, "approval", db.approval_json(row))
+            await self._alert_chat(rt.id, "approval", "action", "Needs your OK: {title}",
+                                   f"{self._engine_name(rt.engine)} wants to: {tool['title']}", ref_id=str(approval_id))
         option_id = await future
         if not auto_option:
             await self._set_status(rt, "running")
@@ -2626,7 +2645,11 @@ class Hub:
             (title or _first_line(text, TITLE_MAX))[:200], text, engine if kind == "new" else None, returns,
         )
         await self._emit_proposals(session_id, proposal_id)
-        return db.proposal_json(await self._proposal(proposal_id))
+        proposal = db.proposal_json(await self._proposal(proposal_id))
+        what = "a message" if kind == "prompt" else ("a sub-agent" if returns else "a side session")
+        await self._alert_chat(session_id, "proposal", "action", "{title} proposes " + what, proposal["title"],
+                               ref_id=str(proposal_id))
+        return proposal
 
     async def dismiss_proposal(self, proposal_id: uuid.UUID) -> dict[str, Any]:
         row = await self.pool.fetchrow(
@@ -2913,6 +2936,13 @@ class Hub:
         self, routine_id: uuid.UUID, changes: dict[str, Any], changed_by: str = "owner", note: str | None = None
     ) -> dict[str, Any]:
         row = await self._routine_row(routine_id)
+        if changes.get("alarm_on_fail") is not None:
+            # The owner's own rule (from the phone only, see the API): a failed run rings as a Critical alarm.
+            await self.pool.execute("update routines set alarm_on_fail = $2, updated_at = now() where id = $1",
+                                    routine_id, bool(changes["alarm_on_fail"]))
+            if set(changes) <= {"alarm_on_fail"}:
+                return await self._routine_changed(routine_id)
+            row = await self._routine_row(routine_id)
         existing = [t for t in await self._triggers(routine_id) if t["kind"] == "cron"]
         old_triggers = [{"name": t["name"], "schedule": t["schedule"], "max_attempts": t["max_attempts"],
                          "enabled": t["enabled"]} for t in existing]
@@ -3285,6 +3315,66 @@ class Hub:
         )
         if routine_id:
             await self._routine_changed(routine_id)
+            await self._run_alert(message_id)
+
+    async def _run_alert(self, message_id: uuid.UUID) -> None:
+        """A routine run ended: Action when it went well or waits for the owner, Urgent when it failed (Critical
+        when the owner asked for an alarm on that routine). A failed or waiting run is also a Needs you card."""
+        try:
+            row = await self.pool.fetchrow(
+                """select r.id, r.status, r.result_reason, r.summary, r.session_id, r.routine_id, t.title, t.alarm_on_fail
+                   from routine_runs r join routines t on t.id = r.routine_id where r.message_id = $1""", message_id)
+            if row is None:
+                return
+            level = run_level(row["status"], row["alarm_on_fail"])
+            if level is None:
+                return
+            title = row["title"]
+            reason = row["result_reason"] or _first_line(_plain(row["summary"] or ""), PREVIEW_MAX) or ""
+            if row["status"] == "done":
+                await self.alerts.close_routine_items(row["routine_id"])
+                await self.alerts.notify("run_done", level, f"{title}: done", reason or "The run finished",
+                                         session_id=row["session_id"], ref_id=str(row["id"]))
+                return
+            waiting = row["status"] == "waiting"
+            link = f"krewd://chat/{row['session_id']}" if row["session_id"] else None
+            await self.alerts.add_need(
+                key=f"run:{row['id']}", title=f"{title}: {'waits for you' if waiting else 'run failed'}",
+                source=reason or ("The run waits for your answer" if waiting else "The run did not do the job"),
+                link=link, session_id=row["session_id"], routine_id=row["routine_id"], created_by="krewd",
+                fixed_level=level,
+            )
+        except Exception:
+            log.exception("alert for routine run message %s failed", message_id)
+
+    async def _alert_chat(self, session_id: uuid.UUID, kind: str, level: str, title: str, body: str,
+                          ref_id: str | None = None) -> None:
+        """An alert about a chat; `{title}` in the title becomes the chat's title."""
+        try:
+            chat = await self.pool.fetchval("select title from sessions where id = $1", session_id) or "Krewd task"
+            await self.alerts.notify(kind, level, title.replace("{title}", chat), body, session_id=session_id,
+                                     ref_id=ref_id)
+        except Exception:
+            log.exception("%s alert for chat %s failed", kind, session_id)
+
+    async def named_chats(self, text: str, exclude: uuid.UUID | None = None) -> list[dict[str, Any]]:
+        """The Krewd chats a reply names by their full id (bare or as krewd://chat/<id>), with their titles, in
+        order of first mention, so the app shows each as a link with its title."""
+        ids: list[uuid.UUID] = []
+        for match in CHAT_ID_RE.finditer(text or ""):
+            try:
+                found = uuid.UUID(match.group(1))
+            except ValueError:
+                continue
+            if found != exclude and found not in ids:
+                ids.append(found)
+            if len(ids) >= 20:
+                break
+        if not ids:
+            return []
+        rows = await self.pool.fetch("select id, title, archived from sessions where id = any($1::uuid[])", ids)
+        by_id = {r["id"]: r for r in rows}
+        return [{"id": str(i), "title": by_id[i]["title"], "archived": by_id[i]["archived"]} for i in ids if i in by_id]
 
     async def _schedule_loop(self) -> None:
         while not self.closing:
@@ -3292,6 +3382,10 @@ class Hub:
                 await self.run_due()
             except Exception:
                 log.exception("scheduler pass failed")
+            try:
+                await self.alerts.tick()
+            except Exception:
+                log.exception("alerts pass failed")
             await asyncio.sleep(SCHEDULER_TICK)
 
     async def run_due(self, now: datetime | None = None) -> int:

@@ -1,6 +1,7 @@
 package app.krewd
 
 import app.krewd.ui.whenText
+import app.krewd.ui.chatLinkId
 import android.app.Application
 import android.content.ContentValues
 import android.content.Intent
@@ -9,6 +10,13 @@ import android.provider.MediaStore
 import androidx.compose.ui.graphics.asImageBitmap
 import app.krewd.constants.Timing
 import app.krewd.data.FileLoad
+import app.krewd.data.FilePreview
+import app.krewd.data.AlertInfo
+import app.krewd.data.NeedItem
+import app.krewd.data.PushState
+import app.krewd.push.AlertCenter
+import app.krewd.push.PushProvider
+import app.krewd.data.PreviewKind
 import app.krewd.data.AgentLogin
 import app.krewd.data.ApiException
 import app.krewd.data.Approval
@@ -165,6 +173,12 @@ data class UiState(
     /** A task deleted in the last 3 seconds: hidden, and only deleted on the server once Undo has passed. */
     val pendingDelete: SessionInfo? = null,
     val routines: List<Routine> = emptyList(),
+    /** Needs you cards (server alerts.py), open ones only. */
+    val needs: List<NeedItem> = emptyList(),
+    /** A Needs you card to scroll to and flash on the Krewd tab (a notification was tapped). */
+    val focusNeed: String? = null,
+    /** Push on this phone and the server; see [PushState.active]. */
+    val push: PushState = PushState(built = PushProvider.built, provider = PushProvider.NAME),
     /** The routine whose page is open, with its run history once loaded. */
     val openRoutineId: String? = null,
     val routineDetail: Routine? = null,
@@ -228,6 +242,9 @@ const val MAX_SAVED_PROMPTS = 12
 const val SNAPSHOT_WIDTH = 360
 const val UNDO_MS = 3_000L
 
+/** How many previewed files the cache keeps (newest first). */
+const val PREVIEW_KEEP = 30
+
 /**
  * The app's state and its one connection to the server. It lives as long as the process (see
  * [KrewdApplication]), not the screen, so the long poll and its notifications keep going while the app
@@ -238,7 +255,6 @@ const val UNDO_MS = 3_000L
 class KrewdViewModel(private val app: Application) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val prefs = Prefs(app)
-    private val notifier = Notifier(app)
     private val _state = MutableStateFlow(
         UiState(
             settings = prefs.load(), highQuality = prefs.highQuality(), savedPrompts = prefs.savedPrompts(),
@@ -270,16 +286,18 @@ class KrewdViewModel(private val app: Application) {
         }
     }
     private var loop: Job? = null
+    /** [inForeground] as a flow: the live connection rests while the app is away (push brings alerts then). */
+    private val front = MutableStateFlow(false)
     private var timeline: Timeline? = null
     private val pendingLive = ArrayList<Event>()
     private val live = LinkedHashMap<String, LiveTask>()
-    private val lastError = HashMap<String, String>()
 
-    @Volatile var inForeground = true
+    /** Whether the app is on screen (MainActivity started). Off until then: a push can start the process alone. */
+    @Volatile var inForeground = false
         set(value) {
             val was = field
             field = value
-            if (value) notifier.appVisible()
+            front.value = value
             if (value != was) streamVisibility(value)
             // Back in front: the long poll may have died while the app was away, so check it now.
             if (value && !was) kick(Kick.Resume)
@@ -486,6 +504,8 @@ class KrewdViewModel(private val app: Application) {
                 val proposals = runCatching { client.proposals() }.getOrDefault(emptyList())
                 syncPrefs(client)
                 val routines = runCatching { client.routines() }.getOrDefault(_state.value.routines)
+                // Older servers have no Needs you cards.
+                val needs = runCatching { client.needs() }.getOrDefault(_state.value.needs)
                 val wasRestarting = _state.value.restarting && sawDown
                 _state.update {
                     it.copy(
@@ -497,6 +517,7 @@ class KrewdViewModel(private val app: Application) {
                         proposals = proposals,
                         archived = null,
                         routines = routines,
+                        needs = needs,
                         restarting = if (wasRestarting) false else it.restarting,
                         message = if (wasRestarting) "Krewd is back" else it.message,
                     ).withBrowserUse(sessions)
@@ -506,6 +527,7 @@ class KrewdViewModel(private val app: Application) {
                 _state.value.openSessionId?.let { loadTimeline(client, it) }
                 _state.value.openRoutineId?.let { loadRoutine(client, it) }
                 wakeOutbox()
+                registerPush(client)
                 attempt = 0
                 downSince = 0L
                 val home = watchHome(client)
@@ -520,6 +542,11 @@ class KrewdViewModel(private val app: Application) {
                             }
                             Kick.Resume -> kickReason.compareAndSet(Kick.Resume, null)
                             null -> {}
+                        }
+                        if (!front.value) {
+                            // Away from the app: the live connection rests after a short grace (an app switch);
+                            // alerts come by push. Back in front, this poll picks up where it stopped.
+                            if (withTimeoutOrNull(Timing.BACKGROUND_GRACE_MS) { front.first { it } } == null) front.first { it }
                         }
                         val (events, last) = try {
                             client.events(after)
@@ -591,7 +618,6 @@ class KrewdViewModel(private val app: Application) {
             "turn_start" -> {
                 if (_state.value.navTab == NavTab.BROWSER) refreshTabs()
                 live[sid]?.let { it.activity = "Starting"; it.kind = "think"; it.since = System.currentTimeMillis(); it.toolIds.clear() }
-                lastError.remove(sid)
                 pushLive()
             }
             "tool" -> {
@@ -623,18 +649,23 @@ class KrewdViewModel(private val app: Application) {
                 it.kind = "read"
                 pushLive()
             }
-            "error" -> lastError[sid] = event.payload.optString("message", "Something went wrong")
+            // Notifications come from the server's alerts: by push when this phone has it, else from here while open.
+            "alert" -> {
+                val alert = AlertInfo.from(event.payload)
+                if (!_state.value.push.active) AlertCenter.fromEvent(app, alert)
+            }
+            "needs" -> {
+                val item = NeedItem.from(event.payload)
+                _state.update { s -> s.copy(needs = s.needs.filterNot { it.id == item.id } + listOfNotNull(item.takeIf { it.open })) }
+                if (!item.open) AlertCenter.clearNeeds(app, item.id)
+            }
             "routine" -> routineEvent(event.payload)
             "chat_deleted" -> chatGone(event.payload.optString("id"))
             "proposal" -> {
                 val proposal = Proposal.from(event.payload)
-                val known = _state.value.proposals.any { it.id == proposal.id }
                 _state.update { s ->
                     val rest = s.proposals.filterNot { it.id == proposal.id }
                     s.copy(proposals = if (proposal.pending) rest + proposal else rest)
-                }
-                if (proposal.pending && !known && !viewing(sid)) {
-                    notifier.approval(sid, titleOf(sid), engineName(sid), "proposes ${proposal.what}: ${proposal.title}")
                 }
             }
             "secret" -> {
@@ -648,7 +679,6 @@ class KrewdViewModel(private val app: Application) {
                     it.activity = if (ask.pending) "Needs you: sign in on ${ask.site}" else "Continuing"
                     pushLive()
                 }
-                if (ask.pending && !viewing(sid)) notifier.approval(sid, titleOf(sid), engineName(sid), "sign in on ${ask.site}")
             }
             "approval" -> {
                 val approval = Approval.from(event.payload)
@@ -661,15 +691,9 @@ class KrewdViewModel(private val app: Application) {
                     it.activity = if (approval.pending) "Needs your OK: ${approval.title}" else "Continuing"
                     pushLive()
                 }
-                if (approval.pending && !viewing(sid)) notifier.approval(sid, titleOf(sid), engineName(sid), approval.title)
             }
             "turn_end" -> {
                 if (_state.value.navTab == NavTab.BROWSER) refreshTabs()
-                if (!viewing(sid)) when (event.payload.optString("stop_reason")) {
-                    "cancelled" -> {}
-                    "error" -> notifier.error(sid, titleOf(sid), lastError[sid] ?: "The task stopped unexpectedly")
-                    else -> notifier.finished(sid, titleOf(sid), event.payload.optString("preview").ifBlank { "Finished" })
-                }
             }
         }
         if (sid == _state.value.openSessionId) {
@@ -727,7 +751,6 @@ class KrewdViewModel(private val app: Application) {
     }
 
     private fun pushLive() {
-        notifier.live(live.values.map { it.copy() })
         val now = live.mapValues { (_, t) -> LiveInfo(t.activity, t.since, if (t.waiting) "needs" else t.kind, t.toolIds.size) }
         _state.update { it.copy(live = now) }
     }
@@ -745,9 +768,8 @@ class KrewdViewModel(private val app: Application) {
         return s.engine(id)?.name ?: id ?: "Krewd"
     }
 
-    private fun viewing(sessionId: String) = inForeground && _state.value.openSessionId == sessionId
-
-    private fun titleOf(sessionId: String) = _state.value.sessions.firstOrNull { it.id == sessionId }?.title ?: "Krewd"
+    /** The owner has this chat open on screen right now (a card is enough then, no notification). */
+    fun isLookingAt(sessionId: String?) = sessionId != null && inForeground && _state.value.openSessionId == sessionId
 
     private fun upsert(list: List<SessionInfo>, session: SessionInfo): List<SessionInfo> {
         val rest = list.filterNot { it.id == session.id }
@@ -757,6 +779,112 @@ class KrewdViewModel(private val app: Application) {
     }
 
     // navigation
+
+    // Push, alerts and Needs you
+
+    @Volatile private var pushToken: String? = null
+    @Volatile private var pushSentTo: String? = null
+
+    /** FCM gave this phone a (new) token: Krewd gets it now, or at the next connection. */
+    fun pushToken(token: String) {
+        pushToken = token
+        pushSentTo = null
+        api?.let { client -> scope.launch(Dispatchers.IO) { registerPush(client) } }
+    }
+
+    /** Once per connection: this phone's push token to Krewd, and what Krewd answers about its FCM key. */
+    private fun registerPush(client: KrewdApi) {
+        if (!PushProvider.built) return
+        scope.launch(Dispatchers.IO) {
+            try {
+                val token = pushToken ?: PushProvider.token(app)?.also { pushToken = it }
+                if (token == null) {
+                    _state.update { it.copy(push = it.push.copy(registered = false, error = "No push token (Google Play services?)")) }
+                    return@launch
+                }
+                // Again on each connection until Krewd has its FCM key (it may be added later), then once per token.
+                if (pushSentTo == client.baseUrl + token && _state.value.push.active) return@launch
+                val answer = client.registerPush(token, BuildConfig.VERSION_NAME)
+                pushSentTo = client.baseUrl + token
+                _state.update {
+                    it.copy(push = it.push.copy(registered = true, serverKey = answer.optBoolean("configured"),
+                        project = answer.optStringOrNull("project"), error = answer.optStringOrNull("error")))
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                android.util.Log.w("Krewd", "push registration failed", e)
+                _state.update { it.copy(push = it.push.copy(error = e.message ?: "Push registration failed")) }
+            }
+        }
+    }
+
+    /**
+     * What a push was about, from Krewd: over the open connection, else (the app was asleep) by racing the saved
+     * addresses once. Throws when Krewd cannot be reached.
+     */
+    suspend fun fetchAlert(id: String): AlertInfo = withContext(Dispatchers.IO) {
+        val client = api ?: KrewdApi.race(prefs.load(), creds)
+        client.alert(id)
+    }
+
+    /** Tells Krewd the owner saw an alert (opened its notification, or Got it). */
+    suspend fun ackAlertNow(id: String) = withContext(Dispatchers.IO) {
+        (api ?: KrewdApi.race(prefs.load(), creds)).ackAlert(id)
+    }
+
+    fun ackAlert(id: String) {
+        scope.launch { runCatching { ackAlertNow(id) }.onFailure { android.util.Log.w("Krewd", "ack of alert $id failed", it) } }
+    }
+
+    /** The owner's test of a level, through the server and FCM (Settings > Alerts). */
+    fun testAlert(level: String) = act { client ->
+        client.testAlert(level)
+        launchMain { toast(if (_state.value.push.active) "Test sent: it arrives by push" else "Test sent: without push it shows only while Krewd is open") }
+    }
+
+    /** A notification for a Needs you card was tapped: the Krewd tab, scrolled to that card. */
+    fun focusNeed(id: String) {
+        closeSession()
+        _state.update { it.copy(navTab = NavTab.TASKS, focusNeed = id) }
+        api?.let { client -> scope.launch(Dispatchers.IO) { runCatching { client.needs() }.onSuccess { list -> _state.update { it.copy(needs = list) } } } }
+    }
+
+    fun focusNeedDone() = _state.update { it.copy(focusNeed = null) }
+
+    /** Done, Dismiss or Snooze on a card; the card goes (or moves) at once and comes back if the server says no. */
+    fun needAction(item: NeedItem, action: String, until: java.time.Instant? = null) {
+        val before = _state.value.needs
+        _state.update { s ->
+            s.copy(needs = if (action == "snooze") s.needs.map { if (it.id == item.id) it.copy(snoozedUntil = until) else it } else s.needs.filterNot { it.id == item.id })
+        }
+        AlertCenter.clearNeeds(app, item.id)
+        val client = api ?: run {
+            _state.update { it.copy(needs = before, message = "Not connected to Krewd") }
+            return
+        }
+        scope.launch(Dispatchers.IO) {
+            try {
+                client.needAction(item.id, action, until)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _state.update { it.copy(needs = before, message = e.message ?: "Could not change the card") }
+            }
+        }
+    }
+
+    /** A card's link: a Krewd chat opens here, a web address in the browser; without one, the chat that raised it. */
+    fun openNeed(item: NeedItem) {
+        val link = item.link
+        val chat = link?.let(::chatLinkId) ?: if (link == null) item.sessionId else null
+        when {
+            chat != null -> openSession(chat)
+            link != null -> runCatching {
+                app.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(link)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            }.onFailure { toast("No app can open $link") }
+        }
+    }
 
     fun navigate(tab: Int) = _state.update { it.copy(navTab = tab) }
 
@@ -798,6 +926,9 @@ class KrewdViewModel(private val app: Application) {
     }
 
     fun setRoutineEnabled(id: String, on: Boolean) = saveRoutine(id, JSONObject().put("enabled", on))
+
+    /** The owner's own alarm rule for a routine (only the phone may set it; agents cannot). */
+    fun setRoutineAlarm(id: String, on: Boolean) = saveRoutine(id, JSONObject().put("alarm_on_fail", on))
 
     fun runRoutine(id: String, trigger: String? = null) = act { client ->
         client.runRoutine(id, trigger)
@@ -882,7 +1013,7 @@ class KrewdViewModel(private val app: Application) {
             pendingLive.clear()
         }
         _state.update { it.copy(openSessionId = id, lastSessionId = id, timeline = emptyList(), timelineLoading = true) }
-        notifier.clear(id)
+        AlertCenter.clearChat(app, id)
         val client = api ?: return
         scope.launch(Dispatchers.IO) { loadTimeline(client, id) }
     }
@@ -1616,7 +1747,7 @@ class KrewdViewModel(private val app: Application) {
         _state.update { it.copy(pendingDelete = null) }
         live.remove(session.id)
         pushLive()
-        notifier.clear(session.id)
+        AlertCenter.clearChat(app, session.id)
         prefs.setTextDraft(session.id, "")
         setDraftNotes(session.id, emptyList())
         act { it.deleteSession(session.id) }
@@ -1629,7 +1760,7 @@ class KrewdViewModel(private val app: Application) {
         _state.update { s -> s.copy(sessions = s.sessions.filterNot { it.id == id }) }
         live.remove(id)
         pushLive()
-        notifier.clear(id)
+        AlertCenter.clearChat(app, id)
         prefs.setTextDraft(id, "")
         setDraftNotes(id, emptyList())
         if (_state.value.openSessionId == id) {
@@ -1645,7 +1776,7 @@ class KrewdViewModel(private val app: Application) {
         _state.update { s -> s.copy(sessions = s.sessions.filterNot { it.id in gone }, archived = s.archived?.filterNot { it.id in gone }) }
         gone.forEach { id ->
             live.remove(id)
-            notifier.clear(id)
+            AlertCenter.clearChat(app, id)
             prefs.setTextDraft(id, "")
             setDraftNotes(id, emptyList())
         }
@@ -1659,7 +1790,7 @@ class KrewdViewModel(private val app: Application) {
                 _state.update { s -> s.copy(sessions = s.sessions.filterNot { it.id == id }) }
                 live.remove(id)
                 pushLive()
-                notifier.clear(id)
+                AlertCenter.clearChat(app, id)
                 prefs.setTextDraft(id, "")
                 setDraftNotes(id, emptyList())
                 if (_state.value.openSessionId == id) closeSession()
@@ -1848,12 +1979,12 @@ class KrewdViewModel(private val app: Application) {
      * Saves a file the agent handed back to Downloads/Krewd (once), then opens it. A paused download, or one that
      * broke off, resumes where it stopped.
      */
-    fun openSharedFile(file: Attachment) {
+    fun openSharedFile(file: Attachment, open: Boolean = true) {
         val key = file.downloadKey
         if (key in downloadJobs) return
         saved[key]?.let { uri ->
             if (exists(uri)) {
-                if (!view(uri, file.mime)) toast("Saved ${file.name} to Downloads/Krewd")
+                if (!open || !view(uri, file.mime)) toast("Saved ${file.name} to Downloads/Krewd")
                 return
             }
             saved.remove(key)
@@ -1875,7 +2006,7 @@ class KrewdViewModel(private val app: Application) {
                 saved[key] = uri
                 prefs.setDownload(key, "done|$uri")
                 _files.update { it + (key to FileLoad.Done) }
-                if (!view(uri, file.mime)) toast("Saved ${file.name} to Downloads/Krewd")
+                if (!open || !view(uri, file.mime)) toast("Saved ${file.name} to Downloads/Krewd")
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -1896,6 +2027,99 @@ class KrewdViewModel(private val app: Application) {
         downloadConns[job] = conn
         job.start()
     }
+
+    // In-app previews (ui/FilePreview.kt): Markdown, PDF and HTML open inside the app, from a copy in the cache.
+
+    private val _preview = MutableStateFlow<FilePreview?>(null)
+    val preview: StateFlow<FilePreview?> = _preview.asStateFlow()
+    private var previewJob: Job? = null
+
+    /** A handed-back file: Markdown, PDF and HTML open in the app; anything else downloads and opens as before. */
+    fun openHandedFile(file: Attachment) {
+        if (PreviewKind.of(file.name, file.mime) != null) openPreview(file) else openSharedFile(file)
+    }
+
+    /** A link in a reply that names a previewable file by its path (`/home/.../outputs/a.md`, `file://...`). */
+    fun previewPath(uri: String): Attachment? {
+        val path = when {
+            uri.startsWith("file://") -> Uri.decode(uri.removePrefix("file://"))
+            uri.startsWith("/") || uri.startsWith("~/") -> uri
+            else -> return null
+        }
+        val name = path.substringAfterLast('/').ifBlank { return null }
+        val kind = PreviewKind.of(name, null) ?: return null
+        return Attachment(name, path, -1, kind.mime)
+    }
+
+    fun openPreview(file: Attachment) {
+        val kind = PreviewKind.of(file.name, file.mime) ?: return
+        previewJob?.cancel()
+        _preview.value = FilePreview(file, kind)
+        previewJob = scope.launch {
+            try {
+                val local = withContext(Dispatchers.IO) { previewCopy(file, kind) }
+                _preview.update { if (it?.file == file) it.copy(local = local) else it }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _preview.update { if (it?.file == file) it.copy(error = e.message ?: "Could not open ${file.name}") else it }
+            }
+        }
+    }
+
+    fun closePreview() {
+        previewJob?.cancel()
+        _preview.value = null
+    }
+
+    /** Secondary actions of a preview: save the file to Downloads/Krewd, or share the preview's copy. */
+    fun downloadPreview() {
+        val p = _preview.value ?: return
+        val size = p.local?.length() ?: p.file.size
+        openSharedFile(p.file.copy(size = size), open = false)
+    }
+
+    fun sharePreview() {
+        val p = _preview.value ?: return
+        val local = p.local ?: return toast("Still loading ${p.file.name}")
+        runCatching {
+            val uri = androidx.core.content.FileProvider.getUriForFile(app, "${app.packageName}.images", local)
+            val send = Intent(Intent.ACTION_SEND).setType(p.kind.mime).putExtra(Intent.EXTRA_STREAM, uri)
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            app.startActivity(Intent.createChooser(send, null).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION))
+        }.onFailure { toast(it.message ?: "Could not share ${p.file.name}") }
+    }
+
+    /**
+     * The file in the app's cache (`previews/`, newest [PREVIEW_KEEP] files): fetched once per path and size, at most
+     * [PreviewKind.maxBytes]. Unknown sizes (a path linked in a reply) are fetched again each time.
+     */
+    private suspend fun previewCopy(file: Attachment, kind: PreviewKind): java.io.File {
+        val client = api ?: withTimeoutOrNull(Timing.CONNECT_TIMEOUT_MS.toLong()) { apiFlow.filterNotNull().first() }
+            ?: error("Not connected to Krewd")
+        val dir = java.io.File(app.cacheDir, "previews").apply { mkdirs() }
+        val name = "%08x-".format(file.path.hashCode()) + file.name.replace(Regex("[^\\w.-]"), "_").takeLast(80)
+        val target = java.io.File(dir, name)
+        if (file.size >= 0 && target.isFile && target.length() == file.size) {
+            target.setLastModified(System.currentTimeMillis())
+            return target
+        }
+        val part = java.io.File(dir, "$name.part")
+        try {
+            client.downloadFile(file.path, file.size.takeIf { it >= 0 }, 0, output = { part.outputStream() }) { done, total ->
+                if (maxOf(done, total) > kind.maxBytes) throw java.io.IOException("${file.name} is too big to preview here; use Download")
+                if (!currentCoroutineContextActive()) throw CancellationException("Preview closed")
+            }
+            target.delete()
+            if (!part.renameTo(target)) error("Could not keep the preview copy")
+        } finally {
+            part.delete()
+        }
+        dir.listFiles()?.sortedByDescending { it.lastModified() }?.drop(PREVIEW_KEEP)?.forEach { it.delete() }
+        return target
+    }
+
+    private fun currentCoroutineContextActive(): Boolean = previewJob?.isActive != false
 
     /** Pauses [file]'s download: what has arrived stays (hidden in Downloads/Krewd) and resumes from there. */
     fun pauseSharedFile(file: Attachment) {

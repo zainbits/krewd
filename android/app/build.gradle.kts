@@ -18,6 +18,31 @@ val signingFile = System.getenv("ANDROID_SIGNING_PROPERTIES")?.let(::File)
     ?: File(System.getProperty("user.home"), ".android/keystores/release.properties")
 val signing = signingFile.takeIf { it.isFile }?.let { file -> Properties().apply { file.inputStream().use(::load) } }
 
+// Push (FCM) for the "google" flavor: the Firebase project's Android app config, the google-services.json that the
+// Firebase console gives for app.krewd. Kept outside the repo (it names the owner's own Firebase project):
+// ~/.config/krewd/firebase/google-services.json, or KREWD_FIREBASE_CONFIG. Without it the google flavor still builds
+// and the app says push is not set up in this build. No google-services Gradle plugin: the app starts Firebase itself
+// from these four values (push/PushProvider.kt).
+val firebaseFile = System.getenv("KREWD_FIREBASE_CONFIG")?.let(::File)
+    ?: File(System.getProperty("user.home"), ".config/krewd/firebase/google-services.json")
+val firebase: Map<String, String> = providers.fileContents(layout.projectDirectory.file(firebaseFile.absolutePath)).asText.orNull
+    ?.let { text ->
+        @Suppress("UNCHECKED_CAST")
+        val json = groovy.json.JsonSlurper().parseText(text) as Map<String, Any?>
+        val project = json["project_info"] as? Map<String, Any?> ?: emptyMap()
+        val client = (json["client"] as? List<Map<String, Any?>>).orEmpty().firstOrNull { c ->
+            ((c["client_info"] as? Map<String, Any?>)?.get("android_client_info") as? Map<String, Any?>)?.get("package_name") == "app.krewd"
+        }
+        val appId = (client?.get("client_info") as? Map<String, Any?>)?.get("mobilesdk_app_id") as? String
+        val apiKey = ((client?.get("api_key") as? List<Map<String, Any?>>)?.firstOrNull())?.get("current_key") as? String
+        if (appId == null || apiKey == null) emptyMap() else mapOf(
+            "APP_ID" to appId,
+            "API_KEY" to apiKey,
+            "PROJECT_ID" to (project["project_id"] as? String).orEmpty(),
+            "SENDER_ID" to (project["project_number"] as? String).orEmpty(),
+        )
+    } ?: emptyMap()
+
 android {
     namespace = "app.krewd"
     compileSdk = 37
@@ -69,6 +94,22 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
+    // google: push through Firebase Cloud Messaging (Google Play services). plain: no Google push; alerts arrive
+    // only while the app is open. Both are the same app (app.krewd), signed with the same key.
+    flavorDimensions += "push"
+    productFlavors {
+        create("google") {
+            dimension = "push"
+            isDefault = true
+            for (name in listOf("APP_ID", "API_KEY", "PROJECT_ID", "SENDER_ID")) {
+                buildConfigField("String", "FIREBASE_$name", "\"${firebase[name].orEmpty()}\"")
+            }
+        }
+        create("plain") {
+            dimension = "push"
+        }
+    }
+
     buildFeatures {
         compose = true
         buildConfig = true
@@ -93,6 +134,9 @@ dependencies {
     implementation(libs.commonmark.ext.gfm.tables)
     implementation(libs.commonmark.ext.gfm.strikethrough)
     implementation(libs.commonmark.ext.autolink)
+
+    "googleImplementation"(platform(libs.firebase.bom))
+    "googleImplementation"(libs.firebase.messaging)
 
     testImplementation(libs.junit)
     // Real org.json for unit tests (Android stubs throw "not mocked").

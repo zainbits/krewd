@@ -113,7 +113,9 @@ internal fun ToolCard(item: ToolItem, content: @Composable () -> Unit) {
         shape = RoundedCornerShape(16.dp),
         color = scheme.surfaceContainerLow,
         border = if (failed) BorderStroke(1.dp, scheme.error.copy(alpha = 0.5f)) else null,
-        modifier = Modifier.fillMaxWidth().clickable { holdThis(); open = !open },
+        // onClick on the Surface: the press ripple follows the card's rounded shape.
+        onClick = { holdThis(); open = !open },
+        modifier = Modifier.fillMaxWidth(),
     ) {
         Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -199,7 +201,7 @@ private fun Terminal(command: String?, output: String?, failed: Boolean, hold: (
                         color = Term.Muted,
                         fontFamily = FontFamily.Monospace,
                         fontSize = 11.sp,
-                        modifier = Modifier.clickable { hold(); all = !all },
+                        modifier = Modifier.clip(RoundedCornerShape(6.dp)).clickable { hold(); all = !all },
                     )
                 }
             }

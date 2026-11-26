@@ -89,6 +89,9 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.platform.UriHandler
+import app.krewd.data.NamedChatsItem
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
@@ -212,6 +215,25 @@ fun ChatScreen(state: UiState, viewModel: KrewdViewModel) {
     var reviewing by remember(state.openSessionId) { mutableStateOf<String?>(null) }
     var sideOpen by rememberSaveable(state.openSessionId) { mutableStateOf(false) }
     val known: (String) -> Boolean = { id -> state.session(id) != null || state.archived.orEmpty().any { it.id == id } }
+    // Chat ids in replies show as their titles (ChatLinks.kt): the titles the phone knows, then the ones the server
+    // sent with the reply (a chat this phone has not listed, such as an archived one).
+    val named = remember(state.timeline) {
+        state.timeline.filterIsInstance<NamedChatsItem>().flatMap { it.chats }.associate { it.id to it.title }
+    }
+    val chatTitle: (String) -> String? = { id -> state.session(id)?.title ?: state.archived.orEmpty().firstOrNull { it.id == id }?.title ?: named[id] }
+    val systemUris = LocalUriHandler.current
+    val uris = remember(systemUris, viewModel) {
+        object : UriHandler {
+            override fun openUri(uri: String) {
+                val chat = chatLinkId(uri)
+                when {
+                    chat != null -> viewModel.openSession(chat)
+                    viewModel.previewPath(uri) != null -> viewModel.openPreview(viewModel.previewPath(uri)!!)
+                    else -> systemUris.openUri(uri)
+                }
+            }
+        }
+    }
     val hasStrip = session != null && (session.parentId != null || session.waitingOn.isNotEmpty() || state.sessions.any { it.parentId == session.id })
 
     // Margin notes (MarginNotes.kt): replies to parts of the agent's messages, waiting for the next message.
@@ -261,7 +283,10 @@ fun ChatScreen(state: UiState, viewModel: KrewdViewModel) {
         val holdRow = remember(listState) { { key: Any -> listState.holdRow(key) } }
         // Everything the glass shows through: the chat.
         Box(Modifier.fillMaxSize().then(if (glassOn) Modifier.glassSource(backdrop) else Modifier).background(MaterialTheme.colorScheme.surface)) {
-        CompositionLocalProvider(LocalHoldRow provides holdRow, LocalNoteHooks provides noteHooks, LocalLiveReply provides liveReply, LocalFilePeek provides showPeek) {
+        CompositionLocalProvider(
+            LocalHoldRow provides holdRow, LocalNoteHooks provides noteHooks, LocalLiveReply provides liveReply, LocalFilePeek provides showPeek,
+            LocalChatTitles provides chatTitle, LocalUriHandler provides uris,
+        ) {
         LazyColumn(
             state = listState,
             modifier = Modifier.fillMaxSize(),
@@ -1111,9 +1136,10 @@ private fun ChatRow(
             }
         }
         is ApprovalItem -> ApprovalCard(item.approval, taskTitle = null, onDecide = { viewModel.decide(item.approval, it) })
+        is NamedChatsItem -> NamedChatChips(item.chats, LocalChatTitles.current, known, viewModel::openSession)
         is FilesItem -> {
             val loads by viewModel.files.collectAsStateWithLifecycle()
-            HandedFiles(item.files, loads, viewModel::openSharedFile, viewModel::pauseSharedFile, viewModel::cancelSharedFile)
+            HandedFiles(item.files, loads, viewModel::openHandedFile, viewModel::pauseSharedFile, viewModel::cancelSharedFile)
         }
         is SwitchItem -> SwitchRow(item)
         is NoticeItem -> Text(
@@ -1141,7 +1167,7 @@ private fun UserRow(
         Surface(
             shape = RoundedCornerShape(20.dp, 20.dp, 6.dp, 20.dp),
             color = if (failed) MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.primaryContainer,
-            modifier = Modifier.widthIn(max = 320.dp).then(if (failed) Modifier.clickable(onClick = onResend) else Modifier),
+            modifier = Modifier.widthIn(max = 320.dp).then(if (failed) Modifier.clip(RoundedCornerShape(20.dp, 20.dp, 6.dp, 20.dp)).clickable(onClick = onResend) else Modifier),
         ) {
             Column(Modifier.padding(start = 12.dp, end = 12.dp, top = 10.dp, bottom = 6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 item.tabs.forEach { tab ->
@@ -1183,8 +1209,11 @@ private fun ReplyText(item: TextItem) {
     val live = LocalLiveReply.current
     val streaming = live.key == item.key
     val smooth = rememberSmoothText(item.key, item.text, live = streaming, paused = live.paused)
+    val titles = LocalChatTitles.current
     val body: @Composable () -> Unit = {
-        if (streaming || smooth.text.length < item.text.length) LiveMarkdown(smooth.text, smooth.fade) else Markdown(smooth.text)
+        // Chat ids the agent named read as their titles, linked to the chat (ChatLinks.kt).
+        val shown = if (item.role == "assistant") linkChats(smooth.text, titles) else smooth.text
+        if (streaming || smooth.text.length < item.text.length) LiveMarkdown(shown, smooth.fade) else Markdown(shown)
     }
     if (hooks == null || item.role != "assistant") {
         SelectionContainer { body() }
@@ -1204,7 +1233,8 @@ private fun RoutineRunRow(item: UserItem) {
     Surface(
         shape = RoundedCornerShape(16.dp),
         color = MaterialTheme.colorScheme.secondaryContainer,
-        modifier = Modifier.fillMaxWidth().clickable { open = !open },
+        onClick = { open = !open },
+        modifier = Modifier.fillMaxWidth(),
     ) {
         Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -1268,7 +1298,9 @@ private fun SwitchRow(item: SwitchItem) {
     Surface(
         shape = RoundedCornerShape(16.dp),
         color = MaterialTheme.colorScheme.surfaceContainerHigh,
-        modifier = Modifier.fillMaxWidth().clickable(enabled = item.summary != null) { open = !open },
+        onClick = { open = !open },
+        enabled = item.summary != null,
+        modifier = Modifier.fillMaxWidth(),
     ) {
         Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -1336,7 +1368,7 @@ private fun ThoughtRow(key: String, text: String) {
     var open by remember { mutableStateOf(false) }
     val hold = LocalHoldRow.current
     Column(
-        Modifier.fillMaxWidth().clickable { hold(key); open = !open }.animateContentSize().padding(horizontal = 4.dp),
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).clickable { hold(key); open = !open }.animateContentSize().padding(horizontal = 4.dp),
     ) {
         Text(
             if (open) text else "Thinking: " + text.lineSequence().firstOrNull().orEmpty(),

@@ -46,6 +46,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.material3.LocalContentColor
@@ -80,6 +81,8 @@ import app.krewd.R
 import app.krewd.UiState
 import app.krewd.constants.ShellDimensions
 import app.krewd.data.Approval
+import app.krewd.data.NeedItem
+import app.krewd.NavTab
 import app.krewd.data.Routine
 import app.krewd.data.SessionInfo
 import kotlinx.coroutines.delay
@@ -138,6 +141,28 @@ fun TasksScreen(
     val earlier = rest.filter { !it.pinned && localDate(it.updatedAt) != today }
     val upcoming = state.routines.filter { it.enabled && it.nextLiveAt != null }.sortedBy { it.nextLiveAt }.take(4)
     val members = crewMembers(state)
+    // Needs you cards with a live countdown (a tick every 30 s); what is due soon comes first.
+    val now by produceState(java.time.Instant.now()) {
+        while (true) {
+            kotlinx.coroutines.delay(30_000)
+            value = java.time.Instant.now()
+        }
+    }
+    val cards = NeedItem.sorted(state.needs, now)
+    val permissions = rememberAlertPermissions()
+    var flashNeed by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(state.focusNeed, cards.size) {
+        val id = state.focusNeed ?: return@LaunchedEffect
+        val at = cards.indexOfFirst { it.id == id }
+        if (at < 0) return@LaunchedEffect
+        viewModel.focusNeedDone()
+        // header, hero, [setup banner], [roster], needs title, then the cards
+        val before = 2 + (if (!permissions.complete) 1 else 0) + (if (members.isNotEmpty()) 1 else 0) + 1
+        listState.animateScrollToItem(before + at)
+        flashNeed = id
+        kotlinx.coroutines.delay(1_800)
+        if (flashNeed == id) flashNeed = null
+    }
 
     signIns.firstOrNull { it.id == filling }?.let { ask ->
         SecretSheet(ask = ask, viewModel = viewModel, onDismiss = { filling = null })
@@ -155,16 +180,32 @@ fun TasksScreen(
             item(key = "header") { HomeHeader(state.connection, onOpenSettings) }
             item(key = "hero") {
                 Hero(
-                    needs = pending.size + signIns.size + proposals.size,
+                    needs = pending.size + signIns.size + proposals.size + cards.size,
                     working = running.size,
                     next = upcoming.firstOrNull(),
                 )
             }
+            if (!permissions.complete) item(key = "alert-setup") { AlertSetupBanner(onOpen = { viewModel.navigate(NavTab.SETTINGS) }) }
             if (members.isNotEmpty()) item(key = "roster") {
                 Roster(members, needsOf = { id -> pending.count { a -> sessions.firstOrNull { it.id == a.sessionId }?.engine == id } }, onTap = ask)
             }
-            val needs = proposals.size + signIns.size + pending.size
+            val needs = proposals.size + signIns.size + pending.size + cards.size
             if (needs > 0) item(key = "needs-title") { SectionTitle("Needs you", needs.toString()) }
+            if (cards.isNotEmpty()) {
+                items(cards.size, key = { "need-" + cards[it].id }) { i ->
+                    val card = cards[i]
+                    NeedItemCard(
+                        item = card,
+                        now = now,
+                        shape = groupShape(i, cards.size),
+                        flash = flashNeed == card.id,
+                        onOpen = { viewModel.openNeed(card) },
+                        onDone = { viewModel.needAction(card, "done") },
+                        onSnooze = { until -> viewModel.needAction(card, "snooze", until) },
+                        onDismiss = { viewModel.needAction(card, "dismissed") },
+                    )
+                }
+            }
             if (proposals.isNotEmpty()) {
                 items(proposals.size, key = { "proposal-" + proposals[it].id }) { i ->
                     val proposal = proposals[i]
@@ -752,7 +793,7 @@ private fun ParentLine(title: String, onOpen: (() -> Unit)?) {
         overflow = TextOverflow.Ellipsis,
         modifier = Modifier
             .padding(top = 2.dp)
-            .then(if (onOpen != null) Modifier.clickable(onClickLabel = "Open the parent chat", onClick = onOpen).heightIn(min = 32.dp) else Modifier),
+            .then(if (onOpen != null) Modifier.clip(RoundedCornerShape(8.dp)).clickable(onClickLabel = "Open the parent chat", onClick = onOpen).heightIn(min = 32.dp) else Modifier),
     )
 }
 

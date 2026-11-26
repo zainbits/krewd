@@ -79,6 +79,9 @@ data class PlanItem(override val key: String, val entries: List<PlanEntry>) : Ch
 
 data class ApprovalItem(override val key: String, val approval: Approval) : ChatItem
 
+/** Other Krewd chats the agent's reply named by id, with their titles (`chats` on turn_end): each opens that chat. */
+data class NamedChatsItem(override val key: String, val chats: List<ChatRef>) : ChatItem
+
 /** Files the agent handed back in its reply (they live in the server's shared folders). */
 data class FilesItem(override val key: String, val files: List<Attachment>) : ChatItem
 
@@ -207,6 +210,7 @@ class Timeline {
             )
             "turn_end" -> {
                 closePlan()
+                ChatRef.list(p.optJSONArray("chats")).takeIf { it.isNotEmpty() }?.let { add(NamedChatsItem("chats-${event.seq}", it)) }
                 Attachment.list(p.optJSONArray("files")).takeIf { it.isNotEmpty() }?.let { add(FilesItem("files-${event.seq}", it)) }
                 when (p.optString("stop_reason")) {
                     "cancelled" -> add(NoticeItem("end-${event.seq}", "Stopped", isError = false))

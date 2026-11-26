@@ -27,6 +27,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
@@ -84,6 +86,7 @@ fun ColumnScope.ChatSettingsContent(state: UiState, viewModel: KrewdViewModel, s
             Modifier
                 .fillMaxWidth()
                 .heightIn(min = 56.dp)
+                .clip(RoundedCornerShape(16.dp))
                 .clickable(enabled = online) { viewModel.setReturns(session.id, !session.returns) }
                 .padding(horizontal = 4.dp),
             verticalAlignment = Alignment.CenterVertically,

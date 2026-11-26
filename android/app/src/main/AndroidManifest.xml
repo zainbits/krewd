@@ -15,10 +15,12 @@
     <uses-feature android:name="android.hardware.nfc" android:required="false" />
     <uses-feature android:name="android.hardware.usb.host" android:required="false" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-    <!-- Live activity: a foreground service keeps alerts coming while tasks run with the phone locked. -->
+    <!-- Critical alerts: a full-screen alarm over the lock screen, ringing (alarm stream) and vibrating until Got it,
+         from a foreground service that runs only while it rings. -->
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+    <uses-permission android:name="android.permission.VIBRATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
-    <uses-permission android:name="android.permission.POST_PROMOTED_NOTIFICATIONS" />
     <!-- Voice input: the microphone while the owner has it on in a chat (a "Listening" notification shows). -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
@@ -48,13 +50,24 @@
             </intent-filter>
         </activity>
         <service
-            android:name=".LiveService"
+            android:name=".push.AlarmService"
             android:exported="false"
             android:foregroundServiceType="specialUse">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="Shows the live progress of the owner's own agent tasks running on their home server, and keeps their approval alerts arriving while the phone is locked." />
+                android:value="Rings a critical alarm the owner set up (a time-bound job on their home server failed, such as a missed check-in) until they tap Got it." />
         </service>
+        <activity
+            android:name=".push.AlarmActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:launchMode="singleTop"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"
+            android:taskAffinity="app.krewd.alarm" />
+        <receiver
+            android:name=".push.AlertActions"
+            android:exported="false" />
         <service
             android:name=".voice.VoiceService"
             android:exported="false"

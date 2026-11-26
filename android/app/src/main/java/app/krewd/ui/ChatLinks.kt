@@ -2,6 +2,7 @@ package app.krewd.ui
 
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -230,28 +231,96 @@ fun DraftChatChips(chats: List<ChatRef>, onRemove: (String) -> Unit, modifier: M
 /** Chats attached to a sent message, inside its bubble; tap one to open it ("Deleted chat" once it is gone). */
 @Composable
 fun SentChatChips(chats: List<ChatRef>, exists: (String) -> Boolean, color: Color, onOpen: (String) -> Unit) {
-    chats.forEach { chat ->
-        val there = exists(chat.id)
-        Row(
-            Modifier
-                .background(Color(0x22000000), RoundedCornerShape(10.dp))
-                .then(if (there) Modifier.clickable { onOpen(chat.id) } else Modifier)
-                .padding(horizontal = 8.dp, vertical = 5.dp),
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Icon(painterResource(R.drawable.ic_chat_24), contentDescription = null, tint = color, modifier = Modifier.size(14.dp))
-            Text(
-                if (there) chat.title else "Deleted chat",
-                style = MaterialTheme.typography.labelMedium,
-                color = if (there) color else color.copy(alpha = 0.6f),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            if (there) Icon(painterResource(R.drawable.ic_chevron_right_24), contentDescription = "Open ${chat.title}", tint = color.copy(alpha = 0.7f), modifier = Modifier.size(14.dp))
+    chats.forEach { chat -> ChatChip(chat, exists(chat.id), color, Color(0x22000000), onOpen) }
+}
+
+/** One chat as a small rounded chip: the chat icon, its title and a chevron; the press ripple keeps the shape. */
+@Composable
+private fun ChatChip(chat: ChatRef, there: Boolean, color: Color, background: Color, onOpen: (String) -> Unit) {
+    val shape = RoundedCornerShape(10.dp)
+    Row(
+        Modifier
+            .clip(shape)
+            .background(background, shape)
+            .then(if (there) Modifier.clickable { onOpen(chat.id) } else Modifier)
+            .padding(horizontal = 8.dp, vertical = 5.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(painterResource(R.drawable.ic_chat_24), contentDescription = null, tint = color, modifier = Modifier.size(14.dp))
+        Text(
+            if (there) chat.title else "Deleted chat",
+            style = MaterialTheme.typography.labelMedium,
+            color = if (there) color else color.copy(alpha = 0.6f),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.widthIn(max = 260.dp),
+        )
+        if (there) Icon(painterResource(R.drawable.ic_chevron_right_24), contentDescription = "Open ${chat.title}", tint = color.copy(alpha = 0.7f), modifier = Modifier.size(14.dp))
+    }
+}
+
+/** The chats an agent's reply named (by id), under the reply: the same chips as attached chats, each opens its chat. */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+fun NamedChatChips(chats: List<ChatRef>, title: (String) -> String?, exists: (String) -> Boolean, onOpen: (String) -> Unit) {
+    val colors = MaterialTheme.colorScheme
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        chats.forEach { chat ->
+            ChatChip(chat.copy(title = title(chat.id) ?: chat.title), exists(chat.id), colors.onSurfaceVariant, colors.surfaceContainerHigh, onOpen)
         }
     }
 }
+
+/** The titles of the chats this phone knows, for chat ids in agents' replies; null when unknown. */
+val LocalChatTitles = androidx.compose.runtime.staticCompositionLocalOf<(String) -> String?> { { null } }
+
+private const val UUID_RE = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+private val CHAT_MENTION = Regex(
+    "\\[([^\\]\n]*)\\]\\(krewd://chat/($UUID_RE)\\)" +       // [label](krewd://chat/<id>)
+        "|`(?:krewd://chat/)?($UUID_RE)`" +                        // `<id>` or `krewd://chat/<id>`
+        "|krewd://chat/($UUID_RE)(?![0-9a-fA-F-])" +              // krewd://chat/<id>
+        "|(?<![\\w/=?&#.%-])($UUID_RE)(?![\\w-])", // bare (not part of a web address or a longer word)
+)
+
+/**
+ * [text] with every known chat id (bare, in backticks or as a krewd://chat/ link) turned into a Markdown link to
+ * `krewd://chat/<id>` whose text is the chat's title, so a reply never shows a raw id. Code blocks stay as written;
+ * an unknown id (another kind of id, a deleted chat) is left alone.
+ */
+fun linkChats(text: String, title: (String) -> String?): String {
+    if (!text.contains('-')) return text
+    val out = StringBuilder()
+    var inFence = false
+    text.split('\n').forEachIndexed { i, line ->
+        if (i > 0) out.append('\n')
+        val trimmed = line.trimStart()
+        if (trimmed.startsWith("```") || trimmed.startsWith("~~~")) {
+            inFence = !inFence
+            out.append(line)
+            return@forEachIndexed
+        }
+        if (inFence) {
+            out.append(line)
+            return@forEachIndexed
+        }
+        out.append(
+            CHAT_MENTION.replace(line) { m ->
+                val id = (m.groups[2] ?: m.groups[3] ?: m.groups[4] ?: m.groups[5])!!.value.lowercase()
+                val name = title(id) ?: return@replace m.value
+                val label = m.groups[1]?.value?.takeIf { it.isNotBlank() && !Regex(UUID_RE).containsMatchIn(it) }
+                "[" + escapeLinkText(label ?: name) + "](krewd://chat/" + id + ")"
+            },
+        )
+    }
+    return out.toString()
+}
+
+private fun escapeLinkText(text: String): String = text.replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]").replace("`", "'")
+
+/** The chat id of a krewd://chat/<id> link, or null. */
+fun chatLinkId(uri: String): String? =
+    Regex("^krewd://chat/($UUID_RE)$").find(uri.trim())?.groupValues?.get(1)?.lowercase()
 
 /**
  * Under a chat's title: its parent, its side sessions and sub-agents, and the chats it waits on for a reply, each a
@@ -348,6 +417,7 @@ fun LinkRow(item: LinkItem, exists: Boolean, onOpen: () -> Unit) {
         Row(
             Modifier
                 .heightIn(min = 40.dp)
+                .clip(RoundedCornerShape(12.dp))
                 .then(if (exists) Modifier.clickable(onClick = onOpen) else Modifier)
                 .padding(horizontal = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -397,6 +467,7 @@ fun FromChatRow(item: UserItem, exists: Boolean, onOpen: () -> Unit) {
                 Modifier
                     .fillMaxWidth()
                     .heightIn(min = 32.dp)
+                    .clip(RoundedCornerShape(10.dp))
                     .then(if (exists) Modifier.clickable(onClick = onOpen) else Modifier),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp),

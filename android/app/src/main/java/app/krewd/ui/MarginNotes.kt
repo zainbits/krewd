@@ -67,7 +67,12 @@ import androidx.compose.runtime.snapshots.SnapshotStateList
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.RoundRect
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -270,12 +275,15 @@ fun NoteTarget(blockId: String, plain: () -> String, content: @Composable () -> 
                         mark != null -> mark.copy(alpha = 0.08f)
                         else -> Color.Transparent
                     }
-                    if (lit != Color.Transparent) {
-                        drawRoundRect(lit, Offset(-out, -3.dp.toPx()), Size(size.width + out + 4.dp.toPx(), size.height + 6.dp.toPx()), CornerRadius(10.dp.toPx()))
-                    }
+                    val topLeft = Offset(-out, -3.dp.toPx())
+                    val card = Size(size.width + out + 4.dp.toPx(), size.height + 6.dp.toPx())
+                    val radius = CornerRadius(10.dp.toPx())
+                    if (lit != Color.Transparent) drawRoundRect(lit, topLeft, card, radius)
                     val bar = mark
                     if (bar != null) {
-                        drawRoundRect(bar, Offset(-out, 0f), Size(3.dp.toPx(), size.height), CornerRadius(2.dp.toPx()))
+                        // The bar is the card's left edge, clipped to its rounded shape, so the corners cut it.
+                        val edge = Path().apply { addRoundRect(RoundRect(Rect(topLeft, card), radius)) }
+                        clipPath(edge) { drawRect(bar, topLeft, Size(3.dp.toPx(), card.height)) }
                     }
                 },
         ) {
@@ -379,7 +387,7 @@ fun NoteTray(
                     "Clear",
                     style = MaterialTheme.typography.labelMedium,
                     color = colors.onSurfaceVariant,
-                    modifier = Modifier.clickable(onClick = onClear).padding(horizontal = 10.dp, vertical = 6.dp),
+                    modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable(onClick = onClear).padding(horizontal = 10.dp, vertical = 6.dp),
                 )
             }
             Column(
@@ -424,11 +432,14 @@ private fun NoteCard(
             onFocused()
         }
     }
+    // The accent bar is part of the card: clipped to its rounded shape, so the corners cut it.
+    val shape = RoundedCornerShape(14.dp)
     Row(
         Modifier
             .fillMaxWidth()
-            .background(colors.surfaceContainerHighest, RoundedCornerShape(14.dp))
-            .drawBehind { drawRoundRect(tone, Offset.Zero, Size(3.dp.toPx(), size.height), CornerRadius(2.dp.toPx())) }
+            .clip(shape)
+            .background(colors.surfaceContainerHighest)
+            .drawBehind { drawRect(tone, Offset.Zero, Size(3.dp.toPx(), size.height)) }
             .padding(start = 10.dp, top = 8.dp, bottom = 6.dp),
         verticalAlignment = Alignment.Top,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -441,7 +452,7 @@ private fun NoteCard(
                 color = colors.onSurfaceVariant,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.clickable(onClick = onJump),
+                modifier = Modifier.clip(RoundedCornerShape(6.dp)).clickable(onClick = onJump),
             )
             BasicTextField(
                 value = value,
@@ -464,7 +475,7 @@ private fun NoteCard(
             )
         }
         Box(
-            Modifier.size(32.dp).clickable(onClick = onRemove),
+            Modifier.size(32.dp).clip(CircleShape).clickable(onClick = onRemove),
             contentAlignment = Alignment.Center,
         ) {
             Icon(painterResource(R.drawable.ic_close_24), contentDescription = "Remove note", tint = colors.onSurfaceVariant, modifier = Modifier.size(16.dp))
@@ -481,8 +492,9 @@ fun SentNotes(notes: List<ReplyNote>, ink: Color, onJump: (ReplyNote) -> Unit) {
             Column(
                 Modifier
                     .fillMaxWidth()
-                    .background(Color(0x22000000), RoundedCornerShape(10.dp))
-                    .drawBehind { drawRoundRect(tone, Offset.Zero, Size(3.dp.toPx(), size.height), CornerRadius(2.dp.toPx())) }
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(Color(0x22000000))
+                    .drawBehind { drawRect(tone, Offset.Zero, Size(3.dp.toPx(), size.height)) }
                     .clickable(enabled = note.ref != null) { onJump(note) }
                     .padding(start = 10.dp, end = 8.dp, top = 6.dp, bottom = 6.dp),
                 verticalArrangement = Arrangement.spacedBy(3.dp),

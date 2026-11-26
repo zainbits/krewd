@@ -21,7 +21,10 @@ __pycache__/
 *.keystore
 keystore.properties
 
-# Secrets and OS metadata
+# Secrets and OS metadata (the Firebase app config and FCM key live in ~/.config/krewd, never here)
+google-services.json
+*service-account*.json
+fcm-*.json
 .env
 .env.*
 *.secret

@@ -95,12 +95,23 @@ fun SettingsScreen(state: UiState, viewModel: KrewdViewModel, padding: PaddingVa
     if (storageSheet) StorageSheet(viewModel) { storageSheet = false }
     if (deleteChatsSheet) DeleteChatsSheet(viewModel) { deleteChatsSheet = false }
 
+    val permissions = rememberAlertPermissions()
+    val alerts: androidx.compose.foundation.lazy.LazyListScope.() -> Unit = {
+        item(key = "alerts") {
+            SectionCard {
+                Text("Alerts", style = MaterialTheme.typography.titleMedium)
+                AlertSetup(permissions, state.push, online, onTest = viewModel::testAlert)
+            }
+        }
+    }
     LazyColumn(
         state = listState,
         modifier = Modifier.fillMaxSize(),
         contentPadding = padding,
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
+        // Alerts first until their one-time setup is done (the Krewd tab's banner opens this page).
+        if (!permissions.complete) alerts()
         item {
             SectionCard {
                 Text("Server", style = MaterialTheme.typography.titleMedium)
@@ -162,6 +173,7 @@ fun SettingsScreen(state: UiState, viewModel: KrewdViewModel, padding: PaddingVa
                 )
             }
         }
+        if (permissions.complete) alerts()
         item { SecurityCard(state, viewModel) }
         item { SignInsCard(state, viewModel) }
         item { ProfilesCard(state, viewModel) }

@@ -260,7 +260,7 @@ fun ColumnScope.AgentOptions(
         color = MaterialTheme.colorScheme.surfaceContainerHighest,
         modifier = Modifier.fillMaxWidth().padding(top = 14.dp),
     ) {
-        Row(Modifier.clickable { onAutoApprove(!autoApprove) }.padding(horizontal = 16.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.clip(RoundedCornerShape(20.dp)).clickable { onAutoApprove(!autoApprove) }.padding(horizontal = 16.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text("Auto-approve", style = MaterialTheme.typography.titleSmall)
                 Text(
