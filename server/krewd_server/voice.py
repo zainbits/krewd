@@ -1,20 +1,16 @@
-"""Voice input: the phone listens in a chat, and what is said comes back as text labelled Me or Others.
+"""Voice input: the phone listens in a chat, and what is said comes back as text labelled Me or Others, while it is said.
 
-The phone cuts its microphone audio into pieces (up to 30 s, ending after about 2 s of silence or when the owner
-presses Send) and sends each piece (16 kHz mono PCM) here, numbered. Krewd sends the piece to an OpenAI-compatible
-`/audio/transcriptions` API (the Model Warehouse's Bark 3.0 Clean on Bottle, which leaves out fillers, false starts and
-repeats) together with the owner's voice reference, a 15 s clip of them reading aloud. The Warehouse first finds who
-speaks when (Nemotron 3 Diarization, which hears the reference first), then transcribes each speaker's part on its
-own, so one piece can hold the owner and someone else. Words of the reference's voice are "Me", all others "Others".
+The phone sends its microphone audio here about every 250 ms (16 kHz mono PCM, numbered). Krewd relays it to a live
+speech-to-text session of the transcription API (the Model Warehouse's `nemotron-live` on Bottle: Nemotron ASR
+Streaming with Nemotron 3 Diarization, which hears the owner's voice reference first), and answers with the words heard
+so far, by segment: one speaker turn each, its text growing while it is heard, then final. Words of the reference's
+voice are "Me", all others "Others". The phone writes them into the chat's composer as `Me: ...` / `Others: ...` lines;
+the owner edits them and sends them as a normal message. Nothing is sent from here.
 
-It answers `{seq, lines: [{speaker, label, text}], text}`. The phone puts the lines into the chat's composer as
-`Me: ...` / `Others: ...`; the owner edits them and sends them as a normal message. Nothing is sent from here.
-
-Pieces are never written anywhere by Krewd: the server keeps a piece in memory while it works on it, and the
-transcription API is asked not to store it (`store=false` for the Model Warehouse). The voice reference is the one
-recording kept, by the owner's choice: in the config folder (mode 600), only on this server, until Set up My voice is
-run again or it is deleted. Voice sessions live in memory (just the answers to recent pieces, so a resend is safe);
-after a server restart the phone starts a new one.
+Audio is never written anywhere by Krewd: the server passes it on and keeps nothing, and the Warehouse keeps it in
+memory for its session only. The voice reference (a 15 s clip of the owner reading aloud) is the one recording kept,
+by the owner's choice: in the config folder (mode 600), only on this server, until Set up My voice is run again or it
+is deleted. Voice sessions live in memory; after a server restart the phone starts a new one.
 """
 
 from __future__ import annotations
@@ -40,19 +36,13 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("krewd.voice")
 
-# The transcription model may have to load first (the Model Warehouse takes up to about a minute for Bark and the
-# speaker model), and the Warehouse runs one job at a time, so a piece can wait behind another model's job.
-STT_TIMEOUT = 180.0
-MAX_PIECE_SECONDS = 32  # the phone cuts at 30 s
-MAX_PIECE_BYTES = MAX_PIECE_SECONDS * va.RATE * 2
 ENROLL_MIN_SECONDS = 12  # of reading once pauses are shortened (speech and the short gaps between words)
-REFERENCE_SECONDS = 15  # what the speaker model hears of the owner before each piece (the measured setting)
+REFERENCE_SECONDS = 15  # what the speaker model hears of the owner before the live audio (the measured setting)
 MAX_PAUSE_SECONDS = 0.3  # longer pauses in the reading are shortened to this in the reference
 ENROLL_MAX_BYTES = 120 * va.RATE * 2
 IDLE_SESSION_SECONDS = 30 * 60  # a voice session the phone has not used for this long ends
-SEEN_PIECES = 200  # answers kept per voice session for resends
 TEXT_MAX = 4000
-LIVE_MAX_BYTES = 10 * va.RATE * 2  # audio per live request (the phone sends about 250 ms at a time)
+LIVE_MAX_BYTES = 10 * va.RATE * 2  # audio per request (the phone sends about 250 ms at a time)
 LIVE_TIMEOUT = 45.0  # a flush waits for the last words' final text
 LIVE_SPEAKERS = {"reference": "me", "other": "others"}
 
@@ -86,7 +76,7 @@ class VoiceGone(VoiceError):
 
 @dataclass
 class LiveRelay:
-    """A live voice session's link to the transcription API's live sessions (see `Voice.live`).
+    """A voice session's link to the transcription API's live sessions (see `Voice.live`).
 
     The API ends its session when the phone goes quiet or another request needs the GPU; the next audio then
     opens a new one. Segment ids stay rising across them (`base`), and final segments are kept until the phone
@@ -110,10 +100,9 @@ class VoiceSession:
     chat: uuid.UUID
     id: str
     last: str = "others"  # the speaker of the last words heard, for words the speaker model could not place
-    seen: dict[int, dict[str, Any]] = field(default_factory=dict)  # piece seq -> its answer, so a resend is safe
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     used: float = field(default_factory=time.monotonic)
-    live: LiveRelay | None = None  # Live mode: words while speaking instead of pieces
+    live: LiveRelay = field(default_factory=LiveRelay)
 
 
 class Voice:
@@ -125,7 +114,6 @@ class Voice:
         self.me: bytes | None = None  # the owner's voice reference, a WAV file
         self.me_at: str | None = None
         self.sweeper: asyncio.Task | None = None
-        self.warming: asyncio.Task | None = None
         self._load_reference()
 
     # lifecycle
@@ -134,7 +122,7 @@ class Voice:
         self.sweeper = asyncio.create_task(self._sweep())
 
     async def close(self) -> None:
-        tasks = [t for t in (self.sweeper, self.warming) if t]
+        tasks = [t for t in (self.sweeper,) if t]
         for t in tasks:
             t.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
@@ -157,8 +145,8 @@ class Voice:
 
     def problems(self) -> list[str]:
         out = []
-        if not (self.settings.stt_url and self.settings.stt_model):
-            out.append("No transcription API: set KREWD_VOICE_STT_URL and KREWD_VOICE_STT_MODEL in krewd.env.")
+        if not (self.settings.stt_url and self.settings.live_model):
+            out.append("No transcription API: set KREWD_VOICE_STT_URL and KREWD_VOICE_LIVE_MODEL in krewd.env.")
         return out
 
     def status(self) -> dict[str, Any]:
@@ -168,8 +156,7 @@ class Voice:
             "problems": problems,
             "enrolled": self.me is not None,
             "enrolled_at": self.me_at,
-            "transcription": self.settings.stt_model or None,
-            "live": bool(self.settings.live_model) and not problems,
+            "transcription": self.settings.live_model or None,
             "active": [{"chat": str(c), "voice_id": s.id} for c, s in self.sessions.items()],
         }
 
@@ -204,7 +191,6 @@ class Voice:
         self.settings.old_voiceprint_file.unlink(missing_ok=True)  # the WeSpeaker voiceprint of 0.33
         self.me = data
         self.me_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        self._warm()  # the speaker model loads next to Bark now, not on the first piece
         return {"enrolled": True, "enrolled_at": self.me_at, "speech_seconds": round(speech, 1)}
 
     def forget_voiceprint(self) -> None:
@@ -214,45 +200,27 @@ class Voice:
 
     # voice sessions
 
-    async def start_session(self, chat: uuid.UUID, voice_id: str | None = None, live: bool = False) -> dict[str, Any]:
+    async def start_session(self, chat: uuid.UUID, voice_id: str | None = None) -> dict[str, Any]:
         """Start listening in a chat, or go on with the phone's voice session `voice_id` if the server still has it.
 
-        `live`: words while speaking (Live mode), through the API's live sessions, instead of pieces."""
+        A new one opens the API's live session at once, so its model queues and loads while the owner starts talking."""
         problems = self.problems()
         if problems:
             raise VoiceError(problems[0])
-        if live and not self.settings.live_model:
-            raise VoiceError("Live mode is not set up on the server: set KREWD_VOICE_LIVE_MODEL in krewd.env.")
         await self.hub.get_session(chat)  # NotFound for an unknown chat
         vs = self.sessions.get(chat)
-        if vs is None or (voice_id and vs.id != voice_id) or (vs.live is not None) != live:
+        if vs is None or (voice_id and vs.id != voice_id):
             if vs is not None:
                 self._live_close(vs)
-            vs = VoiceSession(chat=chat, id=voice_id or uuid.uuid4().hex, live=LiveRelay() if live else None)
+            vs = VoiceSession(chat=chat, id=voice_id or uuid.uuid4().hex)
             self.sessions[chat] = vs
-            if live:
-                async with vs.lock:  # the live model queues and loads while the owner starts talking
-                    try:
-                        await self._live_open(vs.live)
-                    except VoiceError as exc:
-                        log.warning("voice: live session not opened yet: %s", exc)
-            else:
-                self._warm()
+            async with vs.lock:
+                try:
+                    await self._live_open(vs.live)
+                except VoiceError as exc:
+                    log.warning("voice: live session not opened yet: %s", exc)
         vs.used = time.monotonic()
-        return {"voice_id": vs.id, "enrolled": self.me is not None, "live": vs.live is not None}
-
-    def _warm(self) -> None:
-        """Ask for a transcription of a moment of silence, so the model loads while the owner starts talking."""
-        if self.warming and not self.warming.done():
-            return
-
-        async def go() -> None:
-            try:
-                await self._transcribe(np.zeros(va.RATE // 2, dtype=np.float32))
-            except VoiceError as exc:
-                log.warning("voice warm-up: %s", exc)
-
-        self.warming = asyncio.create_task(go())
+        return {"voice_id": vs.id, "enrolled": self.me is not None}
 
     def _get(self, chat: uuid.UUID, voice_id: str) -> VoiceSession:
         vs = self.sessions.get(chat)
@@ -273,17 +241,14 @@ class Voice:
         if vs is not None:
             self._live_close(vs)
 
-
-    # Live mode: about 250 ms of audio at a time; each answer has the words heard so far, by segment (one speaker
-    # turn each): a segment's text grows while it is heard, then it is final.
+    # Audio about 250 ms at a time; each answer has the words heard so far, by segment (one speaker turn each): a
+    # segment's text grows while it is heard, then it is final.
 
     async def live(self, chat: uuid.UUID, voice_id: str, seq: int, pcm: bytes, after: int = 0,
                    flush: bool = False, end: bool = False) -> dict[str, Any]:
         if len(pcm) > LIVE_MAX_BYTES:
-            raise VoiceError("live audio piece too long (10 s at most)", 413)
+            raise VoiceError("audio too long (10 s at most per request)", 413)
         vs = self._get(chat, voice_id)
-        if vs.live is None:
-            raise VoiceError("this voice session is not in Live mode", 409)
         lr = vs.live
         async with vs.lock:
             if seq <= lr.last_seq and lr.last is not None:
@@ -388,7 +353,7 @@ class Voice:
 
     def _live_close(self, vs: VoiceSession) -> None:
         lr = vs.live
-        if lr is None or lr.wid is None:
+        if lr.wid is None:
             return
         wid, lr.wid = lr.wid, None
 
@@ -399,68 +364,6 @@ class Voice:
                 pass
 
         asyncio.get_running_loop().create_task(go())
-
-    # pieces of audio
-
-    async def piece(self, chat: uuid.UUID, voice_id: str, seq: int, pcm: bytes) -> dict[str, Any]:
-        if len(pcm) > MAX_PIECE_BYTES:
-            raise VoiceError(f"piece too long ({MAX_PIECE_SECONDS} s at most)", 413)
-        vs = self._get(chat, voice_id)
-        async with vs.lock:  # one piece at a time per session, so `last` follows the order the phone sends in
-            if seq in vs.seen:
-                return vs.seen[seq]
-            audio = va.pcm16_to_float(pcm)
-            runs = await self._transcribe(audio) if len(audio) >= 0.3 * va.RATE else []
-            lines: list[dict[str, str]] = []
-            for speaker, text in runs:
-                key = vs.last if speaker is None else speaker
-                vs.last = key
-                if lines and lines[-1]["speaker"] == key:
-                    lines[-1]["text"] += " " + text
-                else:
-                    lines.append({"speaker": key, "label": LABELS[key], "text": text})
-            result = {"seq": seq, "lines": lines, "text": " ".join(line["text"] for line in lines)}
-            vs.seen[seq] = result
-            if len(vs.seen) > SEEN_PIECES:
-                for old in sorted(vs.seen)[: SEEN_PIECES // 2]:
-                    del vs.seen[old]
-            return result
-
-    async def _transcribe(self, audio: np.ndarray) -> list[tuple[str | None, str]]:
-        """What was said, as runs of (speaker, text): speaker "me", "others", or None where the model could not tell.
-
-        Without a voice reference everyone is Others."""
-        s = self.settings
-        data = {"model": s.stt_model, "response_format": "json", **dict(s.stt_fields)}
-        files = {"file": ("piece.wav", va.wav_bytes(audio), "audio/wav")}
-        me = self.me
-        if me is not None:
-            files["speaker_reference"] = ("me.wav", me, "audio/wav")
-        try:
-            r = await self._client().post(
-                f"{s.stt_url}/audio/transcriptions", data=data, files=files,
-                timeout=httpx.Timeout(STT_TIMEOUT, connect=5.0),
-            )
-        except httpx.HTTPError as exc:
-            raise VoiceError(f"transcription unreachable: {type(exc).__name__}") from None
-        if r.status_code != 200:
-            log.warning("transcription answered HTTP %s: %s", r.status_code, r.text[:200])
-            raise VoiceError(f"transcription failed (HTTP {r.status_code})")
-        try:
-            body = r.json()
-            if me is None:
-                runs = [("others", str(body.get("text") or ""))]
-            else:
-                runs = [({"reference": "me", "other": "others"}.get(run.get("speaker")), str(run.get("text") or ""))
-                        for run in body["speakers"]]
-        except (ValueError, KeyError, TypeError, AttributeError):
-            raise VoiceError("transcription answered without speakers") from None
-        out = []
-        for speaker, text in runs:
-            text = " ".join(text.split())
-            if text:
-                out.append((speaker, text if len(text) <= TEXT_MAX else text[: TEXT_MAX - 1] + "…"))
-        return out
 
 
 def reference_clip(audio: np.ndarray) -> tuple[np.ndarray | None, float]:
@@ -492,7 +395,7 @@ def reference_clip(audio: np.ndarray) -> tuple[np.ndarray | None, float]:
     if seconds < ENROLL_MIN_SECONDS:
         return None, seconds
     clip = frames[keep].reshape(-1)[: REFERENCE_SECONDS * va.RATE]
-    # The phone's gain for pieces: the loudest sample at about -3 dB, at most 20x, so both sound alike.
+    # The phone's gain for live audio: the loudest sample at about -3 dB, at most 20x, so both sound alike.
     clip = clip * min(20.0, 0.7 / max(float(np.abs(clip).max()), 1e-6))
     return clip.astype(np.float32), seconds
 
@@ -501,38 +404,23 @@ def reference_clip(audio: np.ndarray) -> tuple[np.ndarray | None, float]:
 
 
 def check(settings: VoiceSettings) -> int:
-    if not (settings.stt_url and settings.stt_model):
-        print("INFO  voice input off: no KREWD_VOICE_STT_URL / KREWD_VOICE_STT_MODEL")
+    if not (settings.stt_url and settings.live_model):
+        print("INFO  voice input off: no KREWD_VOICE_STT_URL / KREWD_VOICE_LIVE_MODEL")
     else:
         try:
             r = httpx.get(f"{settings.stt_url}/models", timeout=5.0)
             models = {m.get("id"): m for m in r.json().get("data", [])} if r.status_code == 200 else {}
-            model = models.get(settings.stt_model)
-            labels = (model or {}).get("speaker_labels") or {}
+            model = models.get(settings.live_model)
             if model is None:
-                print(f"WARN  voice transcription: {settings.stt_model} not listed by {settings.stt_url}/models")
+                print(f"WARN  voice transcription: {settings.live_model} not listed by {settings.stt_url}/models")
             elif model.get("ready") is False:
-                print(f"WARN  voice transcription: {settings.stt_model} is listed but not ready")
-            elif not labels.get("ready"):
-                print(f"WARN  voice transcription: {settings.stt_model} has no speaker labels ready (Me/Others)")
+                print(f"WARN  voice transcription: {settings.live_model} is listed but not ready")
+            elif not (model.get("live") or {}).get("speaker_labels"):
+                print(f"WARN  voice transcription: {settings.live_model} has no live speaker labels (Me/Others)")
             else:
-                print(f"OK    voice transcription: {settings.stt_model} with speaker labels")
+                print(f"OK    voice transcription: {settings.live_model}, live with speaker labels")
         except (httpx.HTTPError, ValueError):
             print(f"WARN  voice transcription API not answering at {settings.stt_url}")
-        if settings.live_model:
-            try:
-                r = httpx.get(f"{settings.stt_url}/models", timeout=5.0)
-                live = {m.get("id"): m for m in r.json().get("data", [])}.get(settings.live_model)
-                if live is None:
-                    print(f"WARN  voice Live mode: {settings.live_model} not listed by {settings.stt_url}/models")
-                elif live.get("ready") is False:
-                    print(f"WARN  voice Live mode: {settings.live_model} is listed but not ready")
-                else:
-                    print(f"OK    voice Live mode: {settings.live_model}")
-            except (httpx.HTTPError, ValueError):
-                pass
-        else:
-            print("INFO  voice Live mode off: no KREWD_VOICE_LIVE_MODEL")
     print(f"INFO  voice reference (My voice): {'set up' if settings.reference_file.is_file() else 'not set up'}")
     return 0
 

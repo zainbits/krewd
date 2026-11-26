@@ -26,7 +26,7 @@ from .hub import Conflict, Hub, NotFound, TabTaken
 from .locations import LOCATION_SCRIPT, Invalid as LocationInvalid, Locations
 from .profiles import ProfileError
 from .routines import Invalid
-from .voice import ENROLL_MAX_BYTES, LIVE_MAX_BYTES, MAX_PIECE_BYTES, VoiceError
+from .voice import ENROLL_MAX_BYTES, LIVE_MAX_BYTES, VoiceError
 
 LONG_POLL_MAX_SECONDS = 30
 
@@ -97,7 +97,6 @@ class ProposalSend(BaseModel):
 
 class VoiceStart(BaseModel):
     voice_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{32}$")  # go on with this one if the server has it
-    live: bool = False  # Live mode: words while speaking (POST .../live) instead of pieces
 
 
 class Message(WithAttachments):
@@ -722,7 +721,7 @@ def create_app(hub: Hub, token: str, lifespan_hub: bool = True) -> FastAPI:
         )
         return {"ok": True, "message": message}
 
-    # voice input (voice.py): the phone sends 16 kHz mono 16-bit PCM pieces in order, numbered per voice session
+    # voice input (voice.py): the phone sends 16 kHz mono 16-bit PCM about every 250 ms, numbered per voice session
 
     async def _pcm(request: Request, limit: int) -> bytes:
         size = int(request.headers.get("content-length") or 0)
@@ -752,17 +751,12 @@ def create_app(hub: Hub, token: str, lifespan_hub: bool = True) -> FastAPI:
 
     @app.post("/api/sessions/{session_id}/voice", dependencies=auth)
     async def voice_start(session_id: uuid.UUID, body: VoiceStart) -> dict[str, Any]:
-        return await hub.voice.start_session(session_id, body.voice_id, body.live)
-
-    @app.post("/api/sessions/{session_id}/voice/{voice_id}/audio", dependencies=auth)
-    async def voice_audio(session_id: uuid.UUID, voice_id: str, request: Request,
-                          seq: int = Query(ge=0)) -> dict[str, Any]:
-        return await hub.voice.piece(session_id, voice_id, seq, await _pcm(request, MAX_PIECE_BYTES))
+        return await hub.voice.start_session(session_id, body.voice_id)
 
     @app.post("/api/sessions/{session_id}/voice/{voice_id}/live", dependencies=auth)
     async def voice_live(session_id: uuid.UUID, voice_id: str, request: Request, seq: int = Query(ge=0),
                          after: int = Query(default=0, ge=0), flush: bool = False, end: bool = False) -> dict[str, Any]:
-        """Live mode: the next audio (about 250 ms, may be empty) in, the words heard so far out, by segment."""
+        """The next audio (about 250 ms, may be empty) in, the words heard so far out, by segment."""
         return await hub.voice.live(session_id, voice_id, seq, await _pcm(request, LIVE_MAX_BYTES), after, flush, end)
 
     @app.delete("/api/sessions/{session_id}/voice/{voice_id}", dependencies=auth)

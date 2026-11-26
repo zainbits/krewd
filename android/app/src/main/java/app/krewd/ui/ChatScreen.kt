@@ -418,7 +418,6 @@ fun ChatScreen(state: UiState, viewModel: KrewdViewModel) {
                     val voice by Voice.state.collectAsStateWithLifecycle()
                     val context = LocalContext.current
                     val listeningHere = voice.listening && voice.chatId == session.id
-                    var pickMode by remember { mutableStateOf(false) }
                     val micAsk = androidx.activity.compose.rememberLauncherForActivityResult(
                         androidx.activity.result.contract.ActivityResultContracts.RequestPermission(),
                     ) { granted ->
@@ -428,17 +427,12 @@ fun ChatScreen(state: UiState, viewModel: KrewdViewModel) {
                             Toast.makeText(context, "Voice input needs the microphone", Toast.LENGTH_SHORT).show()
                         }
                     }
-                    // The composer's mic: voice mode on (after picking Pieces or Live), or (tapped again) off. The mode
-                    // is picked only here: changing it later would swap the server's models while it listens.
+                    // The composer's mic: voice mode on, or (tapped again) off.
                     val onMic = {
-                        if (listeningHere) Voice.leave(context) else pickMode = true
-                    }
-                    if (pickMode) {
-                        VoiceModeDialog(onDismiss = { pickMode = false }) { live ->
-                            pickMode = false
-                            Voice.setLive(context, live)
-                            if (Voice.hasMic(context)) Voice.start(context, session.id)
-                            else micAsk.launch(android.Manifest.permission.RECORD_AUDIO)
+                        when {
+                            listeningHere -> Voice.leave(context)
+                            Voice.hasMic(context) -> Voice.start(context, session.id)
+                            else -> micAsk.launch(android.Manifest.permission.RECORD_AUDIO)
                         }
                     }
                     if (!listeningHere && voice.chatId == session.id && voice.error != null) {
@@ -481,7 +475,7 @@ fun ChatScreen(state: UiState, viewModel: KrewdViewModel) {
                         onRemoveFile = { viewModel.removeAttachment(session.id, it) },
                         onMic = onMic,
                         voiceMode = listeningHere,
-                        voiceWaiting = listeningHere && voice.waiting > 0,
+                        voiceWaiting = listeningHere && voice.speaking,
                         voiceSettling = listeningHere && voice.settling,
                         attachHeard = { viewModel.attachComposer(session.id, it) },
                         detachHeard = { viewModel.detachComposer(session.id) },

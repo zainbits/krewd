@@ -48,9 +48,8 @@ import kotlinx.coroutines.launch
 
 /**
  * The slim bar above the composer while the chat is in voice mode: Listening (or Muted) and the time, the "My voice"
- * switch, Mute / Unmute, Set up My voice while there is no voice sample, and a short status (Pieces or Live is
- * picked when voice mode starts, [VoiceModeDialog]). What is heard goes into the composer below as `Me: ...` / `Others: ...`
- * lines (in Live mode while they are being said). Tapping the composer's mic again leaves voice mode.
+ * switch, Mute / Unmute, Set up My voice while there is no voice sample, and a short status. What is heard goes into
+ * the composer below as `Me: ...` / `Others: ...` lines while it is said. Tapping the composer's mic again leaves voice mode.
  */
 @Composable
 fun VoiceBar(voice: VoiceUi, modifier: Modifier = Modifier) {
@@ -67,8 +66,7 @@ fun VoiceBar(voice: VoiceUi, modifier: Modifier = Modifier) {
             }
             Box(Modifier.size(8.dp).background(dot, CircleShape))
             Spacer(Modifier.width(6.dp))
-            Text((if (voice.muted) "Muted" else "Listening") + if (voice.live) " · Live" else "",
-                style = MaterialTheme.typography.labelLarge)
+            Text(if (voice.muted) "Muted" else "Listening", style = MaterialTheme.typography.labelLarge)
             Spacer(Modifier.width(6.dp))
             Elapsed(voice.since)
             if (!voice.muted) {
@@ -94,10 +92,9 @@ fun VoiceBar(voice: VoiceUi, modifier: Modifier = Modifier) {
             voice.error != null -> voice.error
             voice.stopping -> "Leaving voice mode · adding the last words…"
             voice.settling -> "Adding the last words before sending…"
-            voice.holdUp == "offline" -> if (voice.waiting > 0) "Offline · ${voice.waiting} waiting" else "Offline"
-            voice.holdUp == "server" && voice.waiting > 0 -> "Server busy or loading · ${voice.waiting} waiting"
-            voice.starting -> if (voice.live) "Starting the live model…" else "Starting…"
-            voice.waiting > 0 -> "Transcribing…"
+            voice.holdUp == "offline" -> "Offline · keeping what is heard"
+            voice.holdUp == "server" -> "Server busy or loading · keeping what is heard"
+            voice.starting -> "Starting the live model…"
             else -> null
         }
         if (status != null) {
@@ -110,40 +107,6 @@ fun VoiceBar(voice: VoiceUi, modifier: Modifier = Modifier) {
 
     }
     if (enrolling) EnrollDialog(listening = voice.listening && !voice.muted, onClose = { enrolling = false })
-}
-
-/**
- * Before voice mode starts: Pieces (words after each pause, Bark) or Live (words while speaking). Picked only here,
- * since changing it while listening would make the server swap its models. The last choice is the default.
- */
-@Composable
-fun VoiceModeDialog(onDismiss: () -> Unit, onPick: (live: Boolean) -> Unit) {
-    val context = LocalContext.current
-    val voice by Voice.state.collectAsStateWithLifecycle()
-    LaunchedEffect(Unit) { Voice.refreshStatus() }
-    val last = remember { Voice.prefs(context).getBoolean("live_mode", false) }
-    val liveOk = voice.liveAvailable != false
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Voice mode") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("Pieces: the words arrive after each pause (Bark).", style = MaterialTheme.typography.bodyMedium)
-                Text(
-                    if (liveOk) "Live: the words appear while they are said." else "Live: not set up on the server.",
-                    style = MaterialTheme.typography.bodyMedium,
-                )
-                Text("To change it later, leave voice mode and start it again.",
-                    style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-        },
-        confirmButton = {
-            TextButton(enabled = liveOk, onClick = { onPick(true) }) { Text(if (last && liveOk) "Live ✓" else "Live") }
-        },
-        dismissButton = {
-            TextButton(onClick = { onPick(false) }) { Text(if (!last || !liveOk) "Pieces ✓" else "Pieces") }
-        },
-    )
 }
 
 @Composable

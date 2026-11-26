@@ -506,16 +506,14 @@ class KrewdApi(
     private fun tabsJson(tabs: List<BrowserTab>) =
         JSONArray(tabs.map { JSONObject().put("id", it.id).put("title", it.title).put("url", it.url) })
 
-    // Voice input (voice.py on the server): pieces of 16 kHz mono 16-bit PCM, numbered per voice session.
+    // Voice input (voice.py on the server): 16 kHz mono 16-bit PCM about every 250 ms, numbered per voice session.
 
     fun voiceStatus(): JSONObject = obj("GET", "/api/voice")
 
-    /** Starts the chat's voice session (it also wakes the server's transcription model): `{voice_id, enrolled, live}`.
-     *  [live]: Live mode, words while speaking ([voiceLive]) instead of pieces. */
-    fun voiceStart(id: String, live: Boolean = false): JSONObject =
-        obj("POST", "/api/sessions/$id/voice", JSONObject().apply { if (live) put("live", true) })
+    /** Starts the chat's voice session (it also wakes the server's live model): `{voice_id, enrolled}`. */
+    fun voiceStart(id: String): JSONObject = obj("POST", "/api/sessions/$id/voice", JSONObject())
 
-    /** Live mode: the next audio (about 250 ms, may be empty) in; the words heard so far out, by segment from [after]. */
+    /** The next audio (about 250 ms, may be empty) in; the words heard so far out, by segment from [after]. */
     fun voiceLive(id: String, voiceId: String, seq: Long, after: Long, flush: Boolean, end: Boolean, pcm: ByteArray): JSONObject {
         val q = StringBuilder("seq=$seq&after=$after")
         if (flush) q.append("&flush=true")
@@ -523,11 +521,6 @@ class KrewdApi(
         return JSONObject(call("POST", "/api/sessions/$id/voice/$voiceId/live?$q", null,
             readTimeoutMs = 60_000, raw = pcm)) // a flush waits for the final words; a resend of the same seq is safe
     }
-
-    /** One piece of speech; the answer has who spoke (Me or Others) and the words. Waits while the server's model loads. */
-    fun voiceAudio(id: String, voiceId: String, seq: Long, pcm: ByteArray): JSONObject =
-        JSONObject(call("POST", "/api/sessions/$id/voice/$voiceId/audio?seq=$seq", null,
-            readTimeoutMs = 45_000, raw = pcm)) // a dead route fails soon; a resend of the same seq is safe
 
     fun voiceStop(id: String, voiceId: String) {
         call("DELETE", "/api/sessions/$id/voice/$voiceId", null, readTimeoutMs = 30_000)

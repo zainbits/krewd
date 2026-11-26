@@ -138,7 +138,7 @@ PY
     fi
   fi
   if [[ -n "$(find_uv)" ]]; then
-    # Voice input: the transcription API and its speaker labels (voice.py; off without KREWD_VOICE_STT_URL).
+    # Voice input: the Warehouse's live model and its speaker labels (voice.py; off without KREWD_VOICE_STT_URL).
     local line
     while IFS= read -r line; do
       case "$line" in

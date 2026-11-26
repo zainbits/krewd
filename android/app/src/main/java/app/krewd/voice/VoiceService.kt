@@ -75,8 +75,8 @@ class VoiceService : Service() {
         Voice.listener = null
         watch?.cancel()
         Voice.set {
-            VoiceUi(enrolled = it.enrolled, available = it.available, myVoice = it.myVoice, live = it.live,
-                liveAvailable = it.liveAvailable, chatId = if (reason != null) it.chatId else null, error = reason)
+            VoiceUi(enrolled = it.enrolled, available = it.available, myVoice = it.myVoice,
+                chatId = if (reason != null) it.chatId else null, error = reason)
         }
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
@@ -117,8 +117,7 @@ class VoiceService : Service() {
             listener?.stop(null)
             listener = null
             Voice.listener = null
-            Voice.set { VoiceUi(enrolled = it.enrolled, available = it.available, myVoice = it.myVoice, live = it.live,
-                liveAvailable = it.liveAvailable) }
+            Voice.set { VoiceUi(enrolled = it.enrolled, available = it.available, myVoice = it.myVoice) }
         }
         scope.cancel()
         super.onDestroy()
