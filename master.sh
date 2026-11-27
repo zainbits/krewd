@@ -9,6 +9,7 @@ export PATH="$HOME/.local/bin:$PATH"
 
 UNIT_DIR="$HOME/.config/systemd/user"
 UNITS=(krewd.service krewd-browser.service)
+PERSON_UNIT="krewd-browser@.service"  # a person's own Brave, started by the server when a chat uses it
 B=$'\e[1m'; G=$'\e[32m'; Y=$'\e[33m'; R=$'\e[31m'; N=$'\e[0m'
 [[ -t 1 ]] || { B=; G=; Y=; R=; N=; }
 
@@ -194,6 +195,20 @@ PY
       else bad "$u is $act" "./master.sh start; then ./master.sh logs"; fi
     done
   fi
+  if linux_systemd; then
+    if [[ ! -f "$UNIT_DIR/$PERSON_UNIT" ]]; then bad "$PERSON_UNIT (people's own browsers) is not installed" "./master.sh setup"
+    elif ! cmp -s <(sed -e "s#@REPO@#$REPO#g" -e "s#@CONFIG_DIR@#$CONFIG_DIR#g" "$REPO/deploy/systemd/$PERSON_UNIT") "$UNIT_DIR/$PERSON_UNIT"; then
+      warn "$PERSON_UNIT differs from the repo" "./master.sh setup"
+    else
+      local f n people=()
+      for f in "$CONFIG_DIR"/browsers/*.env; do
+        [[ -f "$f" ]] || continue
+        n="$(basename "$f" .env)"
+        people+=("$n ($(systemctl --user is-active "krewd-browser@$n.service" 2>/dev/null))")
+      done
+      ok "people's browsers: ${people[*]:-none yet (krewd browser add NAME)}"
+    fi
+  fi
   curl -fsS -m 3 "http://127.0.0.1:$(port)/api/health" >/dev/null 2>&1 && ok "server answers on port $(port)" \
     || bad "server does not answer on port $(port)" "./master.sh logs"
   if [[ -f "$CONFIG_DIR/owner.json" ]]; then
@@ -271,9 +286,11 @@ install_units() {
   for u in "${UNITS[@]}"; do
     sed -e "s#@REPO@#$REPO#g" -e "s#@CDP_PORT@#$(cdp_port)#g" "$REPO/deploy/systemd/$u" > "$UNIT_DIR/$u"
   done
+  # People's own browsers (krewd browser add NAME): a template the server starts on demand, never enabled.
+  sed -e "s#@REPO@#$REPO#g" -e "s#@CONFIG_DIR@#$CONFIG_DIR#g" "$REPO/deploy/systemd/$PERSON_UNIT" > "$UNIT_DIR/$PERSON_UNIT"
   systemctl --user daemon-reload
   systemctl --user enable "${UNITS[@]}" >/dev/null 2>&1
-  say "Installed and enabled: ${UNITS[*]}"
+  say "Installed and enabled: ${UNITS[*]}; installed $PERSON_UNIT (started on demand)"
 }
 
 setup() {

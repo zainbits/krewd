@@ -7,6 +7,15 @@ source "$(dirname "$0")/lib.sh"
 BRAVE="$(find_brave)" || { echo "Brave not found; set KREWD_BROWSER in $ENV_FILE" >&2; exit 1; }
 PROFILE="$(conf KREWD_BROWSER_PROFILE "$HOME/.local/share/krewd/agent-brave")"
 PORT="$(conf KREWD_CDP_PORT 9222)"
+# A person's own Brave (krewd-browser@NAME.service): its port and profile come from its unit's environment
+# (config/browsers/NAME.env), not krewd.env, and it gets its own copy of the location extension.
+NAME="${KREWD_BROWSER_NAME:-}"
+if [[ -n "$NAME" ]]; then
+  [[ "$NAME" =~ ^[a-z][a-z0-9-]{0,31}$ && -n "${KREWD_CDP_PORT:-}" && -n "${KREWD_BROWSER_PROFILE:-}" ]] \
+    || { echo "browser $NAME: KREWD_CDP_PORT and KREWD_BROWSER_PROFILE must be set ($CONFIG_DIR/browsers/$NAME.env)" >&2; exit 1; }
+  PROFILE="$KREWD_BROWSER_PROFILE"
+  PORT="$KREWD_CDP_PORT"
+fi
 mkdir -p "$PROFILE"
 # KREWD_BROWSER_DISPLAY=virtual (default): Brave gets its own invisible screen (Xvfb), so it never shows up on,
 # or takes focus from, the desktop of whoever uses this machine. The phone's live view is its screen.
@@ -55,9 +64,14 @@ GPU_FLAG=(--disable-gpu)
 # Brave loads a copy in the config folder, made fresh from the repo at each start except current.js: the server
 # keeps the applied location there, so pages have it the instant they start.
 EXT="$CONFIG_DIR/location-extension"
+MAIN_EXT="$EXT"
+# A person's Brave has its own copy (a main Brave restart replaces the files of the shared one under it).
+[[ -n "$NAME" ]] && EXT="$CONFIG_DIR/location-extension-$NAME"
 mkdir -p "$EXT" && chmod 700 "$EXT"
 find "$EXT" -mindepth 1 -maxdepth 1 ! -name current.js -exec rm -rf {} +
 for f in "$REPO/deploy/fixed-location"/*; do [[ "$(basename "$f")" == current.js ]] || cp -r "$f" "$EXT/"; done
+# The server keeps the applied location in the main copy's current.js; a person's Brave starts with the same.
+if [[ -n "$NAME" && -s "$MAIN_EXT/current.js" ]]; then cp "$MAIN_EXT/current.js" "$EXT/current.js"; fi
 [[ -s "$EXT/current.js" ]] || cp "$REPO/deploy/fixed-location/current.js" "$EXT/current.js"
 # Recent Chromium ignores --load-extension unless this feature is turned off.
 EXT_FLAGS=(--load-extension="$EXT" --disable-features=DisableLoadExtensionCommandLineSwitch)

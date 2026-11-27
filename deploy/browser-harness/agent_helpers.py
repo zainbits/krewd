@@ -35,8 +35,48 @@ def _install():
     if helpers is None or not _AGENT_SESSION or getattr(helpers, "_krewd_hooked", False):
         return
     helpers._krewd_hooked = True
+    _pick_browser()
     _own_daemon(helpers)
     _claim_tabs(helpers)
+
+
+def _krewd_request(method, path, body=None, timeout=5):
+    port = _os.environ.get("KREWD_PORT", "8800")
+    token_file = _os.environ.get("KREWD_TOKEN_FILE") or _os.path.expanduser("~/.config/krewd/token")
+    with open(token_file) as f:
+        token = f.read().strip()
+    req = _urlrequest.Request(
+        f"http://127.0.0.1:{port}{path}", method=method,
+        data=_json.dumps(body).encode() if body is not None else None,
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
+    )
+    return _urlrequest.urlopen(req, timeout=timeout).read()
+
+
+def _pick_browser():
+    from urllib.parse import quote
+
+    try:
+        info = _json.loads(_krewd_request("GET", f"/api/browser/session?agent_session={quote(_AGENT_SESSION)}",
+                                          timeout=60))
+    except _urlerror.HTTPError as e:
+        try:
+            detail = _json.loads(e.read()).get("detail")
+        except Exception:
+            detail = None
+        if e.code == 503:  # the chat's browser could not start: never use another one instead
+            raise SystemExit(f"Krewd: {detail or 'this chat' + chr(39) + 's browser is not running'}")
+        print(f"krewd: could not ask which browser this chat uses (HTTP {e.code}); using BU_CDP_URL as set",
+              file=_sys.stderr)
+        return
+    except Exception as e:
+        print(f"krewd: could not ask which browser this chat uses ({e}); using BU_CDP_URL as set", file=_sys.stderr)
+        return
+    url = info.get("cdp_url")
+    if url:
+        _os.environ["BU_CDP_URL"] = url  # the daemon this call starts inherits it
+    if info.get("name") and info["name"] != "main":
+        print(f"krewd: this chat uses the browser of {info['name']}", file=_sys.stderr)
 
 
 def _own_daemon(helpers):
@@ -59,21 +99,12 @@ def _claim_tabs(helpers):
     claimed = set()
     current = {}
     warned = []
-    port = _os.environ.get("KREWD_PORT", "8800")
-    token_file = _os.environ.get("KREWD_TOKEN_FILE") or _os.path.expanduser("~/.config/krewd/token")
 
     def claim(tab_id):
         if not tab_id or tab_id in claimed:
             return
         try:
-            with open(token_file) as f:
-                token = f.read().strip()
-            req = _urlrequest.Request(
-                f"http://127.0.0.1:{port}/api/browser/claim", method="POST",
-                data=_json.dumps({"agent_session": _AGENT_SESSION, "tab_id": tab_id}).encode(),
-                headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
-            )
-            _urlrequest.urlopen(req, timeout=5).read()
+            _krewd_request("POST", "/api/browser/claim", {"agent_session": _AGENT_SESSION, "tab_id": tab_id})
         except _urlerror.HTTPError as e:
             if e.code == 409:
                 try:

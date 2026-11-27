@@ -26,6 +26,7 @@ import os
 import uuid
 from pathlib import Path
 from typing import Any
+from collections.abc import Callable
 
 import asyncpg
 
@@ -86,9 +87,12 @@ def _row(r: asyncpg.Record) -> dict[str, Any]:
 
 
 class Locations:
-    def __init__(self, pool: asyncpg.Pool, browser: Browser, config_value: str = "", script: Path | None = None):
+    def __init__(self, pool: asyncpg.Pool, browser: Browser, config_value: str = "", script: Path | None = None,
+                 others: Callable[[], list[tuple[Browser, Path]]] | None = None):
         self.pool = pool
         self.browser = browser
+        # People's own browsers (browsers.py) and their extension copies' current.js: they get the same location.
+        self.others = others or (lambda: [])
         self.script = script  # current.js in the extension copy Brave loads (None: do not write one)
         self.config = parse_config(config_value)
         # What the extension last reported, and how the last attempt to reach it went.
@@ -151,20 +155,21 @@ class Locations:
         await self.push()
         return await self.state()
 
-    def _write_script(self, value: dict[str, float] | None) -> bool:
+    def _write_script(self, value: dict[str, float] | None, script: Path | None = None) -> bool:
         """Put the location into the extension's current.js, for Brave's next start. True when the file changed."""
-        if self.script is None or not self.script.parent.is_dir():
+        script = script or self.script
+        if script is None or not script.parent.is_dir():
             return False
         text = (CURRENT_JS_HEAD + "globalThis.__krewdLocation = " + json.dumps(value) + ";\n")
         try:
-            if self.script.read_text() == text:
+            if script.read_text() == text:
                 return False
         except OSError:
             pass
-        tmp = self.script.with_suffix(".tmp")
+        tmp = script.with_suffix(".tmp")
         tmp.write_text(text)
         os.chmod(tmp, 0o600)
-        os.replace(tmp, self.script)
+        os.replace(tmp, script)
         return True
 
     async def push(self) -> None:
@@ -180,6 +185,23 @@ class Locations:
         except Exception as exc:  # the extension missing or not answering
             self.status, self.detail = "error", str(exc) or type(exc).__name__
             log.warning("location not applied: %s", self.detail)
+        for browser, script in self.others():
+            await self._push_other(browser, script, value)
+
+    async def _push_other(self, browser: Browser, script: Path, value: dict[str, float] | None) -> None:
+        """A person's browser: same location; one that is not running gets it from current.js when it starts."""
+        self._write_script(value, script)
+        try:
+            await browser.location(value)
+        except BrowserUnavailable:
+            pass
+        except Exception as exc:
+            log.warning("location not applied to the browser on port %s: %s", browser.port, exc)
+
+    async def push_to(self, browser: Browser, script: Path) -> None:
+        """A person's browser was reached (started): give it the current location."""
+        current = await self.current()
+        await self._push_other(browser, script, {k: current[k] for k in ("lat", "lon", "accuracy")} if current else None)
 
     async def sync(self) -> None:
         """Brave was reached: make sure the extension holds the current location (no change if it already does)."""

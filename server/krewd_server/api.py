@@ -7,6 +7,7 @@ import asyncio
 import mimetypes
 import time
 import hmac
+import logging
 import uuid
 from datetime import datetime
 from contextlib import asynccontextmanager, suppress
@@ -21,7 +22,8 @@ from .secrets_store import SecretRequest, Secrets, origin as url_origin, parse_f
 from .security import Principal, Security, SecurityError
 from . import files as shared_files
 from .attachments import TooLarge
-from .browser import Browser, BrowserUnavailable, TabGone
+from .browser import BrowserUnavailable, TabGone
+from .browsers import MAIN, BrowserError, Fleet, valid_name
 from .hub import Conflict, Hub, NotFound, TabTaken
 from .alerts import LEVELS, Invalid as AlertInvalid
 from .locations import LOCATION_SCRIPT, Invalid as LocationInvalid, Locations
@@ -30,6 +32,7 @@ from .routines import Invalid
 from .voice import ENROLL_MAX_BYTES, LIVE_MAX_BYTES, VoiceError
 
 LONG_POLL_MAX_SECONDS = 30
+log = logging.getLogger("krewd.api")
 
 
 class TabRef(BaseModel):
@@ -296,6 +299,18 @@ class TabClaim(BaseModel):
 
 class NewTab(BaseModel):
     url: str | None = Field(default=None, max_length=4000)
+    browser: str | None = Field(default=None, max_length=32)  # a person's browser (none: main)
+
+
+class BrowserUse(BaseModel):
+    """`krewd browser use NAME`: the chat (by its agent session, or its id) uses that browser from now on."""
+    agent_session: str | None = Field(default=None, max_length=200)
+    session_id: uuid.UUID | None = None
+    browser: str = Field(min_length=1, max_length=32)
+
+
+class BrowserAdd(BaseModel):
+    name: str = Field(min_length=1, max_length=32)
 
 
 class TabView(BaseModel):
@@ -340,26 +355,62 @@ def create_app(hub: Hub, token: str, lifespan_hub: bool = True) -> FastAPI:
     async def lifespan(_: FastAPI):
         if lifespan_hub:
             await hub.start()
-        async def on_connect() -> None:
-            with suppress(Exception):
-                await hub.forget_tabs({t["id"] for t in await browser.tabs()})
-            await locations.sync()
-
-        watcher = asyncio.create_task(browser.watch(hub.browser_activity, on_connect,
-                                                    lambda tab_id: hub.forget_tabs(closed=tab_id)))
+        for name in fleet.names():
+            watch_browser(name)
+        idle_task = asyncio.create_task(stop_idle_loop())
         try:
             yield
         finally:
-            watcher.cancel()
-            with suppress(asyncio.CancelledError):
-                await watcher
-            await browser.close()
+            for task in [*watchers.values(), idle_task]:
+                task.cancel()
+            for task in [*watchers.values(), idle_task]:
+                with suppress(asyncio.CancelledError):
+                    await task
+            await fleet.close()
             if lifespan_hub:
                 await hub.close()
 
     app = FastAPI(title="Krewd", version=__version__, lifespan=lifespan)
-    browser = Browser(hub.settings.cdp_port)
-    locations = Locations(hub.pool, browser, hub.settings.browser_location, script=LOCATION_SCRIPT)
+    config_dir = hub.settings.token_file.parent  # the config folder (KREWD_CONFIG_DIR)
+    fleet = Fleet(hub.settings.cdp_port, config_dir, hub.settings.browser_profile, hub.settings.browser_idle_minutes)
+    browser = fleet.main
+    locations = Locations(hub.pool, browser, hub.settings.browser_location, script=LOCATION_SCRIPT,
+                          others=lambda: [(fleet.get(n), config_dir / f"location-extension-{n}" / "current.js")
+                                          for n in fleet.names() if n != MAIN])
+    watchers: dict[str, asyncio.Task] = {}
+
+    def watch_browser(name: str) -> None:
+        """Follow one browser's tabs (which tab an agent opens or navigates), and fix up after it (re)starts."""
+        if name in watchers and not watchers[name].done():
+            return
+        target = fleet.get(name)
+
+        async def on_connect() -> None:
+            with suppress(Exception):
+                await hub.forget_tabs({t["id"] for t in await fleet.tabs()})
+            if name == MAIN:
+                await locations.sync()
+            else:
+                await locations.push_to(target, config_dir / f"location-extension-{name}" / "current.js")
+
+        async def on_activity(info: dict[str, Any]) -> Any:
+            fleet.where[info["id"]] = name
+            return await hub.browser_activity(info)
+
+        watchers[name] = asyncio.create_task(target.watch(on_activity, on_connect,
+                                                          lambda tab_id: hub.forget_tabs(closed=tab_id)))
+
+    async def stop_idle_loop() -> None:
+        """Stop people's browsers nobody has used for KREWD_BROWSER_IDLE_MINUTES (their logins stay on disk)."""
+        while True:
+            await asyncio.sleep(60)
+            try:
+                for name in await fleet.idle(hub.tab_busy):
+                    await fleet.stop(name)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.warning("idle browser check: %s", exc)
     cert = hub.settings.tls_cert
     security = Security(hub.settings, hub.pool, token, tls.pin(cert) if hub.settings.tls != "off" and cert.is_file() else None)
     secrets_ = Secrets()
@@ -395,6 +446,10 @@ def create_app(hub: Hub, token: str, lifespan_hub: bool = True) -> FastAPI:
     @app.exception_handler(BrowserUnavailable)
     async def browser_down(_, exc: BrowserUnavailable):
         return JSONResponse(status_code=503, content={"detail": str(exc)})
+
+    @app.exception_handler(BrowserError)
+    async def browser_error(_, exc: BrowserError):
+        return JSONResponse(status_code=422, content={"detail": str(exc)})
 
     @app.exception_handler(TabGone)
     async def tab_gone(_, exc: TabGone):
@@ -569,7 +624,7 @@ def create_app(hub: Hub, token: str, lifespan_hub: bool = True) -> FastAPI:
 
     @app.post("/api/secrets", dependencies=auth, status_code=201)
     async def ask_secret(body: SecretAsk) -> dict[str, Any]:
-        tabs = await browser.tabs()
+        tabs = await fleet.tabs()
         tab = next((t for t in tabs if t["id"] == body.tab_id), None) if body.tab_id else None
         if tab is None and body.tab_id is None:
             # The tab of the one task whose agent is running a turn and last drove a tab.
@@ -643,12 +698,13 @@ def create_app(hub: Hub, token: str, lifespan_hub: bool = True) -> FastAPI:
         if not isinstance(values, dict) or not all(isinstance(values.get(f["name"]), str) and values.get(f["name"]) for f in req.fields):
             raise HTTPException(422, "every field needs a value")
         try:
-            current = await browser.page_url(req.tab_id)
+            browser_ = await fleet.browser_of(req.tab_id)
+            current = await browser_.page_url(req.tab_id)
             if url_origin(current) != req.origin:
                 raise LookupError(f"the tab moved to {url_origin(current) or 'another page'}; nothing was typed")
-            await browser.fill_secret(req.tab_id, [(f["kind"], f["selector"], values[f["name"]]) for f in req.fields], req.submit)
+            await browser_.fill_secret(req.tab_id, [(f["kind"], f["selector"], values[f["name"]]) for f in req.fields], req.submit)
             await asyncio.sleep(2.5)  # let the form submit and the next page load before telling the agent
-            req.result_url = await browser.page_url(req.tab_id)
+            req.result_url = await browser_.page_url(req.tab_id)
             req.status = "filled"
         except (LookupError, TabGone, BrowserUnavailable, RuntimeError, asyncio.TimeoutError) as exc:
             req.status, req.error = "failed", str(exc) or type(exc).__name__
@@ -1078,7 +1134,7 @@ def create_app(hub: Hub, token: str, lifespan_hub: bool = True) -> FastAPI:
     @app.get("/api/browser/tabs", dependencies=auth)
     async def browser_tabs() -> dict[str, Any]:
         try:
-            tabs = await browser.tabs()
+            tabs = await fleet.tabs()
         except BrowserUnavailable as exc:
             return {"available": False, "reason": str(exc), "tabs": []}
         for tab in tabs:
@@ -1091,7 +1147,7 @@ def create_app(hub: Hub, token: str, lifespan_hub: bool = True) -> FastAPI:
     async def browser_claim(body: TabClaim) -> dict[str, Any]:
         """Lock a tab for the chat of the agent session that is about to use it; 409 if another chat's turn holds it."""
         try:
-            tab = next((t for t in await browser.tabs() if t["id"] == body.tab_id), None)
+            tab = next((t for t in await fleet.tabs() if t["id"] == body.tab_id), None)
         except BrowserUnavailable:
             tab = None
         try:
@@ -1108,12 +1164,14 @@ def create_app(hub: Hub, token: str, lifespan_hub: bool = True) -> FastAPI:
 
     @app.post("/api/browser/tabs", dependencies=auth, status_code=201)
     async def browser_new_tab(body: NewTab) -> dict[str, Any]:
-        return await browser.new_tab(body.url)
+        if body.browser and body.browser != MAIN:
+            watch_browser(valid_name(body.browser))
+        return await fleet.new_tab(body.url, body.browser)
 
     @app.delete("/api/browser/tabs/{tab_id}", dependencies=auth)
     async def browser_close_tab(tab_id: str) -> dict[str, Any]:
         not_while_agent(tab_id)
-        await browser.close_tab(tab_id)
+        await (await fleet.browser_of(tab_id)).close_tab(tab_id)
         return {"ok": True}
 
     @app.post("/api/browser/tabs/{tab_id}/view", dependencies=auth)
@@ -1121,16 +1179,16 @@ def create_app(hub: Hub, token: str, lifespan_hub: bool = True) -> FastAPI:
         if body.mode == "vertical" and not body.by_agent:
             not_while_agent(tab_id)
         try:
-            await browser.set_view(tab_id, body.mode, body.width, body.height, body.scale)
+            await (await fleet.browser_of(tab_id)).set_view(tab_id, body.mode, body.width, body.height, body.scale)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from None
         return {"ok": True}
 
     @app.get("/api/browser/tabs/{tab_id}/stream", dependencies=auth)
     async def browser_stream(tab_id: str, quality: Literal["standard", "high"] = "standard") -> StreamingResponse:
-        if tab_id not in {t["id"] for t in await browser.tabs()}:
+        if tab_id not in {t["id"] for t in await fleet.tabs()}:
             raise TabGone(tab_id)
-        frames = browser.stream(tab_id, quality)
+        frames = (await fleet.browser_of(tab_id)).stream(tab_id, quality)
 
         async def body():
             try:
@@ -1153,7 +1211,7 @@ def create_app(hub: Hub, token: str, lifespan_hub: bool = True) -> FastAPI:
     async def browser_snapshot(tab_id: str, width: int = Query(360, ge=80, le=1280)) -> Response:
         """A small still of a tab (JPEG) for the phone's working-task cards."""
         try:
-            jpeg = await browser.snapshot(tab_id, width)
+            jpeg = await (await fleet.browser_of(tab_id)).snapshot(tab_id, width)
         except (RuntimeError, TimeoutError) as exc:
             raise HTTPException(503, f"no snapshot: {exc}") from exc
         return Response(content=jpeg, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
@@ -1162,10 +1220,74 @@ def create_app(hub: Hub, token: str, lifespan_hub: bool = True) -> FastAPI:
     async def browser_input(tab_id: str, body: BrowserInput) -> dict[str, Any]:
         not_while_agent(tab_id)
         try:
-            result = await browser.input(tab_id, body.model_dump(exclude_none=True))
+            result = await (await fleet.browser_of(tab_id)).input(tab_id, body.model_dump(exclude_none=True))
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from None
         return {"ok": True, **result}
+
+    # people's own browsers (browsers.py): a chat picks one with `krewd browser use NAME`
+
+    async def chat_of(agent_session: str | None, session_id: uuid.UUID | None) -> uuid.UUID:
+        if session_id is not None:
+            return session_id
+        found = await hub.session_of_agent(agent_session) if agent_session else None
+        if found is None:
+            raise HTTPException(404, "not an agent session of a Krewd chat (give --chat-id)")
+        return found
+
+    @app.get("/api/browsers", dependencies=auth)
+    async def browsers_list() -> dict[str, Any]:
+        fleet.load()
+        return {"browsers": await fleet.describe(), "idle_minutes": fleet.idle_seconds / 60}
+
+    @app.post("/api/browsers", dependencies=auth, status_code=201)
+    async def browsers_add(body: BrowserAdd) -> dict[str, Any]:
+        info = await asyncio.to_thread(fleet.add, body.name)
+        watch_browser(info["name"])
+        return info
+
+    @app.post("/api/browsers/{name}/start", dependencies=auth)
+    async def browsers_start(name: str) -> dict[str, Any]:
+        name = valid_name(name)
+        try:
+            info = await fleet.ensure(name)
+        except BrowserError as exc:
+            raise HTTPException(503, str(exc)) from None
+        watch_browser(info["name"])
+        return {**info, "running": True}
+
+    @app.post("/api/browsers/{name}/stop", dependencies=auth)
+    async def browsers_stop(name: str) -> dict[str, Any]:
+        name = valid_name(name)
+        busy = [t for t, n in fleet.where.items() if n == name and hub.tab_busy(t)]
+        if busy:
+            raise HTTPException(409, f"a chat's turn is using a tab of {name}; stop it after that turn")
+        await fleet.stop(name)
+        return {**fleet.info(name), "running": False}
+
+    @app.post("/api/browser/use", dependencies=auth)
+    async def browser_use(body: BrowserUse) -> dict[str, Any]:
+        name = valid_name(body.browser)
+        fleet.load()
+        if not fleet.known(name):
+            raise HTTPException(404, f"no browser named {name!r}: add it first (krewd browser add {name})")
+        session_id = await chat_of(body.agent_session, body.session_id)
+        await hub.set_chat_browser(session_id, None if name == MAIN else name)
+        return {"session_id": str(session_id), **fleet.info(name)}
+
+    @app.get("/api/browser/session", dependencies=auth)
+    async def browser_session(agent_session: str = Query(min_length=1, max_length=200)) -> dict[str, Any]:
+        """For the browser-harness hook, before each call: the browser this agent's chat uses, started if needed."""
+        session_id = await hub.session_of_agent(agent_session)
+        name = (await hub.chat_browser(session_id) if session_id else None) or MAIN
+        if not fleet.known(name):
+            fleet.load()
+        try:
+            info = await fleet.ensure(name)
+        except BrowserError as exc:
+            raise HTTPException(503, str(exc)) from None
+        watch_browser(info["name"])
+        return {"session_id": str(session_id) if session_id else None, **info}
 
     # where the agents' Brave says it is: changed only when the owner applies a location (see locations.py)
 

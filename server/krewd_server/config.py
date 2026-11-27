@@ -85,6 +85,9 @@ class Settings:
     # Agent -> the profile it runs on; an agent not listed runs on its own sign-in account.
     agent_profiles: dict[str, str] = field(default_factory=dict)
     cdp_port: int = 9222
+    # The main Brave's profile folder (KREWD_BROWSER_PROFILE); people's browsers get folders beside it (browsers.py).
+    browser_profile: Path = Path.home() / ".local" / "share" / "krewd" / "agent-brave"
+    browser_idle_minutes: float = 30  # KREWD_BROWSER_IDLE_MINUTES: a person's idle Brave is stopped after this; 0 never
     # KREWD_BROWSER_LOCATION ("LAT,LON[,ACCURACY_M]"): the agents' Brave location until one is applied in the app.
     browser_location: str = ""
     data_dir: Path = Path.home() / ".krewd"
@@ -209,6 +212,8 @@ def load_settings() -> Settings:
         profiles_file=profiles_file,
         agent_profiles=load_agent_profiles(profiles_file),
         cdp_port=int(os.environ.get("KREWD_CDP_PORT", "9222")),
+        browser_profile=Path(os.path.expanduser(os.environ.get("KREWD_BROWSER_PROFILE", "~/.local/share/krewd/agent-brave"))),
+        browser_idle_minutes=float(os.environ.get("KREWD_BROWSER_IDLE_MINUTES", "30") or 30),
         browser_location=os.environ.get("KREWD_BROWSER_LOCATION", "").strip(),
         data_dir=Path(os.path.expanduser(os.environ.get("KREWD_DATA_DIR", "~/.krewd"))),
         max_upload_mb=int(os.environ.get("KREWD_MAX_UPLOAD_MB", "1024")),

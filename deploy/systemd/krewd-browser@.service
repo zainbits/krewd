@@ -1,0 +1,18 @@
+# Installed by ./master.sh (it fills in @REPO@ and @CONFIG_DIR@). One person's own agent Brave (`krewd browser
+# add NAME`): the server starts it when a chat uses it and stops it when it has been idle. Never started at login.
+[Unit]
+Description=Krewd agent browser %i (Brave; watch it: tmux attach -t agent-brave-%i)
+PartOf=graphical-session.target
+After=graphical-session.target
+StartLimitIntervalSec=600
+StartLimitBurst=6
+
+[Service]
+Type=simple
+# KREWD_BROWSER_NAME, KREWD_CDP_PORT and KREWD_BROWSER_PROFILE, written by the server when the browser is added.
+EnvironmentFile=@CONFIG_DIR@/browsers/%i.env
+ExecStart=/usr/bin/python3 @REPO@/deploy/supervise.py --session agent-brave-%i --close-cdp ${KREWD_CDP_PORT} -- @REPO@/deploy/run-browser.sh
+Restart=on-failure
+RestartSec=10
+KillMode=process
+TimeoutStopSec=40

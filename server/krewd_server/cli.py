@@ -180,7 +180,7 @@ def _base() -> tuple[str, str]:
     return f"http://127.0.0.1:{port}", token
 
 
-def call(method: str, path: str, body: dict[str, Any] | None = None) -> Any:
+def call(method: str, path: str, body: dict[str, Any] | None = None, timeout: float = 30) -> Any:
     base, token = _base()
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(base + path, data=data, method=method)
@@ -188,7 +188,7 @@ def call(method: str, path: str, body: dict[str, Any] | None = None) -> Any:
     if data is not None:
         req.add_header("Content-Type", "application/json")
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read() or b"null")
     except urllib.error.HTTPError as exc:
         try:
@@ -451,14 +451,54 @@ def _secret(args: argparse.Namespace) -> int:
     return 1
 
 
+def _browsers(args: argparse.Namespace) -> int:
+    """People's own browsers: list, add, use (this chat), start, stop."""
+    action = args.browser_action
+    if action == "list":
+        state = call("GET", "/api/browsers")
+        for b in state["browsers"]:
+            print(f"{b['name']:<12} {'running' if b['running'] else 'stopped':<8} port {b['port']}  {b['profile']}")
+        idle = state.get("idle_minutes")
+        print(f"A person's browser starts when a chat that uses it calls browser-harness, and stops after "
+              f"{idle:g} idle minutes." if idle else "A person's browser starts when a chat uses it; it is never stopped by itself.")
+        return 0
+    if action == "add":
+        b = call("POST", "/api/browsers", {"name": args.name})
+        print(f"Browser {b['name']}: own profile {b['profile']}, DevTools port {b['port']}. It starts when a chat "
+              f"uses it (krewd browser use {b['name']}); its logins are its own.")
+        return 0
+    if action == "use":
+        body: dict[str, Any] = {"browser": args.name}
+        if args.from_chat:
+            body["session_id"] = _chat_id(args.from_chat)
+        else:
+            agent = os.environ.get("CLAUDE_CODE_SESSION_ID") or os.environ.get("CODEX_THREAD_ID")
+            if not agent:
+                raise CliError("give --chat-id (your chat's id is in your first prompt)")
+            body["agent_session"] = agent
+        b = call("POST", "/api/browser/use", body)
+        print(f"This chat now uses the browser {b['name']} (DevTools {b['cdp_url']}, tmux {b['tmux']}). Your next "
+              "browser-harness call attaches there (and starts it if needed); open your tab with new_tab().")
+        return 0
+    if action == "start":
+        b = call("POST", f"/api/browsers/{args.name}/start", timeout=90)
+        print(f"Browser {b['name']} is running (DevTools {b['cdp_url']}; watch it: tmux attach -t {b['tmux']}).")
+        return 0
+    b = call("POST", f"/api/browsers/{args.name}/stop", timeout=90)
+    print(f"Browser {b['name']} stopped; its logins stay in {b['profile']}.")
+    return 0
+
+
 def _browser(args: argparse.Namespace) -> int:
+    if args.browser_action in ("list", "add", "use", "start", "stop"):
+        return _browsers(args)
     state = call("GET", "/api/browser/tabs")
     if not state.get("available"):
         raise CliError(state.get("reason") or "the agents' browser is not running")
     tabs = state["tabs"]
     if args.browser_action == "tabs":
         for t in tabs:
-            print(f"{t['id']}  {t['view']:<10}  {t['title'][:60]}  {t['url'][:80]}")
+            print(f"{t['id']}  {t.get('browser', 'main'):<10}  {t['view']:<10}  {t['title'][:60]}  {t['url'][:80]}")
         return 0
     ids = [t["id"] for t in tabs if t["id"].lower().startswith(args.tab.lower())]
     if len(ids) != 1:
@@ -554,13 +594,22 @@ def main(argv: list[str] | None = None) -> int:
         "key", help="the key's id (krewd security status)")
     secsub.add_parser("reset", help="lost phone and keys: remove every owner key and phone, make a new setup token")
 
-    br = sub.add_parser("browser", help="the agents' Brave tabs and their view (vertical for the phone, horizontal)")
+    br = sub.add_parser("browser", help="the agents' Brave tabs and their view (vertical for the phone, horizontal), "
+                        "and people's own browsers (list, add, use, start, stop)")
     brsub = br.add_subparsers(dest="browser_action", required=True)
     brsub.add_parser("tabs", help="the tabs with their view")
     view = brsub.add_parser("view", help="lay a tab out for the owner's phone (vertical) or the normal window (horizontal); "
                             "it keeps that view until someone changes it")
     view.add_argument("tab", help="the tab's DevTools target id (browser-harness current_tab()) or its first characters")
     view.add_argument("mode", choices=["vertical", "horizontal"])
+    brsub.add_parser("list", help="the browsers: main (the usual one) and each person's own, with their own logins")
+    badd = brsub.add_parser("add", help="add a person's own browser (own profile and logins), named after them")
+    badd.add_argument("name", help="short lowercase name, e.g. the person's first name")
+    buse = brsub.add_parser("use", help="this chat uses that browser from now on (main: the usual one)")
+    buse.add_argument("name")
+    buse.add_argument("--chat-id", dest="from_chat", help="the chat's id, when not run from that chat's agent")
+    for name, text in (("start", "start a person's browser now"), ("stop", "stop a person's browser (logins stay)")):
+        brsub.add_parser(name, help=text).add_argument("name")
 
     needs = sub.add_parser("needs", help="Needs you cards for the owner (things to do or decide, with a due time)",
                            description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)

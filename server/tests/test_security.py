@@ -16,6 +16,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 
 import krewd_server.api as api_module
+import krewd_server.browsers as browsers_module
 from krewd_server import db, passkeys, tls
 from krewd_server.__main__ import tls_marked
 from krewd_server.api import create_app
@@ -69,6 +70,7 @@ class FakePhone:
 
 class FakeBrowser:
     def __init__(self, port: int) -> None:
+        self.port = port
         self.url = "https://login.example.com/signin"
         self.filled: list = []
 
@@ -85,10 +87,13 @@ class FakeBrowser:
     async def close(self):
         pass
 
+    async def watch(self, on_activity, on_connect=None, on_closed=None):
+        pass
+
 
 @pytest.fixture
 async def hub(tmp_path, monkeypatch):
-    monkeypatch.setattr(api_module, "Browser", FakeBrowser)
+    monkeypatch.setattr(browsers_module, "Browser", FakeBrowser)
     monkeypatch.setattr(api_module.asyncio, "sleep", _no_sleep)
     pool = await db.connect(DATABASE_URL)
     await pool.execute(

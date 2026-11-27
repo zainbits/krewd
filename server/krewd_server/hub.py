@@ -1641,6 +1641,19 @@ class Hub:
             agent_session,
         )
 
+    async def chat_browser(self, session_id: uuid.UUID) -> str | None:
+        """The person's browser a chat uses (`krewd browser use`); None: the main one."""
+        return await self.pool.fetchval("select browser from sessions where id = $1", session_id)
+
+    async def set_chat_browser(self, session_id: uuid.UUID, name: str | None) -> None:
+        """Switch a chat to another browser. Its browser-harness daemons are stopped, so the next call starts one
+        on the new browser (a daemon stays connected to the browser it started on)."""
+        await self.pool.execute("update sessions set browser = $2 where id = $1", session_id, name)
+        running = await asyncio.to_thread(harness.krewd_daemons)
+        for agent_session in await self._agent_sessions(session_id):
+            if harness.daemon_name(agent_session) in running:
+                await harness.stop_daemon(harness.daemon_name(agent_session))
+
     async def claim_tab(self, agent_session: str, tab_id: str, tab: dict[str, Any] | None) -> dict[str, Any]:
         """An agent's browser-harness is about to use a tab: lock it for the agent's chat.
 
