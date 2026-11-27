@@ -402,7 +402,7 @@ fun FilePeekCard(file: Attachment, chip: Rect, backdrop: GlassBackdrop?, onClose
             // contrast setting applies as for all glass.
             val g = LocalKrewdGlass.current
             val contrast = LocalGlassContrast.current
-            val style = remember(g.clarity, g.dark, contrast) { GlassStyle.forClarity((g.clarity + 0.10f).coerceAtMost(1f), g.dark, contrast) }
+            val style = remember(g.clarity, g.dark, g.tint, contrast) { GlassStyle.forClarity((g.clarity + 0.10f).coerceAtMost(1f), g.dark, contrast, g.tint) }
             GlassSurface(backdrop = backdrop, modifier = place, shape = GlassShape.rounded(16.dp), style = style) { body() }
         } else {
             Surface(modifier = place, shape = RoundedCornerShape(16.dp), color = MaterialTheme.colorScheme.surfaceContainerHighest, shadowElevation = 3.dp) { body() }

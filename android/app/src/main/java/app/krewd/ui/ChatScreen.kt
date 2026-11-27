@@ -828,7 +828,7 @@ private fun Composer(
                 },
             )
             Row(verticalAlignment = Alignment.CenterVertically) {
-                StretchIconButton(onClick = onAttach, icon = R.drawable.ic_add_24, contentDescription = "Attach files")
+                StretchIconButton(onClick = onAttach, icon = R.drawable.ic_attach_24, contentDescription = "Attach files")
                 // Voice mode: on here, or (tapped again) off.
                 StretchIconButton(onClick = onMic, icon = R.drawable.ic_mic_24, active = voiceMode,
                     contentDescription = if (voiceMode) "Leave voice mode" else "Voice mode")

@@ -237,7 +237,7 @@ An agent hands a file back by saving it in a shared folder (`KREWD_SHARE_DIRS`, 
 
 `GET /api/files?path=<path>` returns the file as a download. Only regular files inside the shared folders are served, after resolving symlinks and `..`; anything else is 404.
 
-The app opens Markdown (`.md`), PDF and HTML files inside itself (a preview over the chat, with Download and Share) instead of handing them to another app; HTML is shown in a WebView with scripts and network loads off unless the owner turns them on for that page.
+The app opens Markdown (`.md`), PDF and HTML files inside itself (a preview over the chat, with Download and Share) instead of handing them to another app; HTML is shown in a WebView with scripts and network loads off unless the owner turns them on for that page (a page with scripts says so, with a Run scripts button).
 
 ## Chats named in a reply
 

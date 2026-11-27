@@ -5,6 +5,7 @@ import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.pdf.PdfRenderer
 import android.os.ParcelFileDescriptor
+import android.util.Log
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
@@ -78,6 +79,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
+import kotlin.math.sqrt
 
 /**
  * A Markdown, PDF or HTML file shown inside the app, like an artifact: full screen over the chat, with a back arrow
@@ -89,7 +91,8 @@ import java.io.File
 fun FilePreviewScreen(preview: FilePreview, onBack: () -> Unit, onDownload: () -> Unit, onShare: () -> Unit) {
     BackHandler(onBack = onBack)
     val colors = MaterialTheme.colorScheme
-    var scripts by remember(preview.file) { mutableStateOf(false) }
+    // Scripts turned on for a file stay on for it until the app closes, so reopening it works the same.
+    var scripts by remember(preview.file) { mutableStateOf(preview.file.path in scriptsOn) }
     var network by remember(preview.file) { mutableStateOf(false) }
     var menu by remember { mutableStateOf(false) }
     Surface(Modifier.fillMaxSize(), color = colors.surface) {
@@ -127,7 +130,7 @@ fun FilePreviewScreen(preview: FilePreview, onBack: () -> Unit, onDownload: () -
                             DropdownMenuItem(
                                 text = { Text("Run scripts") },
                                 trailingIcon = { Switch(checked = scripts, onCheckedChange = null) },
-                                onClick = { scripts = !scripts },
+                                onClick = { scripts = !scripts; if (scripts) scriptsOn += preview.file.path else scriptsOn -= preview.file.path },
                             )
                             DropdownMenuItem(
                                 text = { Text("Load from the network") },
@@ -149,7 +152,7 @@ fun FilePreviewScreen(preview: FilePreview, onBack: () -> Unit, onDownload: () -
                     else -> when (preview.kind) {
                         PreviewKind.Markdown -> MarkdownFile(local)
                         PreviewKind.Pdf -> PdfFile(local)
-                        PreviewKind.Html -> HtmlFile(local, scripts, network)
+                        PreviewKind.Html -> HtmlFile(local, scripts, network, onRunScripts = { scripts = true; scriptsOn += preview.file.path })
                     }
                 }
             }
@@ -175,11 +178,23 @@ private fun MarkdownFile(file: File) {
  */
 @Composable
 private fun PdfFile(file: File) {
-    val doc by produceState<PdfDoc?>(null, file) {
-        value = withContext(Dispatchers.IO) { runCatching { PdfDoc(file) }.getOrNull() }
+    val doc by produceState<PdfLoad>(PdfLoad.Loading, file) {
+        value = withContext(Dispatchers.IO) {
+            runCatching { PdfLoad.Ready(PdfDoc(file)) }
+                .getOrElse { Log.w("Krewd", "PDF preview could not open ${file.name}", it); PdfLoad.Failed }
+        }
     }
-    DisposableEffect(doc) { onDispose { doc?.close() } }
-    val pdf = doc ?: return Text("Could not read this PDF", color = MaterialTheme.colorScheme.onSurfaceVariant)
+    // Close the document this effect was started for. (Reading `doc` inside onDispose would read the newest value:
+    // when the loaded document replaced Loading, it closed the document just opened, and the next page crashed.)
+    DisposableEffect(doc) {
+        val opened = (doc as? PdfLoad.Ready)?.doc
+        onDispose { opened?.close() }
+    }
+    val pdf = when (val d = doc) {
+        PdfLoad.Loading -> return CircularProgressIndicator()
+        PdfLoad.Failed -> return Text("Could not read this PDF", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        is PdfLoad.Ready -> d.doc
+    }
     var scale by remember { mutableFloatStateOf(1f) }
     var offset by remember { mutableStateOf(Offset.Zero) }
     val list = rememberLazyListState()
@@ -250,36 +265,67 @@ private suspend fun PointerInputScope.pinchAndSideways(onChange: (zoom: Float, p
     }
 }
 
+private sealed interface PdfLoad {
+    data object Loading : PdfLoad
+    data object Failed : PdfLoad
+    class Ready(val doc: PdfDoc) : PdfLoad
+}
+
+/**
+ * An open PDF. Opened off the main thread, where every page's shape is read once, so the list never touches the
+ * renderer while composing; pages render one at a time (PdfRenderer allows one open page) and never after [close].
+ */
 private class PdfDoc(file: File) {
     private val fd = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
-    private val renderer = PdfRenderer(fd)
-    private val lock = Mutex()
-    private val ratios = HashMap<Int, Float>()
-    val count: Int = renderer.pageCount
-
-    fun ratio(index: Int): Float = ratios.getOrPut(index) {
-        synchronized(renderer) { renderer.openPage(index).use { it.width.toFloat() / it.height.coerceAtLeast(1) } }.coerceIn(0.2f, 5f)
+    private val renderer = try {
+        PdfRenderer(fd)
+    } catch (e: Exception) {
+        fd.close()
+        throw e
     }
+    private val lock = Mutex()
+    private var closed = false
+    val count: Int = renderer.pageCount
+    private val ratios = FloatArray(count) { index ->
+        runCatching { renderer.openPage(index).use { it.width.toFloat() / it.height.coerceAtLeast(1) } }
+            .getOrDefault(A4_RATIO).coerceIn(0.2f, 5f)
+    }
+
+    fun ratio(index: Int): Float = ratios.getOrElse(index) { A4_RATIO }
 
     suspend fun render(index: Int, width: Int): Bitmap? = lock.withLock {
         withContext(Dispatchers.IO) {
             runCatching {
                 synchronized(renderer) {
+                    if (closed) return@runCatching null
                     renderer.openPage(index).use { page ->
-                        val height = (width.toFloat() * page.height / page.width.coerceAtLeast(1)).toInt().coerceAtLeast(1)
-                        val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+                        // Kept under the size Android will draw (about 100 MB): a long page gets fewer pixels.
+                        val aspect = page.height.toFloat() / page.width.coerceAtLeast(1)
+                        val w = minOf(width.toFloat(), sqrt(MAX_PAGE_PIXELS / aspect.coerceAtLeast(0.01f))).toInt().coerceAtLeast(1)
+                        val h = (w * aspect).toInt().coerceIn(1, MAX_PAGE_SIDE)
+                        val bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
                         bitmap.eraseColor(android.graphics.Color.WHITE)
                         page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
                         bitmap
                     }
                 }
-            }.getOrNull()
+            }.onFailure { Log.w("Krewd", "PDF page ${index + 1} did not render", it) }.getOrNull()
         }
     }
 
     fun close() {
-        runCatching { synchronized(renderer) { renderer.close() } }
+        synchronized(renderer) {
+            if (closed) return
+            closed = true
+            runCatching { renderer.close() }
+        }
         runCatching { fd.close() }
+    }
+
+    private companion object {
+        const val A4_RATIO = 210f / 297f
+        const val MAX_PAGE_PIXELS = 16_000_000f
+        const val MAX_PAGE_SIDE = 16_384
     }
 }
 
@@ -289,49 +335,74 @@ private class PdfDoc(file: File) {
  */
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
-private fun HtmlFile(file: File, scripts: Boolean, network: Boolean) {
+private fun HtmlFile(file: File, scripts: Boolean, network: Boolean, onRunScripts: () -> Unit) {
     val context = LocalContext.current
     val html by produceState<String?>(null, file) { value = withContext(Dispatchers.IO) { file.readText() } }
     val page = html ?: return CircularProgressIndicator()
-    AndroidView(
-        modifier = Modifier.fillMaxSize(),
-        factory = { ctx ->
-            WebView(ctx).apply {
-                settings.allowFileAccess = false
-                settings.allowContentAccess = false
-                settings.builtInZoomControls = true
-                settings.displayZoomControls = false
-                settings.loadWithOverviewMode = true
-                settings.useWideViewPort = true
-                settings.setGeolocationEnabled(false)
-                settings.javaScriptCanOpenWindowsAutomatically = false
-                webViewClient = object : WebViewClient() {
-                    override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
-                        val url = request.url
-                        if (url.scheme == "http" || url.scheme == "https" || url.scheme == "mailto") {
-                            runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, url).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
+    val hasScripts = remember(page) { hasScripts(page) }
+    Column(Modifier.fillMaxSize()) {
+        // A page with scripts does nothing while they are off (buttons, menus, a calculator): say so, one tap to run.
+        if (hasScripts && !scripts) {
+            Row(
+                Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.secondaryContainer).padding(start = 16.dp, end = 8.dp, top = 6.dp, bottom = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "This page has scripts. They are off, so its buttons will not work.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSecondaryContainer,
+                    modifier = Modifier.weight(1f),
+                )
+                TextButton(onClick = onRunScripts) { Text("Run scripts") }
+            }
+        }
+        AndroidView(
+            modifier = Modifier.weight(1f).fillMaxWidth(),
+            factory = { ctx ->
+                WebView(ctx).apply {
+                    settings.allowFileAccess = false
+                    settings.allowContentAccess = false
+                    settings.builtInZoomControls = true
+                    settings.displayZoomControls = false
+                    settings.loadWithOverviewMode = true
+                    settings.useWideViewPort = true
+                    settings.setGeolocationEnabled(false)
+                    settings.javaScriptCanOpenWindowsAutomatically = false
+                    webViewClient = object : WebViewClient() {
+                        override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
+                            val url = request.url
+                            if (url.scheme == "http" || url.scheme == "https" || url.scheme == "mailto") {
+                                runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, url).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
+                            }
+                            return true
                         }
-                        return true
-                    }
 
-                    override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
-                        // Belt and braces for blockNetworkLoads: nothing outside the page itself loads while network is off.
-                        val scheme = request.url.scheme
-                        if (!view.tag.toString().toBoolean() && scheme != "data" && scheme != "about") return WebResourceResponse("text/plain", "utf-8", null)
-                        return null
+                        override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
+                            // Belt and braces for blockNetworkLoads: nothing outside the page itself loads while network is off.
+                            val scheme = request.url.scheme
+                            if (!view.tag.toString().toBoolean() && scheme != "data" && scheme != "about") return WebResourceResponse("text/plain", "utf-8", null)
+                            return null
+                        }
                     }
                 }
-            }
-        },
-        update = { view ->
-            val key = "$scripts|$network|${file.path}|${file.lastModified()}"
-            if (view.getTag(R.id.preview_key) == key) return@AndroidView
-            view.setTag(R.id.preview_key, key)
-            view.tag = network.toString()
-            view.settings.javaScriptEnabled = scripts
-            view.settings.blockNetworkLoads = !network
-            view.loadDataWithBaseURL("about:blank", page, "text/html", "utf-8", null)
-        },
-        onRelease = { it.destroy() },
-    )
+            },
+            update = { view ->
+                val key = "$scripts|$network|${file.path}|${file.lastModified()}"
+                if (view.getTag(R.id.preview_key) == key) return@AndroidView
+                view.setTag(R.id.preview_key, key)
+                view.tag = network.toString()
+                view.settings.javaScriptEnabled = scripts
+                view.settings.blockNetworkLoads = !network
+                view.loadDataWithBaseURL("about:blank", page, "text/html", "utf-8", null)
+            },
+            onRelease = { it.destroy() },
+        )
+    }
 }
+
+/** Files whose scripts the owner turned on, by path, for as long as the app runs. */
+private val scriptsOn = mutableSetOf<String>()
+
+/** Whether an HTML page has scripts: a script element, an inline event handler or a javascript: link. */
+internal fun hasScripts(html: String): Boolean =
+    Regex("""<script\b|\son[a-z]+\s*=|javascript:""", RegexOption.IGNORE_CASE).containsMatchIn(html)

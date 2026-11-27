@@ -5,9 +5,12 @@ import app.krewd.data.NeedItem
 import app.krewd.data.PreviewKind
 import app.krewd.ui.chatLinkId
 import app.krewd.ui.dueText
+import app.krewd.ui.hasScripts
 import app.krewd.ui.linkChats
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.time.Instant
 
@@ -67,5 +70,13 @@ class ChatLinksTest {
         assertEquals(PreviewKind.Pdf, PreviewKind.of("x", "application/pdf"))
         assertEquals(PreviewKind.Html, PreviewKind.of("page.htm", "text/plain"))
         assertNull(PreviewKind.of("app.apk", "application/vnd.android.package-archive"))
+    }
+
+    @Test
+    fun htmlScriptsAreNoticed() {
+        assertTrue(hasScripts("<body><SCRIPT>go()</SCRIPT></body>"))
+        assertTrue(hasScripts("<button onclick=\"go()\">1</button>"))
+        assertTrue(hasScripts("<a href=\"javascript:go()\">x</a>"))
+        assertFalse(hasScripts("<p>Plain page about scripts and the description of a button.</p>"))
     }
 }

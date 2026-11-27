@@ -67,14 +67,15 @@ import io.github.zainbits.meniscus.MeniscusNavBar
 import io.github.zainbits.meniscus.MeniscusNavBarDefaults
 import io.github.zainbits.meniscus.MeniscusNavItem
 
-private enum class Tab(val title: String, val label: String, val icon: Int) {
-    Tasks("Crew", "Tasks", R.drawable.ic_chat_24),
-    Routines("Routines", "Routines", R.drawable.ic_schedule_24),
-    Browser("Browser", "Browser", R.drawable.ic_web_24),
-    Settings("Settings", "Settings", R.drawable.ic_tune_24),
+// Phosphor icons (MIT): outlined on the bar, filled in the selected pill.
+private enum class Tab(val title: String, val label: String, val icon: Int, val selectedIcon: Int) {
+    Tasks("Crew", "Tasks", R.drawable.ic_nav_tasks_24, R.drawable.ic_nav_tasks_fill_24),
+    Routines("Routines", "Routines", R.drawable.ic_nav_routines_24, R.drawable.ic_nav_routines_fill_24),
+    Browser("Browser", "Browser", R.drawable.ic_nav_browser_24, R.drawable.ic_nav_browser_fill_24),
+    Settings("Settings", "Settings", R.drawable.ic_nav_settings_24, R.drawable.ic_nav_settings_fill_24),
 }
 
-private val navItems = Tab.entries.map { MeniscusNavItem(it.label, it.icon) }
+private val navItems = Tab.entries.map { MeniscusNavItem(it.label, it.icon, it.selectedIcon) }
 
 @Composable
 fun KrewdApp(viewModel: KrewdViewModel) {
@@ -121,7 +122,9 @@ fun KrewdApp(viewModel: KrewdViewModel) {
     // Liquid glass: the Settings switch, off by itself in battery saver or heat (then Settings shows it off).
     val glassThrottled = rememberGlassThrottled()
     val darkGlass = MaterialTheme.colorScheme.surface.luminance() < 0.5f
-    val glass = KrewdGlass(on = state.glassEnabled && !glassThrottled, throttled = glassThrottled, clarity = state.glassClarity, dark = darkGlass)
+    // The glass takes the wallpaper's colour (Monet): fully tinted glass is the theme's surface container, not black.
+    val glassTint = if (darkGlass) MaterialTheme.colorScheme.surfaceContainer else MaterialTheme.colorScheme.surfaceContainerLow
+    val glass = KrewdGlass(on = state.glassEnabled && !glassThrottled, throttled = glassThrottled, clarity = state.glassClarity, dark = darkGlass, tint = glassTint)
     // The tab screens are what the nav bar's glass (Meniscus) shows through.
     val tabsBackdrop = rememberGlassBackdrop()
     val homeAsk = rememberHomeAsk()
@@ -140,6 +143,7 @@ fun KrewdApp(viewModel: KrewdViewModel) {
         clarity = state.glassClarity,
         dark = darkGlass,
         mode = GlassMode.Full,
+        tint = glassTint,
     ) {
     Box(Modifier.fillMaxSize()) {
     AnimatedContent(
