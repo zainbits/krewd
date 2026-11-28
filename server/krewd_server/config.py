@@ -64,7 +64,7 @@ class Engine:
 class VoiceSettings:
     """Voice input (see voice.py). Without a transcription URL, voice input is off and the app says why."""
 
-    stt_url: str = ""  # the Model Warehouse API base, e.g. http://127.0.0.1:8780/v1 (POST {stt_url}/audio/live)
+    stt_url: str = ""  # the Model Warehouse API base, e.g. http://127.0.0.1:8780/v1 (WebSocket {stt_url}/realtime)
     live_model: str = ""  # its live speech-to-text model with speaker labels, e.g. nemotron-live
     reference_file: Path = CONFIG_DIR / "voice-reference.wav"  # the owner's 15 s voice reference (My voice), mode 600
     old_voiceprint_file: Path = CONFIG_DIR / "voiceprint.json"  # 0.33's WeSpeaker voiceprint, deleted on setup

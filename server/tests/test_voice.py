@@ -1,7 +1,8 @@
 """Voice input: audio about 250 ms at a time -> segments (one speaker turn each) labelled Me or Others, that grow, then
 are final; messages sent from voice mode carry the voice rules once.
 
-The fake audio is a run of constant levels, and the fake live API turns each level into one speaker turn (levels 10,
+The fake audio is a run of constant levels, and the fake live API (an OpenAI Realtime transcription socket) turns each
+level into one speaker turn (levels 10,
 20... are the owner's, whose reference the API is sent; 31 is a voice it cannot place); a turn is final once another
 one starts, or on flush / end.
 """
@@ -9,12 +10,15 @@ one starts, or on flush / end.
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
 import uuid
 import wave
 
 import httpx
 import numpy as np
 import pytest
+from websockets.exceptions import ConnectionClosedOK
 
 from krewd_server import voice as voice_mod
 from krewd_server import voice_audio as va
@@ -38,60 +42,104 @@ def piece(*parts: int | tuple[int, float]) -> bytes:
     return np.concatenate(out).tobytes()
 
 
+class FakeSocket:
+    """One live session of a fake OpenAI Realtime transcription API: each level of the audio is one speaker turn;
+    a turn is final once another one starts, or on commit."""
+
+    def __init__(self, owner: FakeLive) -> None:
+        self.owner = owner
+        self.out: asyncio.Queue = asyncio.Queue()
+        self.runs: list[int] = []
+        self.final = 0
+        self.sent: dict[int, tuple] = {}
+        self.appends = 0
+        self.closed = False
+        self.out.put_nowait(json.dumps({"type": "session.created", "session": {}}))
+
+    def _emit(self, **event) -> None:
+        self.out.put_nowait(json.dumps(event))
+
+    async def send(self, text: str) -> None:
+        if self.closed:
+            raise ConnectionClosedOK(None, None)
+        event = json.loads(text)
+        kind = event["type"]
+        if kind == "session.update":
+            session = event["session"]
+            self.owner.opened.append({"reference": "speaker_reference" in session,
+                                      "model": session["audio"]["input"]["transcription"]["model"] == "fake-live",
+                                      "rate": session["audio"]["input"]["format"]["rate"]})
+            self._emit(type="session.updated", session=session)
+        elif kind == "input_audio_buffer.append":
+            pcm = np.frombuffer(base64.b64decode(event["audio"]), dtype="<i2")
+            if not len(pcm):
+                return  # the empty append that starts the live model
+            if self.owner.end_after and self.appends >= self.owner.end_after:
+                # The session ended after the last request (the GPU went to another request): its turns end, and
+                # this audio is not taken.
+                self.final = len(self.runs)
+                self._segments()
+                self._emit(type="warehouse.session", status="ended", heard_seconds=1.0)
+                await self.close()
+                raise ConnectionClosedOK(None, None)
+            for level in [round(int(x) / 1000) for x in pcm[:: 1600]]:
+                if not self.runs or self.runs[-1] != level:
+                    self.runs.append(level)
+            self.final = max(self.final, len(self.runs) - 1)
+            self.appends += 1
+            self._segments()
+        elif kind == "input_audio_buffer.commit":
+            self.final = len(self.runs)
+            self._segments()
+            self._emit(type="input_audio_buffer.committed", item_id="item_x_0")
+
+    def _segments(self) -> None:
+        for i, level in enumerate(self.runs):
+            speaker = None if level == 31 else "reference" if level % 10 == 0 else "other"
+            final = i < self.final
+            text = WORDS.get(level, "")
+            state = (final, speaker, text if final else " ".join(text.split()[:2]))
+            if self.sent.get(i) == state or (self.sent.get(i) or (False,))[0]:
+                continue
+            self.sent[i] = state
+            item = f"item_fake_{i}"
+            if final:
+                self._emit(type="conversation.item.input_audio_transcription.completed", item_id=item,
+                           content_index=0, transcript=state[2], speaker=speaker)
+            else:
+                self._emit(type="conversation.item.input_audio_transcription.delta", item_id=item, content_index=0,
+                           delta=state[2], text=state[2], speaker=speaker)
+
+    async def recv(self) -> str:
+        item = await self.out.get()
+        if item is None:
+            raise ConnectionClosedOK(None, None)
+        return item
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self) -> str:
+        item = await self.out.get()
+        if item is None:
+            raise StopAsyncIteration
+        return item
+
+    async def close(self) -> None:
+        if not self.closed:
+            self.closed = True
+            self.out.put_nowait(None)
+
+
 class FakeLive:
     def __init__(self) -> None:
-        self.sessions: dict[str, dict] = {}
         self.opened: list[dict] = []
-        self.end_after: int | None = None  # posts until the API ends a session by itself (quiet, GPU wanted)
+        self.urls: list[str] = []
+        self.end_after: int | None = None  # appends until the API ends a session by itself (quiet, GPU wanted)
 
-    def __call__(self, request: httpx.Request) -> httpx.Response:
-        path = request.url.path
-        if path == "/v1/audio/live" and request.method == "POST":
-            body = request.read()
-            sid = uuid.uuid4().hex
-            self.sessions[sid] = {"runs": [], "final": 0, "posts": 0, "status": "live"}
-            self.opened.append({"reference": b"speaker_reference" in body, "model": b"fake-live" in body})
-            return httpx.Response(201, json={"id": sid, "status": "queued", "segments": []})
-        parts = path.split("/")
-        sid = parts[4] if len(parts) > 4 else ""
-        s = self.sessions.get(sid)
-        if request.method == "DELETE":
-            if s:
-                s["status"] = "ended"
-            return httpx.Response(200, json={})
-        if s is None:
-            return httpx.Response(404, json={"detail": "no such live session"})
-        if request.method == "GET":
-            return httpx.Response(200, json=self.state(s, int(request.url.params.get("after", 0))))
-        if s["status"] == "ended":
-            return httpx.Response(404, json={"detail": "ended"})
-        pcm = np.frombuffer(request.read(), dtype="<i2")
-        for level in [round(int(x) / 1000) for x in pcm[:: 1600]]:
-            if not s["runs"] or s["runs"][-1] != level:
-                s["runs"].append(level)
-        s["final"] = max(s["final"], len(s["runs"]) - 1)
-        q = request.url.params
-        if q.get("flush") == "true" or q.get("end") == "true":
-            s["final"] = len(s["runs"])
-        if q.get("end") == "true":
-            s["status"] = "ended"
-        s["posts"] += 1
-        if self.end_after and s["posts"] >= self.end_after:
-            s["status"] = "ended"  # the next post gets 404, its finals stay readable (GET)
-        return httpx.Response(200, json=self.state(s, int(q.get("after", 0))))
-
-    @staticmethod
-    def state(s: dict, after: int) -> dict:
-        segs = []
-        for i, level in enumerate(s["runs"]):
-            if i < after:
-                continue
-            speaker = None if level == 31 else "reference" if level % 10 == 0 else "other"
-            final = i < s["final"]
-            text = WORDS.get(level, "")
-            segs.append({"id": i, "start": i, "end": i + 1 if final else None, "speaker": speaker,
-                         "text": text if final else " ".join(text.split()[:2]), "final": final})
-        return {"status": s["status"], "heard_seconds": 1.0, "segments": segs}
+    async def connect(self, url: str, **kwargs) -> FakeSocket:
+        self.urls.append(url)
+        return FakeSocket(self)
 
 
 @pytest.fixture
@@ -108,7 +156,7 @@ async def voice(hub, tmp_path):  # noqa: F811
 @pytest.fixture
 def live(voice):
     fake = FakeLive()
-    voice.http = httpx.AsyncClient(transport=httpx.MockTransport(fake))
+    voice.ws_connect = fake.connect
     return fake
 
 
@@ -139,7 +187,8 @@ def _texts(result):
 async def test_live_words_grow_then_turn_final_by_speaker(hub, voice, live):  # noqa: F811
     sid = await chat(hub)
     s = await voice.start_session(sid)
-    assert s["enrolled"] is True and live.opened == [{"reference": True, "model": True}]  # opened at once: the model loads
+    assert s["enrolled"] is True and live.opened == [{"reference": True, "model": True, "rate": 16000}]  # opened at once
+    assert live.urls == ["ws://stt.test/v1/realtime?intent=transcription"]
     vid = s["voice_id"]
     WORDS.update({3: "Tell me about your last project.", 10: "I built a voice assistant.", 31: "Right."})
     r = await voice.live(sid, vid, 0, piece(3))
@@ -160,7 +209,7 @@ async def test_a_new_api_session_carries_on_the_numbering(hub, voice, live):  # 
     live.end_after = 1  # the API ends its session after one post (it gave the GPU to another request)
     r = await voice.live(sid, vid, 0, piece(3))
     assert _texts(r) == [(0, "Others", "First question.", False)]
-    r = await voice.live(sid, vid, 1, piece(4))  # 404: the old session's words are read, then a new one opens
+    r = await voice.live(sid, vid, 1, piece(4))  # the old session ended with its words final; a new one opens
     assert len(live.opened) == 2
     ids = [x[0] for x in _texts(r)]
     assert ids == sorted(set(ids)) and ids[-1] >= 1
@@ -174,7 +223,7 @@ async def test_without_my_voice_everyone_is_others(hub, voice, live):  # noqa: F
     WORDS[10] = "Me talking."
     r = await voice.live(sid, vid, 0, piece(10), flush=True)
     assert _texts(r) == [(0, "Others", "Me talking.", True)]
-    assert live.opened == [{"reference": False, "model": True}]
+    assert live.opened == [{"reference": False, "model": True, "rate": 16000}]
 
 
 async def test_api_takes_live_audio_and_voice_messages(hub, voice, live):  # noqa: F811

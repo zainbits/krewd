@@ -1,7 +1,8 @@
 """Voice input: the phone listens in a chat, and what is said comes back as text labelled Me or Others, while it is said.
 
 The phone sends its microphone audio here about every 250 ms (16 kHz mono PCM, numbered). Krewd relays it to a live
-speech-to-text session of the transcription API (the Model Warehouse's `nemotron-live` on Bottle: Nemotron ASR
+speech-to-text session of the transcription API (an OpenAI Realtime transcription WebSocket; the Model Warehouse's
+`nemotron-live` on Bottle: Nemotron ASR
 Streaming with Nemotron 3 Diarization, which hears the owner's voice reference first), and answers with the words heard
 so far, by segment: one speaker turn each, its text growing while it is heard, then final. Words of the reference's
 voice are "Me", all others "Others". The phone writes them into the chat's composer as `Me: ...` / `Others: ...` lines;
@@ -16,6 +17,8 @@ is deleted. Voice sessions live in memory; after a server restart the phone star
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
 import logging
 import os
 import sys
@@ -27,6 +30,8 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 import numpy as np
+from websockets.asyncio.client import connect as ws_connect
+from websockets.exceptions import ConnectionClosed, WebSocketException
 
 from . import voice_audio as va
 from .config import VoiceSettings
@@ -78,17 +83,18 @@ class VoiceGone(VoiceError):
 class LiveRelay:
     """A voice session's link to the transcription API's live sessions (see `Voice.live`).
 
-    The API ends its session when the phone goes quiet or another request needs the GPU; the next audio then
-    opens a new one. Segment ids stay rising across them (`base`), and final segments are kept until the phone
-    has them (it asks with `after`, the first id it does not have yet)."""
+    Each API session is one OpenAI Realtime transcription WebSocket (`{stt_url}/realtime?intent=transcription`). The
+    API ends its session (closes the socket) when the phone goes quiet or another request needs the GPU; the next
+    audio then opens a new one. Segment ids stay rising across them (`base`), and final segments are kept until the
+    phone has them (it asks with `after`, the first id it does not have yet)."""
 
-    wid: str | None = None  # the API's live session
+    ws: Any = None  # the API's live session (an open WebSocket)
+    reader: asyncio.Task | None = None
     base: int = 0  # the id this API session's segment 0 has here
     next_id: int = 0
-    local_next: int = 0  # first segment id of the API session not final here yet
-    wseq: int = 0
     finals: dict[int, dict[str, Any]] = field(default_factory=dict)
-    current: list[dict[str, Any]] = field(default_factory=list)  # the segments still being heard
+    current: dict[int, dict[str, Any]] = field(default_factory=dict)  # the segments still being heard
+    commits: asyncio.Queue = field(default_factory=asyncio.Queue)  # the API's answers to commit (True), or False: gone
     status: str = "starting"
     heard: float = 0.0
     last_seq: int = -1
@@ -110,10 +116,10 @@ class Voice:
         self.hub = hub
         self.settings = settings
         self.sessions: dict[uuid.UUID, VoiceSession] = {}
-        self.http: httpx.AsyncClient | None = None
         self.me: bytes | None = None  # the owner's voice reference, a WAV file
         self.me_at: str | None = None
         self.sweeper: asyncio.Task | None = None
+        self.ws_connect = ws_connect  # opens the API's live sessions (tests put a fake here)
         self._load_reference()
 
     # lifecycle
@@ -126,14 +132,8 @@ class Voice:
         for t in tasks:
             t.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
-        if self.http:
-            await self.http.aclose()
-
-    def _client(self) -> httpx.AsyncClient:
-        if self.http is None:  # one pool for the transcription API, kept alive
-            self.http = httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=5.0),
-                                          limits=httpx.Limits(max_keepalive_connections=4))
-        return self.http
+        for vs in list(self.sessions.values()):
+            await self._live_close_ws(vs.live)
 
     async def _sweep(self) -> None:
         while True:
@@ -257,7 +257,7 @@ class Voice:
             for key in [k for k in lr.finals if k < after]:
                 del lr.finals[key]  # the phone has them
             segments = [lr.finals[k] for k in sorted(lr.finals)]
-            segments += [seg for seg in lr.current if seg["id"] >= after and seg["id"] not in lr.finals]
+            segments += [dict(seg) for key, seg in sorted(lr.current.items()) if key >= after and key not in lr.finals]
             for seg in segments:
                 if seg["final"] and seg["speaker"] is None:
                     seg["speaker"] = vs.last  # the speaker model could not place it: the last speaker's
@@ -269,101 +269,146 @@ class Voice:
             return result
 
     async def _live_send(self, lr: LiveRelay, pcm: bytes, flush: bool, end: bool) -> None:
-        s = self.settings
         for _ in range(3):
-            if lr.wid is None:
+            if lr.ws is None:
                 if not pcm and end:
                     lr.status = "ended"
                     return
                 await self._live_open(lr)
-            params = {"seq": lr.wseq, "after": lr.local_next}
-            if flush:
-                params["flush"] = "true"
-            if end:
-                params["end"] = "true"
+            ws = lr.ws
             try:
-                r = await self._client().post(
-                    f"{s.stt_url}/audio/live/{lr.wid}/audio", params=params, content=pcm,
-                    headers={"Content-Type": "application/octet-stream"},
-                    timeout=httpx.Timeout(LIVE_TIMEOUT, connect=5.0),
-                )
-            except httpx.HTTPError as exc:
-                raise VoiceError(f"live transcription unreachable: {type(exc).__name__}") from None
-            lr.wseq += 1
-            if r.status_code == 404:  # that session ended (quiet, or the GPU went to another request): a new one
-                await self._live_collect(lr)
-                lr.wid = None
+                if pcm:
+                    await ws.send(json.dumps({"type": "input_audio_buffer.append",
+                                              "audio": base64.b64encode(pcm).decode()}))
+                if flush:
+                    while not lr.commits.empty():
+                        lr.commits.get_nowait()
+                    await ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
+                    try:
+                        await asyncio.wait_for(lr.commits.get(), LIVE_TIMEOUT)
+                    except TimeoutError:
+                        raise VoiceError("live transcription did not finish the last words in time") from None
+                if end:
+                    await self._live_close_ws(lr)
+                    lr.status = "ended"
+            except ConnectionClosed:
+                lr.ws = None  # the API ended that session (quiet, or the GPU went to another request): a new one
                 continue
-            if r.status_code != 200:
-                log.warning("live transcription answered HTTP %s: %s", r.status_code, r.text[:200])
-                raise VoiceError(f"live transcription failed (HTTP {r.status_code})")
-            self._live_take(lr, r.json())
+            for _ in range(3):
+                await asyncio.sleep(0)  # let the reader take what has already arrived
             return
         raise VoiceError("live transcription keeps ending its sessions")
 
+    def _ws_url(self) -> str:
+        base = self.settings.stt_url
+        if base.startswith("https://"):
+            base = "wss://" + base[len("https://"):]
+        elif base.startswith("http://"):
+            base = "ws://" + base[len("http://"):]
+        return f"{base}/realtime?intent=transcription"
+
     async def _live_open(self, lr: LiveRelay) -> None:
+        """Open an API session: an OpenAI Realtime transcription session at 16 kHz with the owner's voice reference.
+
+        An empty append starts the live model at once (it queues and loads while the owner starts talking)."""
         s = self.settings
-        files = {"speaker_reference": ("me.wav", self.me, "audio/wav")} if self.me is not None else None
+        session: dict[str, Any] = {
+            "type": "transcription",
+            "audio": {"input": {"format": {"type": "audio/pcm", "rate": va.RATE},
+                                "transcription": {"model": s.live_model, "language": "en"}}},
+        }
+        if self.me is not None:
+            session["speaker_reference"] = base64.b64encode(self.me).decode()
         try:
-            r = await self._client().post(f"{s.stt_url}/audio/live", data={"model": s.live_model}, files=files,
-                                          timeout=httpx.Timeout(30.0, connect=5.0))
-        except httpx.HTTPError as exc:
+            ws = await self.ws_connect(self._ws_url(), open_timeout=10, ping_interval=20, ping_timeout=20,
+                                       max_size=4 * 1024 * 1024)
+        except (OSError, TimeoutError, WebSocketException) as exc:
             raise VoiceError(f"live transcription unreachable: {type(exc).__name__}") from None
-        if r.status_code != 201:
-            log.warning("live transcription answered HTTP %s on open: %s", r.status_code, r.text[:200])
-            raise VoiceError(f"live transcription could not start (HTTP {r.status_code})")
-        body = r.json()
-        lr.wid, lr.base, lr.local_next, lr.wseq, lr.current = body["id"], lr.next_id, 0, 0, []
-        lr.status = body.get("status") or "queued"
-
-    async def _live_collect(self, lr: LiveRelay) -> None:
-        """The final words of an API session that has just ended, if it still has them."""
         try:
-            r = await self._client().get(f"{self.settings.stt_url}/audio/live/{lr.wid}",
-                                         params={"after": lr.local_next})
-            if r.status_code == 200:
-                self._live_take(lr, r.json())
-        except httpx.HTTPError:
-            pass
-        lr.current = []
+            await ws.send(json.dumps({"type": "session.update", "session": session}))
+            while True:
+                event = json.loads(await asyncio.wait_for(ws.recv(), 10))
+                if event.get("type") == "session.updated":
+                    break
+                if event.get("type") == "error":
+                    message = (event.get("error") or {}).get("message") or "refused"
+                    log.warning("live transcription refused the session: %s", message[:200])
+                    raise VoiceError(f"live transcription could not start: {message[:120]}")
+            await ws.send(json.dumps({"type": "input_audio_buffer.append", "audio": ""}))
+        except VoiceError:
+            await ws.close()
+            raise
+        except (TimeoutError, ConnectionClosed, ValueError) as exc:
+            await ws.close()
+            raise VoiceError(f"live transcription could not start: {type(exc).__name__}") from None
+        lr.ws, lr.base, lr.current, lr.status = ws, lr.next_id, {}, "queued"
+        lr.commits = asyncio.Queue()
+        lr.reader = asyncio.get_running_loop().create_task(self._live_read(lr, ws, lr.base))
 
-    def _live_take(self, lr: LiveRelay, state: dict[str, Any]) -> None:
-        current = []
-        for seg in state.get("segments") or []:
+    async def _live_read(self, lr: LiveRelay, ws: Any, base: int) -> None:
+        """Take the API's events: words as they are heard (delta), final turns (completed), the session's state."""
+        try:
+            async for raw in ws:
+                try:
+                    event = json.loads(raw)
+                except ValueError:
+                    continue
+                kind = event.get("type")
+                if kind in ("conversation.item.input_audio_transcription.delta",
+                            "conversation.item.input_audio_transcription.completed"):
+                    self._live_take(lr, event, base, final=kind.endswith(".completed"))
+                elif kind == "warehouse.session":
+                    lr.status = str(event.get("status") or lr.status)
+                    lr.heard = float(event.get("heard_seconds") or lr.heard)
+                elif kind == "input_audio_buffer.committed":
+                    lr.commits.put_nowait(True)
+                elif kind == "error":
+                    log.warning("live transcription error: %s", str((event.get("error") or {}).get("message"))[:200])
+        except ConnectionClosed:
+            pass
+        finally:
+            if lr.ws is ws:
+                lr.ws = None
+                if lr.status not in ("ended", "failed"):
+                    lr.status = "ended"
+            if lr.ws is None:
+                lr.current = {}
+            lr.commits.put_nowait(False)
+
+    def _live_take(self, lr: LiveRelay, event: dict[str, Any], base: int, final: bool) -> None:
+        """One transcription event of the API session whose segment 0 is `base` here (an ended session's last
+        events can still arrive after the next one opened)."""
+        try:
+            key = base + int(str(event["item_id"]).rsplit("_", 1)[1])
+        except (KeyError, IndexError, ValueError):
+            return
+        raw = event.get("transcript") if final else event.get("text")
+        if raw is None:  # a stock Realtime server: only appended deltas
+            raw = (lr.current.get(key, {}).get("text") or "") + str(event.get("delta") or "")
+        text = " ".join(str(raw).split())
+        speaker = LIVE_SPEAKERS.get(event.get("speaker")) if self.me is not None else "others"
+        out = {"id": key, "speaker": speaker, "label": LABELS.get(speaker) if speaker else None,
+               "text": text if len(text) <= TEXT_MAX else text[: TEXT_MAX - 1] + "…", "final": final}
+        lr.next_id = max(lr.next_id, key + 1)
+        if final:
+            lr.finals[key] = out
+            lr.current.pop(key, None)
+        elif key not in lr.finals:
+            lr.current[key] = out
+
+    async def _live_close_ws(self, lr: LiveRelay) -> None:
+        ws, lr.ws = lr.ws, None
+        if ws is not None:
             try:
-                key = lr.base + int(seg["id"])
-                speaker = LIVE_SPEAKERS.get(seg.get("speaker")) if self.me is not None else "others"
-                text = " ".join(str(seg.get("text") or "").split())
-                final = bool(seg.get("final"))
-            except (KeyError, TypeError, ValueError):
-                continue
-            out = {"id": key, "speaker": speaker, "label": LABELS.get(speaker) if speaker else None,
-                   "text": text if len(text) <= TEXT_MAX else text[: TEXT_MAX - 1] + "…", "final": final}
-            lr.next_id = max(lr.next_id, key + 1)
-            if final:
-                lr.finals[key] = out
-                lr.local_next = max(lr.local_next, int(seg["id"]) + 1)
-            else:
-                current.append(out)
-        lr.current = current
-        lr.status = str(state.get("status") or lr.status)
-        lr.heard = float(state.get("heard_seconds") or lr.heard)
-        if lr.status in ("ended", "failed"):
-            lr.wid = None
+                await ws.close()
+            except (OSError, ConnectionClosed):
+                pass
 
     def _live_close(self, vs: VoiceSession) -> None:
         lr = vs.live
-        if lr.wid is None:
+        if lr.ws is None:
             return
-        wid, lr.wid = lr.wid, None
-
-        async def go() -> None:
-            try:
-                await self._client().delete(f"{self.settings.stt_url}/audio/live/{wid}")
-            except httpx.HTTPError:
-                pass
-
-        asyncio.get_running_loop().create_task(go())
+        asyncio.get_running_loop().create_task(self._live_close_ws(lr))
 
 
 def reference_clip(audio: np.ndarray) -> tuple[np.ndarray | None, float]:
@@ -417,8 +462,11 @@ def check(settings: VoiceSettings) -> int:
                 print(f"WARN  voice transcription: {settings.live_model} is listed but not ready")
             elif not (model.get("live") or {}).get("speaker_labels"):
                 print(f"WARN  voice transcription: {settings.live_model} has no live speaker labels (Me/Others)")
+            elif not (model.get("live") or {}).get("realtime"):
+                print(f"WARN  voice transcription: {settings.stt_url} has no OpenAI Realtime socket for "
+                      f"{settings.live_model} (/v1/realtime); update the Model Warehouse")
             else:
-                print(f"OK    voice transcription: {settings.live_model}, live with speaker labels")
+                print(f"OK    voice transcription: {settings.live_model}, live with speaker labels (Realtime socket)")
         except (httpx.HTTPError, ValueError):
             print(f"WARN  voice transcription API not answering at {settings.stt_url}")
     print(f"INFO  voice reference (My voice): {'set up' if settings.reference_file.is_file() else 'not set up'}")
