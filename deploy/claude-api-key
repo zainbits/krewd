@@ -1,0 +1,42 @@
+#!/usr/bin/env -S python3 -I
+"""Claude Code's apiKeyHelper for the owner's own `claude`: print a Krewd profile's gateway key.
+
+Krewd points ~/.claude/settings.json at the profile its Claude agent runs on (`apiKeyHelper` runs this with the
+profile's key file and key name), so the key stays in that file and never lands in settings.json. Read like Krewd
+reads it (`Profile.read_key`): the file's NAME=value line, else the environment.
+
+Usage: claude-api-key KEY_FILE KEY_NAME
+"""
+
+import os
+import sys
+
+
+def main() -> int:
+    if len(sys.argv) != 3:
+        print("usage: claude-api-key KEY_FILE KEY_NAME", file=sys.stderr)
+        return 2
+    path, name = sys.argv[1], sys.argv[2]
+    value = None
+    try:
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("export "):
+                    line = line[len("export "):].lstrip()
+                key, sep, rest = line.partition("=")
+                if sep and key.strip() == name:
+                    value = rest.strip().strip("'\"") or None
+                    break
+    except OSError:
+        pass
+    value = value or os.environ.get(name)
+    if not value:
+        print(f"claude-api-key: no {name} in {path} or the environment (Krewd: Settings > Profiles)", file=sys.stderr)
+        return 1
+    sys.stdout.write(value)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

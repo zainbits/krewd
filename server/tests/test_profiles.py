@@ -18,7 +18,10 @@ from krewd_server import db
 from krewd_server.api import create_app
 from krewd_server.config import Engine, Profile, Settings, load_agent_profiles, load_engines, load_env_file, load_profiles
 from krewd_server.hub import Hub
-from krewd_server.profiles import Gateways, ProfileError, codex_catalog, default_model
+import subprocess
+
+from krewd_server.profiles import (KEY_HELPER, Gateways, ProfileError, check, claude_settings, codex_catalog,
+                                   default_model, key_helper_command, write_claude_settings)
 
 load_env_file()
 DATABASE_URL = os.environ.get("KREWD_TEST_DATABASE_URL")
@@ -277,6 +280,73 @@ async def test_missing_key_or_wrong_key_is_a_clear_error(tmp_path, gateway, fake
         await gateways.engine_env(engines["cx"], profile)
 
 
+# the owner's own claude follows the Claude agent (~/.claude/settings.json)
+
+
+def test_claude_settings_take_the_profile_and_keep_the_owners_own():
+    owner = {"model": "opus[1m]", "env": {"FOO": "1", "ANTHROPIC_API_KEY": "old"}, "theme": "dark"}
+    on = claude_settings(owner, {"ANTHROPIC_BASE_URL": "http://gw", "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY": "1"},
+                         "helper")
+    assert on == {"model": "opus[1m]", "theme": "dark", "apiKeyHelper": "helper",
+                  "env": {"FOO": "1", "ANTHROPIC_BASE_URL": "http://gw", "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY": "1"}}
+    assert owner["env"]["ANTHROPIC_API_KEY"] == "old"  # the input is not changed
+    # back to the sign-in account: Krewd's part goes, the owner's stays; an env left empty goes too
+    ours = key_helper_command(Profile(id="gw", name="GW", key="GW_KEY", key_file=Path("/k/keys.env")))
+    assert claude_settings({"env": {"ANTHROPIC_BASE_URL": "x"}, "apiKeyHelper": ours}, None, None) == {}
+    assert claude_settings({"apiKeyHelper": "my-own-helper"}, None, None) == {"apiKeyHelper": "my-own-helper"}
+    with pytest.raises(ProfileError):
+        claude_settings({"env": "nonsense"}, None, None)
+
+
+def test_claude_settings_are_written_only_when_they_change(tmp_path):
+    real = write(tmp_path / "real.json", json.dumps({"model": "opus", "permissions": {"defaultMode": "auto"}}))
+    link = tmp_path / "settings.json"
+    link.symlink_to(real)
+    env = {"ANTHROPIC_BASE_URL": "http://gw"}
+    assert write_claude_settings(link, env, "helper") is True
+    assert link.is_symlink() and real.stat().st_mode & 0o777 == 0o600
+    assert json.loads(real.read_text()) == {"model": "opus", "permissions": {"defaultMode": "auto"},
+                                            "env": env, "apiKeyHelper": "helper"}
+    assert write_claude_settings(link, env, "helper") is False
+    assert write_claude_settings(tmp_path / "new.json", None, None) is False and not (tmp_path / "new.json").exists()
+    broken = write(tmp_path / "broken.json", "{not json")
+    with pytest.raises(ProfileError):
+        write_claude_settings(broken, env, "helper")
+    assert broken.read_text() == "{not json"
+
+
+def test_the_key_helper_reads_the_key_like_krewd(tmp_path):
+    keys = write(tmp_path / "keys.env", "# keys\nexport OTHER=x\nexport GW_KEY='secret-1'\n")
+    profile = Profile(id="gw", name="GW", key="GW_KEY", key_file=keys)
+    run = subprocess.run(key_helper_command(profile), shell=True, capture_output=True, text=True)
+    assert run.returncode == 0 and run.stdout == "secret-1"
+    env = {k: v for k, v in os.environ.items() if k != "GW_MISSING"}
+    missing = subprocess.run([str(KEY_HELPER), str(keys), "GW_MISSING"], capture_output=True, text=True, env=env)
+    assert missing.returncode == 1 and missing.stdout == ""
+    from_env = subprocess.run([str(KEY_HELPER), str(tmp_path / "none"), "GW_MISSING"], capture_output=True, text=True,
+                              env=env | {"GW_MISSING": "from-env"})
+    assert from_env.stdout == "from-env"
+
+
+async def test_claude_cli_follows_the_claude_agent_only(tmp_path, gateway, fake_codex):
+    engines, profile = setup(tmp_path, gateway, fake_codex)
+    gw = Gateways(port=0)
+    what, env, helper = await gw.claude_cli(engines, {"gw": profile}, {"fake": "gw"})
+    assert what == "Gateway" and env["ANTHROPIC_BASE_URL"] == gateway and helper == key_helper_command(profile)
+    assert KEY not in json.dumps(env)  # the key itself never goes in settings.json
+    assert await gw.claude_cli(engines, {"gw": profile}, {"cx": "gw"}) == ("its sign-in account", None, None)
+    assert await gw.claude_cli({"cx": engines["cx"]}, {"gw": profile}, {}) is None
+    two = engines | {"fake2": Engine(id="fake2", name="Fake 2", command=["x"], gateway="claude")}
+    with pytest.raises(ProfileError):
+        await gw.claude_cli(two, {"gw": profile}, {"fake": "gw"})
+    settings = tmp_path / "settings.json"
+    rows = await check({"fake": engines["fake"]}, {"gw": profile}, {"fake": "gw"}, settings)
+    assert [r[0] for r in rows if r[1] == "claude CLI"] == ["warn"]
+    write_claude_settings(settings, env, helper)
+    rows = await check({"fake": engines["fake"]}, {"gw": profile}, {"fake": "gw"}, settings)
+    assert [r[0] for r in rows if r[1] == "claude CLI"] == ["ok"]
+
+
 # the hub and API (need a database)
 
 
@@ -516,3 +586,18 @@ async def test_chats_take_the_new_model_list_when_their_agent_switches_gateway(m
         assert reply == gateway
         session = await managed.get_session(sid)
         assert [ch["value"] for ch in models(session)["options"]] == ["gw-small", "gw-big"]
+
+
+async def test_the_owners_claude_cli_follows_the_claude_agent_when_it_switches(managed, gateway, tmp_path):
+    settings = write(tmp_path / "claude-settings.json", json.dumps({"model": "opus[1m]"}))
+    object.__setattr__(managed.settings, "claude_settings", settings)
+    async with client(managed) as c:
+        await add_gw(c, gateway)
+        await c.put("/api/agents/fake/profile", json={"profile": "gw"})
+        on = json.loads(settings.read_text())
+        assert on["model"] == "opus[1m]" and on["env"]["ANTHROPIC_BASE_URL"] == gateway
+        assert on["apiKeyHelper"].startswith(str(KEY_HELPER)) and KEY not in settings.read_text()
+        await c.put("/api/agents/cx/profile", json={"profile": "gw"})  # Codex: the claude CLI does not care
+        assert json.loads(settings.read_text()) == on
+        await c.put("/api/agents/fake/profile", json={"profile": None})
+        assert json.loads(settings.read_text()) == {"model": "opus[1m]"}

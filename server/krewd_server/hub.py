@@ -33,7 +33,8 @@ from .attachments import Attachments, UnknownUpload, prompt_blocks
 from . import storage as store
 from .config import Profile, Settings
 from .logins import LoginError, Logins
-from .profiles import PRESETS, Gateways, ProfileError, check_gateway, set_key, slug, valid_url, write_profiles
+from .profiles import (PRESETS, Gateways, ProfileError, check_gateway, set_key, slug, valid_url,
+                       write_claude_settings, write_profiles)
 from .routines import Invalid
 from .voice import RULES as VOICE_RULES, Voice
 
@@ -294,6 +295,7 @@ class Hub:
         self.last_sent: dict[uuid.UUID, dict[str, Any]] = {}  # last session state emitted, to skip repeats
         self.default_timezone = rtn.local_timezone()
         self.scheduler: asyncio.Task | None = None
+        self.claude_cli_sync: asyncio.Task | None = None
         self.gateways = Gateways(settings.port)
         self.probe_failed: dict[str, float] = {}  # engine id -> when its last probe failed
         self.probe_tasks: set[asyncio.Task[None]] = set()  # probes in flight, stopped on close
@@ -336,13 +338,14 @@ class Hub:
         self.harness_sweeper = asyncio.create_task(self._sweep_harness_loop())
         self.scheduler = asyncio.create_task(self._schedule_loop())
         self.voice.start()
+        self.claude_cli_sync = asyncio.create_task(self.sync_claude_cli())  # asks the gateway: not before startup
 
     async def close(self) -> None:
         self.closing = True
         await self.logins.close()
         await self.alerts.close()
         await self.voice.close()
-        for task in (self.scheduler, self.harness_sweeper):
+        for task in (self.scheduler, self.harness_sweeper, self.claude_cli_sync):
             if task:
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
@@ -619,7 +622,26 @@ class Hub:
                 self.settings.agent_profiles.pop(engine_id, None)
             write_profiles(path, self.settings.profiles, self.settings.agent_profiles)
         await self._restart_agent(engine_id)
+        await self.sync_claude_cli()
         return next(a for a in self.agents()["agents"] if a["engine"] == engine_id)
+
+    async def sync_claude_cli(self) -> None:
+        """Keep the owner's own `claude` on what the Claude agent runs on: one provider for both. Writes only
+        Krewd's part of ~/.claude/settings.json (a profile's gateway and key helper; none on the sign-in account);
+        the key stays in its key file. Best effort: a problem is logged and `doctor` reports it."""
+        path = self.settings.claude_settings
+        if path is None:
+            return
+        try:
+            target = await self.gateways.claude_cli(self.settings.engines, self.settings.profiles,
+                                                    self.settings.agent_profiles)
+            if target is None:
+                return
+            what, env, helper = target
+            if await asyncio.to_thread(write_claude_settings, path, env, helper):
+                log.info("claude CLI settings (%s) now on %s", path, what)
+        except (ProfileError, OSError) as exc:
+            log.warning("could not bring the claude CLI settings in step with the Claude agent: %s", exc)
 
     async def _signed_in_changed(self, engine_id: str) -> None:
         """After a sign-in or sign-out: an agent on its sign-in account starts again on it."""
@@ -717,6 +739,8 @@ class Hub:
         for agent, used in list(self.settings.agent_profiles.items()):
             if used == new_id:
                 await self._restart_agent(agent)
+        if new_id in self.settings.agent_profiles.values():
+            await self.sync_claude_cli()
         return next(p for p in self.profiles()["profiles"] if p["id"] == new_id)
 
     async def delete_profile(self, profile_id: str) -> None:

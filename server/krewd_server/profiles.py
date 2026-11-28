@@ -20,6 +20,7 @@ import json
 import os
 import re
 import secrets
+import shlex
 import shutil
 import sys
 import time
@@ -233,6 +234,61 @@ def claude_defaults(listed: list[str]) -> dict[str, str]:
     return env
 
 
+# The owner's own `claude` follows the Claude agent (`Hub.sync_claude_cli`): ~/.claude/settings.json gets the agent's
+# profile, so one provider serves both. These are the settings Krewd owns there; everything else is left alone.
+CLAUDE_SETTINGS_ENV = ("ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY",
+                       "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY", "ANTHROPIC_MODEL", "ANTHROPIC_SMALL_FAST_MODEL")
+KEY_HELPER = Path(__file__).resolve().parents[2] / "deploy" / "claude-api-key"
+
+
+def key_helper_command(profile: Profile) -> str:
+    """Claude Code's `apiKeyHelper` for a profile: reads the key from its key file, so no key is in settings.json."""
+    return shlex.join([str(KEY_HELPER), str(profile.key_file), profile.key])
+
+
+def claude_settings(current: dict[str, Any], env: dict[str, str] | None, helper: str | None) -> dict[str, Any]:
+    """settings.json with Krewd's part set to a profile (its gateway env and key helper), or with None to nothing
+    of Krewd's, so the CLI uses its own sign-in. The owner's other settings and env stay as they are."""
+    out = copy.deepcopy(current)
+    old_env = out.get("env") or {}
+    if not isinstance(old_env, dict):
+        raise ProfileError("its env is not an object")
+    new_env = {k: v for k, v in old_env.items() if k not in CLAUDE_SETTINGS_ENV} | (env or {})
+    if new_env:
+        out["env"] = new_env
+    else:
+        out.pop("env", None)
+    if helper:
+        out["apiKeyHelper"] = helper
+    elif str(out.get("apiKeyHelper", "")).startswith(shlex.quote(str(KEY_HELPER))):
+        del out["apiKeyHelper"]  # only Krewd's own helper; one the owner set stays
+    return out
+
+
+def read_claude_settings(path: Path) -> dict[str, Any]:
+    try:
+        current = json.loads(path.read_text()) if path.is_file() else {}
+    except ValueError:
+        raise ProfileError(f"{path} is not valid JSON") from None
+    if not isinstance(current, dict):
+        raise ProfileError(f"{path} is not a JSON object")
+    return current
+
+
+def write_claude_settings(path: Path, env: dict[str, str] | None, helper: str | None) -> bool:
+    """Bring settings.json in step (see `claude_settings`); False when it already was. A link is followed."""
+    path = path.resolve()
+    current = read_claude_settings(path)
+    try:
+        wanted = claude_settings(current, env, helper)
+    except ProfileError as exc:
+        raise ProfileError(f"{path}: {exc}") from None
+    if wanted == current:
+        return False
+    _write_private(path, json.dumps(wanted, indent=2, ensure_ascii=False) + "\n")
+    return True
+
+
 def default_model(catalog: dict[str, Any]) -> str | None:
     listed = [m for m in catalog.get("models", []) if m.get("visibility", "list") == "list"]
     return listed[0]["slug"] if listed else None
@@ -320,22 +376,25 @@ class Gateways:
             self._models[(profile.id, url, True)] = (time.monotonic(), models)
         return claude_listed(models)
 
+    async def claude_gateway_env(self, engine: Engine, profile: Profile) -> dict[str, str]:
+        """The gateway and starting models for Claude Code on a profile, without the key: shared by the agent's
+        environment and the owner's own `claude` (`claude_settings`)."""
+        env = {
+            "ANTHROPIC_BASE_URL": profile.url_for(engine.gateway) or "",
+            "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY": "1",
+        }
+        try:
+            models = await self.claude_models(engine, profile)
+        except ProfileError:  # the gateway may not list models; Claude Code's own aliases still apply
+            models = []
+        return env | claude_defaults(models)
+
     async def engine_env(self, engine: Engine, profile: Profile) -> dict[str, str]:
         """Environment that points the engine at a profile's gateway (added to the engine's own env)."""
         key = self.key(profile)
         url = profile.url_for(engine.gateway)
         if engine.gateway == "claude":
-            env = {
-                "ANTHROPIC_BASE_URL": url or "",
-                "ANTHROPIC_AUTH_TOKEN": key,
-                "ANTHROPIC_API_KEY": "",
-                "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY": "1",
-            }
-            try:
-                models = await self.claude_models(engine, profile)
-            except ProfileError:  # the gateway may not list models; Claude Code's own aliases still apply
-                models = []
-            return env | claude_defaults(models)
+            return {"ANTHROPIC_AUTH_TOKEN": key, "ANTHROPIC_API_KEY": ""} | await self.claude_gateway_env(engine, profile)
         if engine.gateway == "codex":
             catalog = await self.codex_catalog(engine, profile)
             if not catalog["models"]:
@@ -355,6 +414,26 @@ class Gateways:
             return {profile.key: key, "MODEL_PROVIDER": provider, "CODEX_CONFIG": json.dumps(config)}
         raise ProfileError(f"engine {engine.id} cannot use gateways")
 
+    async def claude_cli(self, engines: dict[str, Engine], profiles: dict[str, Profile],
+                         agent_profiles: dict[str, str]) -> tuple[str, dict[str, str] | None, str | None] | None:
+        """What the owner's own `claude` should run on: (what, gateway env, key helper), env and helper None for
+        the sign-in account. None without a Claude agent; ProfileError when Claude agents run on different things."""
+        picks: dict[str | None, tuple[Engine, Profile | None]] = {}
+        for engine in engines.values():
+            if engine.gateway != "claude":
+                continue
+            profile = profiles.get(agent_profiles.get(engine.id, ""))
+            profile = profile if profile and profile.url_for(engine.gateway) else None
+            picks[profile.id if profile else None] = (engine, profile)
+        if not picks:
+            return None
+        if len(picks) > 1:
+            raise ProfileError("the Claude agents run on different profiles, so the claude CLI cannot follow them all")
+        engine, profile = next(iter(picks.values()))
+        if profile is None:
+            return "its sign-in account", None, None
+        return profile.name, await self.claude_gateway_env(engine, profile), key_helper_command(profile)
+
     def problem(self, profile: Profile) -> str | None:
         """Why a profile engine cannot start, as far as Krewd can tell without starting it."""
         if not profile.read_key():
@@ -363,8 +442,9 @@ class Gateways:
 
 
 async def check(engines: dict[str, Engine], profiles: dict[str, Profile],
-                agent_profiles: dict[str, str]) -> list[tuple[str, str, str]]:
-    """(status, label, detail) for each agent (what it runs on, its sign-in) and each profile it could use."""
+                agent_profiles: dict[str, str], claude_settings: Path | None = None) -> list[tuple[str, str, str]]:
+    """(status, label, detail) for each agent (what it runs on, its sign-in), each profile it could use, and
+    whether the owner's own `claude` (`claude_settings`) follows the Claude agent."""
     from .logins import Logins
 
     gateways = Gateways(port=0)
@@ -403,14 +483,34 @@ async def check(engines: dict[str, Engine], profiles: dict[str, Profile],
                         rows.append(("warn", label, "no models Claude Code can list for this key (it shows only its aliases)"))
             except ProfileError as exc:
                 rows.append(("bad", label, str(exc)))
+    if claude_settings is not None:
+        try:
+            target = await gateways.claude_cli(engines, profiles, agent_profiles)
+            if target:
+                what, env, helper = target
+                current = read_claude_settings(claude_settings)
+                if claude_settings_in_step(current, env, helper):
+                    rows.append(("ok", "claude CLI", f"{claude_settings} follows the Claude agent: {what}"))
+                else:
+                    rows.append(("warn", "claude CLI", f"{claude_settings} is not on {what} like the Claude agent:"
+                                 " restart Krewd (./master.sh restart) to bring it in step"))
+        except ProfileError as exc:
+            rows.append(("warn", "claude CLI", str(exc)))
     return rows
+
+
+def claude_settings_in_step(current: dict[str, Any], env: dict[str, str] | None, helper: str | None) -> bool:
+    try:
+        return claude_settings(current, env, helper) == current
+    except ProfileError:
+        return False
 
 
 def main() -> None:
     """`python -m krewd_server.profiles check`: one tab-separated line per profile engine, for doctor."""
     from pathlib import Path
 
-    from .config import CONFIG_DIR, load_agent_profiles, load_engines, load_env_file, load_profiles
+    from .config import CONFIG_DIR, claude_settings_path, load_agent_profiles, load_engines, load_env_file, load_profiles
 
     load_env_file()
     engines, _ = load_engines(Path(os.environ.get("KREWD_ENGINES_FILE", CONFIG_DIR / "engines.toml")))
@@ -418,7 +518,8 @@ def main() -> None:
     profiles = load_profiles(path)
     if len(sys.argv) < 2 or sys.argv[1] != "check":
         sys.exit("usage: python -m krewd_server.profiles check")
-    for status, engine_id, detail in asyncio.run(check(engines, profiles, load_agent_profiles(path))):
+    rows = asyncio.run(check(engines, profiles, load_agent_profiles(path), claude_settings_path()))
+    for status, engine_id, detail in rows:
         print(status, engine_id, detail, sep="\t")
 
 
