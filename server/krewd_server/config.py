@@ -107,6 +107,9 @@ class Settings:
     # Where the agents keep their session transcripts (storage report and cleanup). None: their defaults.
     claude_dir: Path | None = None
     codex_dir: Path | None = None
+    # The owner's own Claude Code settings, kept on the Claude agent's profile (KREWD_CLAUDE_SETTINGS, "off": left
+    # alone). None here (tests): never touched.
+    claude_settings: Path | None = None
     voice: "VoiceSettings" = field(default_factory=lambda: VoiceSettings())
 
     @property
@@ -229,7 +232,16 @@ def load_settings() -> Settings:
         passkey_certs=tuple(c.strip().replace(":", "").lower() for c in os.environ.get("KREWD_PASSKEY_CERTS", "").split(",")
                             if c.strip()),
         voice=load_voice_settings(Path(os.path.expanduser(os.environ.get("KREWD_DATA_DIR", "~/.krewd")))),
+        claude_settings=claude_settings_path(),
     )
+
+
+def claude_settings_path() -> Path | None:
+    """~/.claude/settings.json, which Krewd keeps on the Claude agent's profile; KREWD_CLAUDE_SETTINGS=off: none."""
+    value = os.environ.get("KREWD_CLAUDE_SETTINGS", "").strip()
+    if value.lower() in ("0", "off", "no", "false"):
+        return None
+    return Path(os.path.expanduser(value or "~/.claude/settings.json"))
 
 
 def load_voice_settings(data_dir: Path) -> VoiceSettings:
